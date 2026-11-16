@@ -103,7 +103,7 @@ impl<'a> ApiRequest<'a> {
 
     /// HTTPメソッドから決定した冪等性を上書きする。
     ///
-    /// Boxが重複を検出して409を返すPOSTなど、再送しても安全だとわかっているAPIで
+    /// BOXが重複を検出して409を返すPOSTなど、再送しても安全だとわかっているAPIで
     /// [`Idempotency::Idempotent`]を指定し、5xxおよびタイムアウトの後にも再試行させる。
     pub fn idempotency(mut self, idempotency: Idempotency) -> Self {
         self.idempotency = idempotency;

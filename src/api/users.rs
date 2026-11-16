@@ -4,7 +4,7 @@ use serde::Deserialize;
 
 use crate::{BoxClient, BoxClientResult, request::ApiRequest};
 
-/// Boxのユーザー
+/// BOXのユーザー
 #[derive(Debug, Clone, Deserialize)]
 pub struct User {
     /// ユーザーID

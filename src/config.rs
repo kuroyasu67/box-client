@@ -5,11 +5,11 @@ use serde::Deserialize;
 
 use crate::errors::{BoxClientError, BoxClientResult};
 
-/// Box設定
+/// BOX設定
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BoxConfig {
-    /// Boxアプリ設定
+    /// BOXアプリ設定
     pub box_app_settings: BoxAppSettings,
 
     /// エンタープライズID
@@ -17,7 +17,7 @@ pub struct BoxConfig {
     pub enterprise_id: String,
 }
 
-/// Boxアプリ設定
+/// BOXアプリ設定
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BoxAppSettings {
@@ -28,11 +28,11 @@ pub struct BoxAppSettings {
     /// クライアントシークレット
     pub client_secret: SecretString,
 
-    /// Boxアプリ認証情報
+    /// BOXアプリ認証情報
     pub app_auth: BoxAppAuth,
 }
 
-/// Boxアプリ認証情報
+/// BOXアプリ認証情報
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BoxAppAuth {
@@ -48,15 +48,15 @@ pub struct BoxAppAuth {
 }
 
 impl BoxConfig {
-    /// Box設定をファイルから読み込む。
+    /// BOX設定をファイルから読み込む。
     ///
     /// # Arguments
     ///
-    /// - `path`: Box設定ファイルのパス
+    /// - `path`: BOX設定ファイルのパス
     ///
     /// # Errors
     ///
-    /// ファイルを開けない場合、またはBox設定として解釈できない場合はエラーを返す。
+    /// ファイルを開けない場合、またはBOX設定として解釈できない場合はエラーを返す。
     pub fn from_file<P: AsRef<Path>>(path: P) -> BoxClientResult<Self> {
         let file = File::open(path).map_err(BoxClientError::OpenConfigFile)?;
         let reader = BufReader::new(file);
@@ -71,7 +71,7 @@ mod test_box_config {
 
     use super::*;
 
-    /// Box設定ファイルの形式のJSONを読み込めることを確認
+    /// BOX設定ファイルの形式のJSONを読み込めることを確認
     #[test]
     fn test_deserialize_box_config_json() -> anyhow::Result<()> {
         let json = r#"{
@@ -100,7 +100,7 @@ mod test_box_config {
         Ok(())
     }
 
-    /// Box設定ファイルが存在しない場合は、ファイルのオープンエラーを返すことを確認
+    /// BOX設定ファイルが存在しない場合は、ファイルのオープンエラーを返すことを確認
     #[test]
     fn test_from_file_not_found() {
         let result = BoxConfig::from_file("resources/tests/not_found.json");

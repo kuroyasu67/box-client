@@ -20,7 +20,7 @@ use crate::{
     },
 };
 
-/// BoxのトークンエンドポイントURL
+/// BOXのトークンエンドポイントURL
 pub(crate) const BOX_TOKEN_URL: &str = "https://api.box.com/oauth2/token";
 
 /// JWTベアラーによる許可タイプ
@@ -31,7 +31,7 @@ const BOX_SUB_TYPE_ENTERPRISE: &str = "enterprise";
 
 /// JWTアサーションの有効期間（秒）
 ///
-/// BoxはJWTアサーションの有効期限を発行から60秒以内とするよう求めるため、時刻のずれを考慮して60秒より短くする。
+/// BOXはJWTアサーションの有効期限を発行から60秒以内とするよう求めるため、時刻のずれを考慮して60秒より短くする。
 /// JWTアサーションはアクセストークンとの交換にだけ使うため、この値はアクセストークンの有効期間に影響しない。
 const ASSERTION_LIFETIME_SECS: u64 = 45;
 
@@ -53,7 +53,7 @@ impl AccessToken {
     }
 }
 
-/// アクセストークンと交換するために、Boxのトークンエンドポイントに送信するJWTアサーションを作成する署名者
+/// アクセストークンと交換するために、BOXのトークンエンドポイントに送信するJWTアサーションを作成する署名者
 ///
 /// 秘密鍵の復号は計算コストが高いため、作成時に1回だけ復号し、試行ごとに署名だけを行う。
 struct AssertionSigner {
@@ -78,7 +78,7 @@ impl AssertionSigner {
     ///
     /// # Arguments
     ///
-    /// - `config`: Box設定
+    /// - `config`: BOX設定
     /// - `audience`: JWTアサーションの受信者。トークンエンドポイントのURLを指定する。
     ///
     /// # Errors
@@ -108,7 +108,7 @@ impl AssertionSigner {
 
     /// 署名したJWTアサーションを作成する。
     ///
-    /// Boxは使用済みの`jti`を持つJWTアサーションを拒否するため、呼び出すたびに新しい`jti`と有効期限を設定する。
+    /// BOXは使用済みの`jti`を持つJWTアサーションを拒否するため、呼び出すたびに新しい`jti`と有効期限を設定する。
     ///
     /// # Errors
     ///
@@ -199,7 +199,7 @@ impl TokenManager {
     /// # Arguments
     ///
     /// - `http_client`: HTTPクライアント
-    /// - `config`: Box設定
+    /// - `config`: BOX設定
     /// - `token_url`: トークンエンドポイントのURL
     /// - `retry`: 再試行設定
     /// - `refresh_before_expiry`: 有効期限のどれだけ前にアクセストークンを取得し直すか
@@ -254,7 +254,7 @@ impl TokenManager {
         Ok(token)
     }
 
-    /// Boxに拒否されたアクセストークンをキャッシュから破棄する。
+    /// BOXに拒否されたアクセストークンをキャッシュから破棄する。
     ///
     /// キャッシュしているアクセストークンが`rejected`と異なる場合は、別のタスクがすでに取得し直しているため破棄しない。
     pub(crate) async fn invalidate(&self, rejected: &Arc<AccessToken>) {

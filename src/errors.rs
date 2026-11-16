@@ -3,20 +3,28 @@ use std::{fmt, time::Duration};
 use reqwest::StatusCode;
 use serde::Deserialize;
 
-/// Boxクライアントエラー型
+/// BOXクライアントエラー型
 #[derive(Debug, thiserror::Error)]
 pub enum BoxClientError {
-    /// Box設定ファイルのオープンエラー
+    /// BOX設定ファイルのオープンエラー
     #[error("Failed to open config file: {0}")]
     OpenConfigFile(std::io::Error),
 
-    /// Box設定ファイルの解析エラー
+    /// BOX設定ファイルの解析エラー
     #[error("Failed to parse config file: {0}")]
     ParseConfig(serde_json::Error),
 
     /// 再試行設定の不正エラー
     #[error("Invalid retry policy: {0}")]
     InvalidRetryPolicy(&'static str),
+
+    /// APIメソッドの引数の不正エラー
+    #[error("Invalid argument: {0}")]
+    InvalidArgument(&'static str),
+
+    /// BOXが想定外のレスポンスを返したエラー
+    #[error("Unexpected response: {0}")]
+    UnexpectedResponse(&'static str),
 
     /// ベースURLの不正エラー
     #[error("Invalid base URL: {0}")]
@@ -54,10 +62,10 @@ pub enum BoxClientError {
     #[error("HTTP request failed: {0}")]
     Http(#[from] reqwest::Error),
 
-    /// Boxのエラーレスポンス
+    /// BOXのエラーレスポンス
     ///
     /// エラー型のサイズを小さく保つため、詳細をヒープに確保する。
-    #[error("Box API request failed: {0}")]
+    #[error("BOX API request failed: {0}")]
     Api(Box<ApiError>),
 
     /// `Retry-After`ヘッダーが示す待機時間が上限を超えたエラー
@@ -71,10 +79,10 @@ pub enum BoxClientError {
     },
 }
 
-/// Boxクライアントの結果型
+/// BOXクライアントの結果型
 pub type BoxClientResult<T> = Result<T, BoxClientError>;
 
-/// Boxが返したエラーレスポンス
+/// BOXが返したエラーレスポンス
 ///
 /// REST APIは`code`、`message`および`request_id`を返し、トークンエンドポイントは`error`および
 /// `error_description`を返す。どちらの形式でも`code`と`message`で参照できるように正規化する。
@@ -89,14 +97,14 @@ pub struct ApiError {
     /// エラーメッセージ
     pub message: Option<String>,
 
-    /// Boxのサポートに問い合わせるときに使用するリクエストID
+    /// BOXのサポートに問い合わせるときに使用するリクエストID
     pub request_id: Option<String>,
 
     /// レスポンスボディ
     pub body: String,
 }
 
-/// Boxのエラーレスポンスのボディ
+/// BOXのエラーレスポンスのボディ
 #[derive(Deserialize)]
 struct ErrorBody {
     code: Option<String>,
@@ -109,7 +117,7 @@ struct ErrorBody {
 impl ApiError {
     /// HTTPステータスとレスポンスボディからエラーを作成する。
     ///
-    /// ボディをBoxのエラー形式として解釈できない場合は、`code`、`message`および`request_id`を`None`とする。
+    /// ボディをBOXのエラー形式として解釈できない場合は、`code`、`message`および`request_id`を`None`とする。
     pub(crate) fn new(status: StatusCode, body: String) -> Self {
         let (code, message, request_id) = match serde_json::from_str::<ErrorBody>(&body) {
             Ok(parsed) => (

@@ -1,0 +1,95 @@
+use serde::Deserialize;
+
+macro_rules! box_item_struct {
+    ($name: ident ) => {
+        #[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize)]
+        pub struct $name(pub String);
+
+        impl $name {
+            pub fn new(id: impl Into<String>) -> Self {
+                Self(id.into())
+            }
+        }
+
+        impl AsRef<str> for $name {
+            fn as_ref(&self) -> &str {
+                &self.0
+            }
+        }
+
+        impl std::fmt::Display for $name {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "{}", self.0)
+            }
+        }
+    };
+}
+
+box_item_struct!(FolderId);
+box_item_struct!(FileId);
+box_item_struct!(WebLinkId);
+
+impl FolderId {
+    pub fn root() -> Self {
+        FolderId::new("0")
+    }
+}
+
+/// フォルダ内の項目
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum BoxItem {
+    /// ファイル
+    File(FileItem),
+
+    /// フォルダ
+    Folder(FolderItem),
+
+    /// ウェブリンク
+    WebLink(WebLinkItem),
+
+    /// このクライアントが知らない種類の項目
+    ///
+    /// BOXが項目の種類を追加しても、ページ全体の取得を失敗させないために受け入れる。
+    #[serde(other)]
+    Unknown,
+}
+
+/// フォルダ内のファイル
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct FileItem {
+    /// ファイルID
+    pub id: FileId,
+
+    /// ファイル名
+    pub name: String,
+
+    /// ファイルのバージョンを識別するETag
+    pub etag: Option<String>,
+}
+
+/// フォルダ内のフォルダ
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct FolderItem {
+    /// フォルダID
+    pub id: FolderId,
+
+    /// フォルダ名
+    pub name: String,
+
+    /// フォルダのバージョンを識別するETag
+    pub etag: Option<String>,
+}
+
+/// フォルダ内のウェブリンク
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct WebLinkItem {
+    /// ウェブリンクID
+    pub id: WebLinkId,
+
+    /// ウェブリンク名
+    pub name: String,
+
+    /// ウェブリンクのバージョンを識別するETag
+    pub etag: Option<String>,
+}

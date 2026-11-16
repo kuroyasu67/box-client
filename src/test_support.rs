@@ -17,7 +17,7 @@ use crate::{
 /// トークンエンドポイントのパス
 pub(crate) const TOKEN_PATH: &str = "/oauth2/token";
 
-/// テスト用のBox設定を返す。
+/// テスト用のBOX設定を返す。
 ///
 /// 秘密鍵はテスト専用に生成した鍵である。
 pub(crate) fn test_config() -> BoxConfig {
@@ -69,7 +69,7 @@ pub(crate) async fn request_count(server: &MockServer) -> usize {
     server.received_requests().await.map_or(0, |r| r.len())
 }
 
-/// モックサーバーに接続するBoxクライアントを作成する。
+/// モックサーバーに接続するBOXクライアントを作成する。
 ///
 /// 呼び出し側がエラーの種類を検証できるように、エラーを`BoxClientError`のまま返す。
 pub(crate) async fn create_client(
@@ -79,7 +79,7 @@ pub(crate) async fn create_client(
     create_client_with_timeout(server, retry, Duration::from_secs(2)).await
 }
 
-/// タイムアウトを指定して、モックサーバーに接続するBoxクライアントを作成する。
+/// タイムアウトを指定して、モックサーバーに接続するBOXクライアントを作成する。
 pub(crate) async fn create_client_with_timeout(
     server: &MockServer,
     retry: RetryPolicy,

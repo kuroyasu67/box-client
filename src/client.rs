@@ -18,7 +18,7 @@ use crate::{
     },
 };
 
-/// BoxのREST APIのベースURL
+/// BOXのREST APIのベースURL
 const BOX_API_BASE_URL: &str = "https://api.box.com/2.0";
 
 /// アクセストークンを有効期限のどれだけ前に取得し直すかの既定値
@@ -26,15 +26,15 @@ const BOX_API_BASE_URL: &str = "https://api.box.com/2.0";
 /// <https://developer.box.com/guides/api-calls/permissions-and-errors/expiration>
 ///
 /// 上記ドキュメントによると、アクセストークンは発行から60分後に期限切れになる。
-/// ただし、Boxが発行した時刻と、クライアントがトークンレスポンスを受信して有効期限を計算した時刻にはずれがある。
-/// また、キャッシュからアクセストークンを取り出してから、Boxがリクエストを受信して検証するまでに、
+/// ただし、BOXが発行した時刻と、クライアントがトークンレスポンスを受信して有効期限を計算した時刻にはずれがある。
+/// また、キャッシュからアクセストークンを取り出してから、BOXがリクエストを受信して検証するまでに、
 /// 接続の確立などで時間がかかる。
 /// これらの時間を十分に上回るように60秒とし、有効期限の60秒前、つまり発行から約59分後に取得し直す。
 const DEFAULT_REFRESH_BEFORE_EXPIRY: Duration = Duration::from_secs(60);
 
-/// Boxクライアント
+/// BOXクライアント
 ///
-/// BoxのAPIを呼び出すそれぞれのメソッドは、再試行設定に従って待機と再試行を行い、アクセストークンの
+/// BOXのAPIを呼び出すそれぞれのメソッドは、再試行設定に従って待機と再試行を行い、アクセストークンの
 /// 有効期限が近づくと自動でアクセストークンを再取得する。
 ///
 /// APIメソッドを追加するときは、[`ApiRequest`]を組み立てて[`BoxClient::send_json`]または
@@ -54,11 +54,11 @@ pub struct BoxClient {
 }
 
 impl BoxClient {
-    /// Boxクライアントのビルダーを返す。
+    /// BOXクライアントのビルダーを返す。
     ///
     /// # Arguments
     ///
-    /// - `config`: Box設定
+    /// - `config`: BOX設定
     pub fn builder(config: BoxConfig) -> BoxClientBuilder {
         BoxClientBuilder {
             config,
@@ -116,8 +116,8 @@ impl BoxClient {
 
     /// リクエストを1回送信し、成功レスポンスを`handle`で処理する。
     ///
-    /// Boxがアクセストークンを拒否して401を返した場合は、アクセストークンを取得し直して1回だけ再送する。
-    /// 401はBoxがリクエストを処理していないことを示すため、冪等でないリクエストでも再送できる。
+    /// BOXがアクセストークンを拒否して401を返した場合は、アクセストークンを取得し直して1回だけ再送する。
+    /// 401はBOXがリクエストを処理していないことを示すため、冪等でないリクエストでも再送できる。
     async fn attempt<T, F, Fut>(
         &self,
         request: &ApiRequest<'_>,
@@ -168,9 +168,9 @@ impl BoxClient {
     }
 }
 
-/// Boxクライアントのビルダー
+/// BOXクライアントのビルダー
 pub struct BoxClientBuilder {
-    /// Box設定
+    /// BOX設定
     config: BoxConfig,
 
     /// タイムアウト設定
@@ -182,10 +182,10 @@ pub struct BoxClientBuilder {
     /// アクセストークンを有効期限のどれだけ前に取得し直すか
     refresh_before_expiry: Duration,
 
-    /// REST APIのベースURL。`None`の場合はBoxのURLを使用する。
+    /// REST APIのベースURL。`None`の場合はBOXのURLを使用する。
     api_base_url: Option<Url>,
 
-    /// トークンエンドポイントのURL。`None`の場合はBoxのURLを使用する。
+    /// トークンエンドポイントのURL。`None`の場合はBOXのURLを使用する。
     token_url: Option<String>,
 }
 
@@ -218,7 +218,7 @@ impl BoxClientBuilder {
         self
     }
 
-    /// Boxクライアントを作成する。
+    /// BOXクライアントを作成する。
     ///
     /// 設定の誤りに起動時に気づけるように、最初のアクセストークンをここで取得する。
     ///
@@ -255,7 +255,7 @@ impl BoxClientBuilder {
     }
 }
 
-/// Boxクライアントのタイムアウト設定
+/// BOXクライアントのタイムアウト設定
 #[derive(Debug, Clone)]
 pub struct BoxClientTimeout {
     /// 接続の開始からレスポンスボディの受信完了までのタイムアウト
@@ -345,7 +345,7 @@ mod test_box_client {
         Ok(ApiRequest::new(method.parse()?, ["items", "1"]))
     }
 
-    /// Boxクライアントを作成するときに、アクセストークンを取得することを確認
+    /// BOXクライアントを作成するときに、アクセストークンを取得することを確認
     #[tokio::test]
     async fn test_build_fetches_access_token() -> anyhow::Result<()> {
         let server = MockServer::start().await;
@@ -358,7 +358,7 @@ mod test_box_client {
         Ok(())
     }
 
-    /// アクセストークンを取得できない場合は、Boxクライアントの作成に失敗することを確認
+    /// アクセストークンを取得できない場合は、BOXクライアントの作成に失敗することを確認
     #[tokio::test]
     async fn test_build_fails_without_access_token() -> anyhow::Result<()> {
         let server = MockServer::start().await;
@@ -553,7 +553,7 @@ mod test_box_client {
         Ok(())
     }
 
-    /// Boxのエラーレスポンスから、エラーコード、メッセージおよびリクエストIDを取り出すことを確認
+    /// BOXのエラーレスポンスから、エラーコード、メッセージおよびリクエストIDを取り出すことを確認
     #[tokio::test]
     async fn test_send_returns_api_error() -> anyhow::Result<()> {
         let server = MockServer::start().await;
@@ -664,7 +664,7 @@ mod test_box_client {
             matches!(result, Err(BoxClientError::InvalidPathSegment(_))),
             "result: {result:?}"
         );
-        // Boxクライアントの作成時に送信したトークンリクエストだけを受信している。
+        // BOXクライアントの作成時に送信したトークンリクエストだけを受信している。
         assert_eq!(
             server.received_requests().await.unwrap_or_default().len(),
             1
@@ -673,7 +673,7 @@ mod test_box_client {
         Ok(())
     }
 
-    /// `ThreadRng`を使用しても、リクエストを送信するfutureとBoxクライアントを作成するfutureが`Send`を実装し、`tokio::spawn`に渡せることを確認
+    /// `ThreadRng`を使用しても、リクエストを送信するfutureとBOXクライアントを作成するfutureが`Send`を実装し、`tokio::spawn`に渡せることを確認
     #[tokio::test]
     async fn test_send_future_is_send() -> anyhow::Result<()> {
         fn assert_send<T: Send>(_: &T) {}

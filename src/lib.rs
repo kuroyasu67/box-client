@@ -1,4 +1,4 @@
-mod api;
+pub mod api;
 mod assertion_claims;
 mod auth;
 mod client;
@@ -9,6 +9,7 @@ mod retry;
 #[cfg(test)]
 mod test_support;
 
+pub use api::models::{BoxItem, FileItem, FolderId, FolderItem, WebLinkItem};
 pub use api::users::User;
 pub use client::{BoxClient, BoxClientBuilder, BoxClientTimeout};
 pub use config::{BoxAppAuth, BoxAppSettings, BoxConfig};
