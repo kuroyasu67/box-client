@@ -1,0 +1,691 @@
+use std::{future::Future, time::Duration};
+
+use reqwest::{
+    Response, StatusCode, Url,
+    header::{CONTENT_TYPE, HeaderValue},
+};
+use serde::de::DeserializeOwned;
+use tracing::Instrument as _;
+
+use crate::{
+    auth::{BOX_TOKEN_URL, TokenManager},
+    config::BoxConfig,
+    errors::{BoxClientError, BoxClientResult},
+    request::ApiRequest,
+    retry::{
+        AttemptError, RetryPolicy, classify_error_response, classify_transport_error,
+        run_with_retry,
+    },
+};
+
+/// BoxのREST APIのベースURL
+const BOX_API_BASE_URL: &str = "https://api.box.com/2.0";
+
+/// アクセストークンを有効期限のどれだけ前に取得し直すかの既定値
+///
+/// <https://developer.box.com/guides/api-calls/permissions-and-errors/expiration>
+///
+/// 上記ドキュメントによると、アクセストークンは発行から60分後に期限切れになる。
+/// ただし、Boxが発行した時刻と、クライアントがトークンレスポンスを受信して有効期限を計算した時刻にはずれがある。
+/// また、キャッシュからアクセストークンを取り出してから、Boxがリクエストを受信して検証するまでに、
+/// 接続の確立などで時間がかかる。
+/// これらの時間を十分に上回るように60秒とし、有効期限の60秒前、つまり発行から約59分後に取得し直す。
+const DEFAULT_REFRESH_BEFORE_EXPIRY: Duration = Duration::from_secs(60);
+
+/// Boxクライアント
+///
+/// BoxのAPIを呼び出すそれぞれのメソッドは、再試行設定に従って待機と再試行を行い、アクセストークンの
+/// 有効期限が近づくと自動でアクセストークンを再取得する。
+///
+/// APIメソッドを追加するときは、[`ApiRequest`]を組み立てて[`BoxClient::send_json`]または
+/// [`BoxClient::send_empty`]に渡す。
+pub struct BoxClient {
+    /// HTTPクライアント
+    http_client: reqwest::Client,
+
+    /// REST APIのベースURL
+    api_base_url: Url,
+
+    /// 再試行設定
+    retry: RetryPolicy,
+
+    /// トークン管理者
+    token_manager: TokenManager,
+}
+
+impl BoxClient {
+    /// Boxクライアントのビルダーを返す。
+    ///
+    /// # Arguments
+    ///
+    /// - `config`: Box設定
+    pub fn builder(config: BoxConfig) -> BoxClientBuilder {
+        BoxClientBuilder {
+            config,
+            timeout: BoxClientTimeout::default(),
+            retry: RetryPolicy::default(),
+            refresh_before_expiry: DEFAULT_REFRESH_BEFORE_EXPIRY,
+            api_base_url: None,
+            token_url: None,
+        }
+    }
+
+    /// リクエストを送信し、成功レスポンスのJSONボディをデシリアライズして返す。
+    ///
+    /// ボディの受信中に失敗した場合も、冪等なリクエストであれば再試行する。
+    ///
+    /// # Errors
+    ///
+    /// 再試行できないエラーが発生した場合、または再試行回数の上限に達した場合はエラーを返す。
+    pub async fn send_json<T: DeserializeOwned>(
+        &self,
+        request: ApiRequest<'_>,
+    ) -> BoxClientResult<T> {
+        self.send(request, Response::json::<T>).await
+    }
+
+    /// リクエストを送信し、成功レスポンスのボディを読まずに破棄する。
+    ///
+    /// 204 No Contentを返すDELETEなどに使用する。
+    ///
+    /// # Errors
+    ///
+    /// 再試行できないエラーが発生した場合、または再試行回数の上限に達した場合はエラーを返す。
+    pub async fn send_empty(&self, request: ApiRequest<'_>) -> BoxClientResult<()> {
+        self.send(request, |_| std::future::ready(Ok(()))).await
+    }
+
+    /// 再試行設定に従ってリクエストを送信し、成功レスポンスを`handle`で処理した結果を返す。
+    async fn send<T, F, Fut>(&self, request: ApiRequest<'_>, handle: F) -> BoxClientResult<T>
+    where
+        F: Fn(Response) -> Fut,
+        Fut: Future<Output = reqwest::Result<T>>,
+    {
+        let url = request.url(&self.api_base_url)?;
+        let span = tracing::info_span!(
+            "box_api_request",
+            method = %request.method,
+            path = url.path(),
+        );
+        run_with_retry(&self.retry, "box_api_request", || {
+            self.attempt(&request, &url, &handle)
+        })
+        .instrument(span)
+        .await
+    }
+
+    /// リクエストを1回送信し、成功レスポンスを`handle`で処理する。
+    ///
+    /// Boxがアクセストークンを拒否して401を返した場合は、アクセストークンを取得し直して1回だけ再送する。
+    /// 401はBoxがリクエストを処理していないことを示すため、冪等でないリクエストでも再送できる。
+    async fn attempt<T, F, Fut>(
+        &self,
+        request: &ApiRequest<'_>,
+        url: &Url,
+        handle: &F,
+    ) -> Result<T, AttemptError>
+    where
+        F: Fn(Response) -> Fut,
+        Fut: Future<Output = reqwest::Result<T>>,
+    {
+        let idempotency = request.idempotency;
+        let mut token_refreshed = false;
+        loop {
+            let token = self
+                .token_manager
+                .access_token()
+                .await
+                .map_err(AttemptError::Fatal)?;
+            let mut builder = self
+                .http_client
+                .request(request.method.clone(), url.clone())
+                .bearer_auth(token.secret());
+            if let Some(body) = &request.json_body {
+                builder = builder
+                    .header(CONTENT_TYPE, HeaderValue::from_static("application/json"))
+                    .body(body.clone());
+            }
+            let response = builder
+                .send()
+                .await
+                .map_err(|e| classify_transport_error(e, idempotency))?;
+
+            let status = response.status();
+            if status == StatusCode::UNAUTHORIZED && !token_refreshed {
+                tracing::warn!("access token was rejected; fetching a new one and resending");
+                self.token_manager.invalidate(&token).await;
+                token_refreshed = true;
+                continue;
+            }
+            if !status.is_success() {
+                return Err(classify_error_response(response, idempotency).await);
+            }
+
+            return handle(response)
+                .await
+                .map_err(|e| classify_transport_error(e, idempotency));
+        }
+    }
+}
+
+/// Boxクライアントのビルダー
+pub struct BoxClientBuilder {
+    /// Box設定
+    config: BoxConfig,
+
+    /// タイムアウト設定
+    timeout: BoxClientTimeout,
+
+    /// 再試行設定
+    retry: RetryPolicy,
+
+    /// アクセストークンを有効期限のどれだけ前に取得し直すか
+    refresh_before_expiry: Duration,
+
+    /// REST APIのベースURL。`None`の場合はBoxのURLを使用する。
+    api_base_url: Option<Url>,
+
+    /// トークンエンドポイントのURL。`None`の場合はBoxのURLを使用する。
+    token_url: Option<String>,
+}
+
+impl BoxClientBuilder {
+    /// タイムアウト設定を指定する。
+    pub fn timeout(mut self, timeout: BoxClientTimeout) -> Self {
+        self.timeout = timeout;
+        self
+    }
+
+    /// 再試行設定を指定する。
+    ///
+    /// アクセストークンの取得とREST APIの呼び出しの両方に適用する。
+    pub fn retry(mut self, retry: RetryPolicy) -> Self {
+        self.retry = retry;
+        self
+    }
+
+    /// アクセストークンを有効期限のどれだけ前に取得し直すかを指定する。既定値は60秒とする。
+    pub fn refresh_before_expiry(mut self, refresh_before_expiry: Duration) -> Self {
+        self.refresh_before_expiry = refresh_before_expiry;
+        self
+    }
+
+    /// テストでモックサーバーに接続できるように、REST APIとトークンエンドポイントのURLを指定する。
+    #[cfg(test)]
+    pub(crate) fn endpoints(mut self, api_base_url: Url, token_url: String) -> Self {
+        self.api_base_url = Some(api_base_url);
+        self.token_url = Some(token_url);
+        self
+    }
+
+    /// Boxクライアントを作成する。
+    ///
+    /// 設定の誤りに起動時に気づけるように、最初のアクセストークンをここで取得する。
+    ///
+    /// # Errors
+    ///
+    /// HTTPクライアントを作成できない場合、秘密鍵を復号できない場合、
+    /// またはアクセストークンを取得できない場合はエラーを返す。
+    pub async fn build(self) -> BoxClientResult<BoxClient> {
+        let api_base_url = match self.api_base_url {
+            Some(url) => url,
+            None => Url::parse(BOX_API_BASE_URL)
+                .map_err(|e| BoxClientError::InvalidBaseUrl(format!("{BOX_API_BASE_URL}: {e}")))?,
+        };
+        let token_url = self.token_url.unwrap_or_else(|| BOX_TOKEN_URL.to_owned());
+        let http_client = reqwest::Client::builder()
+            .timeout(self.timeout.request_timeout)
+            .connect_timeout(self.timeout.connect_timeout)
+            .build()?;
+        let token_manager = TokenManager::new(
+            http_client.clone(),
+            &self.config,
+            token_url,
+            self.retry.clone(),
+            self.refresh_before_expiry,
+        )?;
+        token_manager.access_token().await?;
+
+        Ok(BoxClient {
+            http_client,
+            api_base_url,
+            retry: self.retry,
+            token_manager,
+        })
+    }
+}
+
+/// Boxクライアントのタイムアウト設定
+#[derive(Debug, Clone)]
+pub struct BoxClientTimeout {
+    /// 接続の開始からレスポンスボディの受信完了までのタイムアウト
+    pub request_timeout: Duration,
+
+    /// 接続が確立するまでのタイムアウト
+    pub connect_timeout: Duration,
+}
+
+impl Default for BoxClientTimeout {
+    /// レスポンスボディの受信完了までを30秒、接続の確立までを10秒でタイムアウトさせる設定を返す。
+    fn default() -> Self {
+        Self {
+            request_timeout: Duration::from_secs(30),
+            connect_timeout: Duration::from_secs(10),
+        }
+    }
+}
+
+#[cfg(test)]
+mod test_box_client {
+    use rstest::rstest;
+    use serde_json::json;
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{body_json, header, method, path},
+    };
+
+    use super::*;
+    use crate::{
+        retry::Idempotency,
+        test_support::{
+            TOKEN_PATH, create_client, create_client_with_timeout, mount_token, short_retry,
+            test_config,
+        },
+    };
+
+    /// APIのパス
+    const API_PATH: &str = "/2.0/items/1";
+
+    /// `API_PATH`へのリクエストを数える。
+    async fn api_request_count(server: &MockServer) -> usize {
+        server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .iter()
+            .filter(|r| r.url.path() == API_PATH)
+            .count()
+    }
+
+    /// トークンエンドポイントへのリクエストを数える。
+    async fn token_request_count(server: &MockServer) -> usize {
+        server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .iter()
+            .filter(|r| r.url.path() == TOKEN_PATH)
+            .count()
+    }
+
+    /// 最初の`n`回だけAPIが`response`を返すモックを登録する。
+    async fn mount_api_first_n(server: &MockServer, response: ResponseTemplate, n: u64) {
+        Mock::given(path(API_PATH))
+            .respond_with(response)
+            .up_to_n_times(n)
+            .mount(server)
+            .await;
+    }
+
+    /// APIが常に`response`を返すモックを登録する。
+    async fn mount_api_always(server: &MockServer, response: ResponseTemplate) {
+        Mock::given(path(API_PATH))
+            .respond_with(response)
+            .mount(server)
+            .await;
+    }
+
+    /// 成功レスポンスを返す。
+    fn ok_response() -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_json(json!({"id": "1"}))
+    }
+
+    /// テストで送信するリクエストを返す。
+    fn request(method: &str) -> anyhow::Result<ApiRequest<'static>> {
+        Ok(ApiRequest::new(method.parse()?, ["items", "1"]))
+    }
+
+    /// Boxクライアントを作成するときに、アクセストークンを取得することを確認
+    #[tokio::test]
+    async fn test_build_fetches_access_token() -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+
+        create_client(&server, short_retry(0)?).await?;
+
+        assert_eq!(token_request_count(&server).await, 1);
+
+        Ok(())
+    }
+
+    /// アクセストークンを取得できない場合は、Boxクライアントの作成に失敗することを確認
+    #[tokio::test]
+    async fn test_build_fails_without_access_token() -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        Mock::given(path(TOKEN_PATH))
+            .respond_with(ResponseTemplate::new(400))
+            .mount(&server)
+            .await;
+
+        let result = create_client(&server, short_retry(0)?).await;
+
+        assert!(
+            matches!(&result, Err(BoxClientError::Api(e)) if e.status == 400),
+            "result: {:?}",
+            result.err()
+        );
+
+        Ok(())
+    }
+
+    /// アクセストークンをBearer認証で送信し、レスポンスのJSONをデシリアライズすることを確認
+    #[tokio::test]
+    async fn test_send_json() -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        Mock::given(method("GET"))
+            .and(path(API_PATH))
+            .and(header("authorization", "Bearer access-token"))
+            .respond_with(ok_response())
+            .mount(&server)
+            .await;
+        let client = create_client(&server, short_retry(0)?).await?;
+
+        let value: serde_json::Value = client.send_json(request("GET")?).await?;
+
+        assert_eq!(value, json!({"id": "1"}));
+
+        Ok(())
+    }
+
+    /// リクエストボディをJSONとして送信することを確認
+    #[tokio::test]
+    async fn test_send_json_with_body() -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        Mock::given(method("POST"))
+            .and(path(API_PATH))
+            .and(header("content-type", "application/json"))
+            .and(body_json(json!({"name": "new"})))
+            .respond_with(ok_response())
+            .mount(&server)
+            .await;
+        let client = create_client(&server, short_retry(0)?).await?;
+
+        let value: serde_json::Value = client
+            .send_json(request("POST")?.json(&json!({"name": "new"}))?)
+            .await?;
+
+        assert_eq!(value, json!({"id": "1"}));
+
+        Ok(())
+    }
+
+    /// ボディのない成功レスポンスを受け取れることを確認
+    #[tokio::test]
+    async fn test_send_empty() -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        mount_api_always(&server, ResponseTemplate::new(204)).await;
+        let client = create_client(&server, short_retry(0)?).await?;
+
+        client.send_empty(request("DELETE")?).await?;
+
+        assert_eq!(api_request_count(&server).await, 1);
+
+        Ok(())
+    }
+
+    /// ステータスとHTTPメソッドの冪等性に応じて、再試行するかどうかを決めることを確認
+    #[rstest]
+    #[case::get_429("GET", 429, 2)]
+    #[case::post_429("POST", 429, 2)]
+    #[case::get_500("GET", 500, 2)]
+    #[case::put_503("PUT", 503, 2)]
+    #[case::delete_500("DELETE", 500, 2)]
+    #[case::post_500("POST", 500, 1)]
+    #[case::get_404("GET", 404, 1)]
+    #[tokio::test]
+    async fn test_send_retries_by_status_and_idempotency(
+        #[case] method: &str,
+        #[case] status: u16,
+        #[case] expected_requests: usize,
+    ) -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        mount_api_first_n(&server, ResponseTemplate::new(status), 1).await;
+        mount_api_always(&server, ok_response()).await;
+        let client = create_client(&server, short_retry(1)?).await?;
+
+        let result: BoxClientResult<serde_json::Value> = client.send_json(request(method)?).await;
+
+        assert_eq!(result.is_ok(), expected_requests == 2, "result: {result:?}");
+        assert_eq!(api_request_count(&server).await, expected_requests);
+
+        Ok(())
+    }
+
+    /// 冪等でないリクエストでも、冪等性を上書きすれば5xxの後に再試行することを確認
+    #[tokio::test]
+    async fn test_send_retries_overridden_idempotency() -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        mount_api_first_n(&server, ResponseTemplate::new(500), 1).await;
+        mount_api_always(&server, ok_response()).await;
+        let client = create_client(&server, short_retry(1)?).await?;
+
+        let _: serde_json::Value = client
+            .send_json(request("POST")?.idempotency(Idempotency::Idempotent))
+            .await?;
+
+        assert_eq!(api_request_count(&server).await, 2);
+
+        Ok(())
+    }
+
+    /// タイムアウトの後は、冪等なリクエストのみ再試行することを確認
+    #[rstest]
+    #[case::get("GET", 2)]
+    #[case::post("POST", 1)]
+    #[tokio::test]
+    async fn test_send_retries_timeout_by_idempotency(
+        #[case] method: &str,
+        #[case] expected_requests: usize,
+    ) -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        mount_api_always(&server, ok_response().set_delay(Duration::from_secs(1))).await;
+        let client =
+            create_client_with_timeout(&server, short_retry(1)?, Duration::from_millis(200))
+                .await?;
+
+        let result: BoxClientResult<serde_json::Value> = client.send_json(request(method)?).await;
+
+        assert!(
+            matches!(&result, Err(BoxClientError::Http(e)) if e.is_timeout()),
+            "result: {result:?}"
+        );
+        assert_eq!(api_request_count(&server).await, expected_requests);
+
+        Ok(())
+    }
+
+    /// 401を受けた場合は、アクセストークンを取得し直して1回だけ再送することを確認
+    #[rstest]
+    #[case::get("GET")]
+    #[case::post("POST")]
+    #[tokio::test]
+    async fn test_send_refreshes_token_once_on_unauthorized(
+        #[case] method: &str,
+    ) -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        mount_api_first_n(&server, ResponseTemplate::new(401), 1).await;
+        mount_api_always(&server, ok_response()).await;
+        // 再試行回数を0にし、再送が再試行回数に含まれないことも確かめる。
+        let client = create_client(&server, short_retry(0)?).await?;
+
+        let _: serde_json::Value = client.send_json(request(method)?).await?;
+
+        assert_eq!(api_request_count(&server).await, 2);
+        // 構築時に1回、401の後に1回取得する。
+        assert_eq!(token_request_count(&server).await, 2);
+
+        Ok(())
+    }
+
+    /// アクセストークンを取得し直しても401を受けた場合は、エラーを返すことを確認
+    #[tokio::test]
+    async fn test_send_fails_on_repeated_unauthorized() -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        mount_api_always(&server, ResponseTemplate::new(401)).await;
+        let client = create_client(&server, short_retry(2)?).await?;
+
+        let result: BoxClientResult<serde_json::Value> = client.send_json(request("GET")?).await;
+
+        assert!(
+            matches!(&result, Err(BoxClientError::Api(e)) if e.status == 401),
+            "result: {result:?}"
+        );
+        assert_eq!(api_request_count(&server).await, 2);
+
+        Ok(())
+    }
+
+    /// Boxのエラーレスポンスから、エラーコード、メッセージおよびリクエストIDを取り出すことを確認
+    #[tokio::test]
+    async fn test_send_returns_api_error() -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        mount_api_always(
+            &server,
+            ResponseTemplate::new(404).set_body_json(json!({
+                "type": "error",
+                "status": 404,
+                "code": "not_found",
+                "message": "Not Found",
+                "request_id": "request-id",
+            })),
+        )
+        .await;
+        let client = create_client(&server, short_retry(2)?).await?;
+
+        let result: BoxClientResult<serde_json::Value> = client.send_json(request("GET")?).await;
+
+        match result {
+            Err(BoxClientError::Api(e)) => {
+                assert_eq!(e.status, 404);
+                assert_eq!(e.code.as_deref(), Some("not_found"));
+                assert_eq!(e.message.as_deref(), Some("Not Found"));
+                assert_eq!(e.request_id.as_deref(), Some("request-id"));
+            }
+            other => anyhow::bail!("unexpected result: {other:?}"),
+        }
+
+        Ok(())
+    }
+
+    /// 成功レスポンスのJSONを解釈できない場合は、再試行せずにエラーを返すことを確認
+    #[tokio::test]
+    async fn test_send_json_does_not_retry_decode_error() -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        mount_api_always(
+            &server,
+            ResponseTemplate::new(200).set_body_string("not json"),
+        )
+        .await;
+        let client = create_client(&server, short_retry(2)?).await?;
+
+        let result: BoxClientResult<serde_json::Value> = client.send_json(request("GET")?).await;
+
+        assert!(
+            matches!(&result, Err(BoxClientError::Http(e)) if e.is_decode()),
+            "result: {result:?}"
+        );
+        assert_eq!(api_request_count(&server).await, 1);
+
+        Ok(())
+    }
+
+    /// 接続できない場合は、冪等でないリクエストでも最大再試行回数まで再試行した後に接続エラーを返すことを確認
+    #[rstest]
+    #[case::no_retry(0)]
+    #[case::one_retry(1)]
+    #[case::two_retries(2)]
+    #[tokio::test]
+    async fn test_send_retries_connection_error(#[case] max_retries: u32) -> anyhow::Result<()> {
+        // 接続を拒否されたリクエストはモックサーバーに届かず、リクエストの数を数えられない。
+        // したがって、ジッターをなくして毎回の待機時間を`DELAY`に固定し、経過時間から再試行回数を確かめる。
+        // ローカルホストへの接続はすぐに拒否されるため、`DELAY`を十分に長くして、接続にかかる時間と区別する。
+        const DELAY: Duration = Duration::from_millis(500);
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        // wiremockはMockServerを破棄しても待ち受けを続けるため、OSが割り当てたポートを閉じて、
+        // 接続を拒否されるURLを用意する。
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+        let api_base_url = Url::parse(&format!("http://{}/2.0", listener.local_addr()?))?;
+        drop(listener);
+        let client = BoxClient::builder(test_config())
+            .retry(RetryPolicy::new(max_retries, DELAY, DELAY, Duration::ZERO)?)
+            .endpoints(api_base_url, format!("{}{TOKEN_PATH}", server.uri()))
+            .build()
+            .await?;
+
+        let started_at = std::time::Instant::now();
+        let result: BoxClientResult<serde_json::Value> = client.send_json(request("POST")?).await;
+        let elapsed = started_at.elapsed();
+
+        assert!(
+            matches!(&result, Err(BoxClientError::Http(e)) if e.is_connect()),
+            "result: {result:?}"
+        );
+        // 再試行した回数だけ`DELAY`を待機し、それ以上は待機していない。
+        assert!(
+            DELAY * max_retries <= elapsed && elapsed < DELAY * (max_retries + 1),
+            "elapsed: {elapsed:?}"
+        );
+
+        Ok(())
+    }
+
+    /// パス要素が不正な場合は、リクエストを送信せずにエラーを返すことを確認
+    #[tokio::test]
+    async fn test_send_rejects_invalid_path_segment() -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        let client = create_client(&server, short_retry(2)?).await?;
+
+        let result: BoxClientResult<serde_json::Value> =
+            client.send_json(ApiRequest::get(["items", ".."])).await;
+
+        assert!(
+            matches!(result, Err(BoxClientError::InvalidPathSegment(_))),
+            "result: {result:?}"
+        );
+        // Boxクライアントの作成時に送信したトークンリクエストだけを受信している。
+        assert_eq!(
+            server.received_requests().await.unwrap_or_default().len(),
+            1
+        );
+
+        Ok(())
+    }
+
+    /// `ThreadRng`を使用しても、リクエストを送信するfutureとBoxクライアントを作成するfutureが`Send`を実装し、`tokio::spawn`に渡せることを確認
+    #[tokio::test]
+    async fn test_send_future_is_send() -> anyhow::Result<()> {
+        fn assert_send<T: Send>(_: &T) {}
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        let client = create_client(&server, short_retry(0)?).await?;
+
+        let future = client.send_json::<serde_json::Value>(request("GET")?);
+
+        assert_send(&future);
+        assert_send(&BoxClient::builder(test_config()).build());
+
+        Ok(())
+    }
+}

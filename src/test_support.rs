@@ -1,0 +1,99 @@
+//! 複数のモジュールのテストで共有する補助関数
+
+use std::time::Duration;
+
+use reqwest::Url;
+use secrecy::SecretString;
+use serde_json::json;
+use wiremock::{Mock, MockServer, ResponseTemplate, matchers::path};
+
+use crate::{
+    client::{BoxClient, BoxClientTimeout},
+    config::{BoxAppAuth, BoxAppSettings, BoxConfig},
+    errors::{BoxClientError, BoxClientResult},
+    retry::RetryPolicy,
+};
+
+/// トークンエンドポイントのパス
+pub(crate) const TOKEN_PATH: &str = "/oauth2/token";
+
+/// テスト用のBox設定を返す。
+///
+/// 秘密鍵はテスト専用に生成した鍵である。
+pub(crate) fn test_config() -> BoxConfig {
+    BoxConfig {
+        box_app_settings: BoxAppSettings {
+            client_id: "client-id".to_owned(),
+            client_secret: SecretString::from("client-secret"),
+            app_auth: BoxAppAuth {
+                public_key_id: "public-key-id".to_owned(),
+                private_key: SecretString::from(include_str!(
+                    "../resources/tests/private_key_encrypted.pem"
+                )),
+                passphrase: SecretString::from("test-passphrase"),
+            },
+        },
+        enterprise_id: "12345".to_owned(),
+    }
+}
+
+/// テストが長時間待機しないように、短い待機時間の再試行設定を返す。
+pub(crate) fn short_retry(max_retries: u32) -> anyhow::Result<RetryPolicy> {
+    Ok(RetryPolicy::new(
+        max_retries,
+        Duration::from_millis(10),
+        Duration::from_millis(50),
+        Duration::from_millis(10),
+    )?)
+}
+
+/// アクセストークンを含むトークンエンドポイントの成功レスポンスを返す。
+pub(crate) fn token_response() -> ResponseTemplate {
+    ResponseTemplate::new(200).set_body_json(json!({
+        "access_token": "access-token",
+        "expires_in": 3600,
+        "token_type": "bearer",
+    }))
+}
+
+/// トークンエンドポイントが常にアクセストークンを返すモックを登録する。
+pub(crate) async fn mount_token(server: &MockServer) {
+    Mock::given(path(TOKEN_PATH))
+        .respond_with(token_response())
+        .mount(server)
+        .await;
+}
+
+/// モックサーバーが受信したリクエストの数を返す。
+pub(crate) async fn request_count(server: &MockServer) -> usize {
+    server.received_requests().await.map_or(0, |r| r.len())
+}
+
+/// モックサーバーに接続するBoxクライアントを作成する。
+///
+/// 呼び出し側がエラーの種類を検証できるように、エラーを`BoxClientError`のまま返す。
+pub(crate) async fn create_client(
+    server: &MockServer,
+    retry: RetryPolicy,
+) -> BoxClientResult<BoxClient> {
+    create_client_with_timeout(server, retry, Duration::from_secs(2)).await
+}
+
+/// タイムアウトを指定して、モックサーバーに接続するBoxクライアントを作成する。
+pub(crate) async fn create_client_with_timeout(
+    server: &MockServer,
+    retry: RetryPolicy,
+    timeout: Duration,
+) -> BoxClientResult<BoxClient> {
+    let api_base_url = Url::parse(&format!("{}/2.0", server.uri()))
+        .map_err(|e| BoxClientError::InvalidBaseUrl(e.to_string()))?;
+    BoxClient::builder(test_config())
+        .timeout(BoxClientTimeout {
+            request_timeout: timeout,
+            connect_timeout: Duration::from_secs(1),
+        })
+        .retry(retry)
+        .endpoints(api_base_url, format!("{}{TOKEN_PATH}", server.uri()))
+        .build()
+        .await
+}
