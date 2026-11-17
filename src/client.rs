@@ -32,6 +32,14 @@ const BOX_API_BASE_URL: &str = "https://api.box.com/2.0";
 /// これらの時間を十分に上回るように60秒とし、有効期限の60秒前、つまり発行から約59分後に取得し直す。
 const DEFAULT_REFRESH_BEFORE_EXPIRY: Duration = Duration::from_secs(60);
 
+/// アクセストークンを有効期限のどれだけ前に取得し直すかの上限
+///
+/// アクセストークンの有効期間である60分以上を指定すると、取得した直後から取得し直す必要があると判定する。
+/// その結果、APIを呼び出すたびにトークンエンドポイントへリクエストし、さらにキャッシュの書き込みロックによって
+/// すべてのリクエストが直列化される。
+/// したがって、上限を有効期間の半分とし、取得したアクセストークンを少なくとも有効期間の半分は再利用させる。
+pub const MAX_REFRESH_BEFORE_EXPIRY: Duration = Duration::from_secs(30 * 60);
+
 /// BOXクライアント
 ///
 /// BOXのAPIを呼び出すそれぞれのメソッドは、再試行設定に従って待機と再試行を行い、アクセストークンの
@@ -208,6 +216,8 @@ impl BoxClientBuilder {
     }
 
     /// アクセストークンを有効期限のどれだけ前に取得し直すかを指定する。既定値は60秒とする。
+    ///
+    /// [`MAX_REFRESH_BEFORE_EXPIRY`]以下を指定する。上限を超える値は[`BoxClientBuilder::build`]でエラーになる。
     pub fn refresh_before_expiry(mut self, refresh_before_expiry: Duration) -> Self {
         self.refresh_before_expiry = refresh_before_expiry;
         self
@@ -227,9 +237,18 @@ impl BoxClientBuilder {
     ///
     /// # Errors
     ///
+    /// `refresh_before_expiry`が[`MAX_REFRESH_BEFORE_EXPIRY`]を超える場合は、トークンエンドポイントへリクエストせずに
+    /// [`BoxClientError::InvalidRefreshBeforeExpiry`]を返す。
     /// HTTPクライアントを作成できない場合、秘密鍵を復号できない場合、
     /// またはアクセストークンを取得できない場合はエラーを返す。
     pub async fn build(self) -> BoxClientResult<BoxClient> {
+        if MAX_REFRESH_BEFORE_EXPIRY < self.refresh_before_expiry {
+            return Err(BoxClientError::InvalidRefreshBeforeExpiry {
+                refresh_before_expiry: self.refresh_before_expiry,
+                max: MAX_REFRESH_BEFORE_EXPIRY,
+            });
+        }
+
         let api_base_url = match self.api_base_url {
             Some(url) => url,
             None => Url::parse(BOX_API_BASE_URL)
@@ -357,6 +376,52 @@ mod test_box_client {
         create_client(&server, short_retry(0)?).await?;
 
         assert_eq!(token_request_count(&server).await, 1);
+
+        Ok(())
+    }
+
+    /// `refresh_before_expiry`が上限以下の場合のみ、BOXクライアントを作成することを確認
+    #[rstest]
+    #[case::zero(Duration::ZERO, true)]
+    #[case::default(DEFAULT_REFRESH_BEFORE_EXPIRY, true)]
+    #[case::below_max(MAX_REFRESH_BEFORE_EXPIRY - Duration::from_nanos(1), true)]
+    #[case::equal_to_max(MAX_REFRESH_BEFORE_EXPIRY, true)]
+    #[case::above_max(MAX_REFRESH_BEFORE_EXPIRY + Duration::from_nanos(1), false)]
+    #[case::token_lifetime(Duration::from_secs(3600), false)]
+    #[tokio::test]
+    async fn test_build_validates_refresh_before_expiry(
+        #[case] refresh_before_expiry: Duration,
+        #[case] valid: bool,
+    ) -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+
+        let result = BoxClient::builder(test_config())
+            .retry(short_retry(0)?)
+            .refresh_before_expiry(refresh_before_expiry)
+            .endpoints(
+                Url::parse(&format!("{}/2.0", server.uri()))?,
+                format!("{}{TOKEN_PATH}", server.uri()),
+            )
+            .build()
+            .await;
+
+        if valid {
+            assert!(result.is_ok(), "result: {:?}", result.err());
+            assert_eq!(token_request_count(&server).await, 1);
+        } else {
+            assert!(
+                matches!(
+                    &result,
+                    Err(BoxClientError::InvalidRefreshBeforeExpiry { refresh_before_expiry: r, max })
+                        if *r == refresh_before_expiry && *max == MAX_REFRESH_BEFORE_EXPIRY
+                ),
+                "result: {:?}",
+                result.err()
+            );
+            // 設定の誤りを検出した時点で、トークンエンドポイントへリクエストしない。
+            assert_eq!(token_request_count(&server).await, 0);
+        }
 
         Ok(())
     }

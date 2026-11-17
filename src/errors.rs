@@ -36,6 +36,16 @@ pub enum BoxClientError {
     #[error("Invalid retry policy: {0}")]
     InvalidRetryPolicy(&'static str),
 
+    /// アクセストークンを有効期限のどれだけ前に取得し直すかの設定が上限を超えたエラー
+    #[error("refresh_before_expiry {refresh_before_expiry:?} exceeds max {max:?}")]
+    InvalidRefreshBeforeExpiry {
+        /// 指定された値
+        refresh_before_expiry: Duration,
+
+        /// 上限
+        max: Duration,
+    },
+
     /// APIメソッドの引数の不正エラー
     #[error("Invalid argument: {0}")]
     InvalidArgument(&'static str),
