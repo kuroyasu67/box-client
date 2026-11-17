@@ -6,23 +6,21 @@ use crate::{
     BoxClient, BoxClientError, BoxClientResult, BoxItem, FileId, Folder, FolderId, WebLink,
     WebLinkId,
     api::files::File,
-    api::folders::{ItemsPage, MAX_ITEMS_LIMIT, SortDirection, collect_all_pages, validate_limit},
+    api::folders::{ItemsPage, MAX_ITEMS_LIMIT, collect_all_pages, validate_limit},
     request::ApiRequest,
 };
 
 /// ゴミ箱内の項目をリストするときのオプション
 ///
-/// BOXはマーカー方式のページ送りと`sort`クエリパラメーターの併用を受け付けないため、
-/// 並び替えに使用する属性を指定できない。
+/// BOXは、マーカー方式のページ送りで`sort`または`direction`クエリパラメーターを指定すると、
+/// 400（`invalid_parameter`）を返す。このクライアントは常にマーカー方式でページを送るため、
+/// 並び替えに使用する属性および並び替えの方向を指定できない。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ListTrashedItemsOptions {
     /// 1ページで取得する項目数の上限
     ///
     /// 1以上[`MAX_ITEMS_LIMIT`]以下を指定する。`None`の場合はBOXの既定値を使用する。
     pub limit: Option<u32>,
-
-    /// 並び替えの方向
-    pub direction: Option<SortDirection>,
 }
 
 /// ゴミ箱内のフォルダ、ファイルまたはWebリンクを復元するときのオプション
@@ -331,7 +329,7 @@ impl BoxClient {
     /// # Arguments
     ///
     /// - `marker`: 前のページの[`ItemsPage::next_marker`]。最初のページを取得する場合は`None`
-    /// - `options`: 項目数の上限および並び替えの方向のオプション
+    /// - `options`: 項目数の上限のオプション
     ///
     /// # Errors
     ///
@@ -349,9 +347,6 @@ impl BoxClient {
         if let Some(marker) = marker {
             request = request.query("marker", marker);
         }
-        if let Some(direction) = options.direction {
-            request = request.query("direction", direction.as_str());
-        }
 
         self.send_json(request).await
     }
@@ -364,7 +359,7 @@ impl BoxClient {
     ///
     /// # Arguments
     ///
-    /// - `options`: 項目数の上限および並び替えの方向のオプション
+    /// - `options`: 項目数の上限のオプション
     ///
     /// # Errors
     ///
@@ -377,7 +372,6 @@ impl BoxClient {
     ) -> BoxClientResult<Vec<BoxItem>> {
         let options = ListTrashedItemsOptions {
             limit: Some(options.limit.unwrap_or(MAX_ITEMS_LIMIT)),
-            ..*options
         };
         let (items, pages) =
             collect_all_pages(async |marker| self.list_trashed_items(marker, &options).await)
@@ -1285,16 +1279,13 @@ mod test_list_trashed_items {
     #[case::default(None, ListTrashedItemsOptions::default(), "usemarker=true")]
     #[case::min_limit(
         None,
-        ListTrashedItemsOptions { limit: Some(1), direction: None },
+        ListTrashedItemsOptions { limit: Some(1) },
         "usemarker=true&limit=1"
     )]
     #[case::all(
         Some("m1"),
-        ListTrashedItemsOptions {
-            limit: Some(1000),
-            direction: Some(SortDirection::Asc),
-        },
-        "usemarker=true&limit=1000&marker=m1&direction=ASC"
+        ListTrashedItemsOptions { limit: Some(1000) },
+        "usemarker=true&limit=1000&marker=m1"
     )]
     #[tokio::test]
     async fn test_list_trashed_items(
@@ -1333,10 +1324,7 @@ mod test_list_trashed_items {
         let server = MockServer::start().await;
         mount_token(&server).await;
         let client = create_client(&server, short_retry(0)?).await?;
-        let options = ListTrashedItemsOptions {
-            limit: Some(limit),
-            ..ListTrashedItemsOptions::default()
-        };
+        let options = ListTrashedItemsOptions { limit: Some(limit) };
 
         let result = client.list_trashed_items(None, &options).await;
 
@@ -1422,7 +1410,7 @@ mod test_list_all_trashed_items {
         Ok(())
     }
 
-    /// 項目数の上限と並び替えの方向を指定した場合は、すべてのページの取得に使用することを確認
+    /// 項目数の上限を指定した場合は、すべてのページの取得に使用することを確認
     #[tokio::test]
     async fn test_list_all_trashed_items_with_options() -> anyhow::Result<()> {
         let server = MockServer::start().await;
@@ -1430,7 +1418,6 @@ mod test_list_all_trashed_items {
         Mock::given(method("GET"))
             .and(path(TRASH_ITEMS_PATH))
             .and(query_param("limit", "1"))
-            .and(query_param("direction", "DESC"))
             .and(query_param_is_missing("marker"))
             .respond_with(page_response("first", &json!("m1")))
             .expect(1)
@@ -1439,17 +1426,13 @@ mod test_list_all_trashed_items {
         Mock::given(method("GET"))
             .and(path(TRASH_ITEMS_PATH))
             .and(query_param("limit", "1"))
-            .and(query_param("direction", "DESC"))
             .and(query_param("marker", "m1"))
             .respond_with(page_response("second", &Value::Null))
             .expect(1)
             .mount(&server)
             .await;
         let client = create_client(&server, short_retry(0)?).await?;
-        let options = ListTrashedItemsOptions {
-            limit: Some(1),
-            direction: Some(SortDirection::Desc),
-        };
+        let options = ListTrashedItemsOptions { limit: Some(1) };
 
         let items = client.list_all_trashed_items(&options).await?;
 
