@@ -542,8 +542,8 @@ mod test_folder {
         let user = UserMini {
             id: "33224".to_owned(),
             user_type: "user".to_owned(),
-            name: "Test User".to_owned(),
-            login: "user@example.com".to_owned(),
+            name: Some("Test User".to_owned()),
+            login: Some("user@example.com".to_owned()),
         };
         let legal = FolderItem {
             id: FolderId::new("111"),

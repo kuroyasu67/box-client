@@ -12,7 +12,12 @@ async fn main() -> anyhow::Result<()> {
     let client = common::setup().await?;
 
     let user = client.me().await?;
-    tracing::info!("id={}, name={}, login={}", user.id, user.name, user.login);
+    tracing::info!(
+        "id={}, name={}, login={}",
+        user.id,
+        user.name.as_deref().unwrap_or_default(),
+        user.login.as_deref().unwrap_or_default()
+    );
 
     Ok(())
 }

@@ -6,6 +6,9 @@ use time::OffsetDateTime;
 use crate::{BoxClient, BoxClientResult, request::ApiRequest};
 
 /// BOXのユーザー
+///
+/// BOXのAPI仕様（OpenAPI）は、`id`と`type`だけを必須とし、表示名とメールアドレスを省略可能としている。
+/// BOXが省略しても取得を失敗させないように、`id`と`type`以外の属性を`Option`で受け取る。
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[non_exhaustive]
 pub struct User {
@@ -17,10 +20,10 @@ pub struct User {
     pub user_type: String,
 
     /// 表示名
-    pub name: String,
+    pub name: Option<String>,
 
     /// ログインに使用するメールアドレス
-    pub login: String,
+    pub login: Option<String>,
 
     /// 作成した日時
     #[serde(default, with = "time::serde::rfc3339::option")]
@@ -32,6 +35,11 @@ pub struct User {
 }
 
 /// 最小限のユーザー情報
+///
+/// フォルダ情報の作成者などとして、ほかのリソースに含まれる。
+/// BOXのAPI仕様（OpenAPI）は、`id`と`type`だけを必須とし、表示名とメールアドレスを省略可能としている。
+/// 1人のユーザーの属性が欠けているだけで、そのユーザーを含むフォルダ情報などの取得全体を失敗させないように、
+/// `id`と`type`以外の属性を`Option`で受け取る。
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[non_exhaustive]
 pub struct UserMini {
@@ -43,10 +51,10 @@ pub struct UserMini {
     pub user_type: String,
 
     /// 表示名
-    pub name: String,
+    pub name: Option<String>,
 
     /// ログインに使用するメールアドレス
-    pub login: String,
+    pub login: Option<String>,
 }
 
 impl BoxClient {
@@ -92,8 +100,42 @@ mod test_get_current_user {
         let user = client.me().await?;
 
         assert_eq!(user.id, "11446498");
-        assert_eq!(user.name, "Service Account");
-        assert_eq!(user.login, "AutomationUser_123@boxdevedition.com");
+        assert_eq!(user.name.as_deref(), Some("Service Account"));
+        assert_eq!(
+            user.login.as_deref(),
+            Some("AutomationUser_123@boxdevedition.com")
+        );
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod test_user_mini {
+    use rstest::rstest;
+    use serde_json::json;
+
+    use super::*;
+
+    /// 表示名とメールアドレスが省略またはnullの場合も、`None`としてデシリアライズすることを確認
+    #[rstest]
+    #[case::present(
+        json!({"type": "user", "id": "1", "name": "Test User", "login": "user@example.com"}),
+        Some("Test User"),
+        Some("user@example.com")
+    )]
+    #[case::missing(json!({"type": "user", "id": "1"}), None, None)]
+    #[case::null(json!({"type": "user", "id": "1", "name": null, "login": null}), None, None)]
+    fn test_deserialize_user_mini(
+        #[case] value: serde_json::Value,
+        #[case] name: Option<&str>,
+        #[case] login: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let user: UserMini = serde_json::from_value(value)?;
+
+        assert_eq!(user.id, "1");
+        assert_eq!(user.name.as_deref(), name);
+        assert_eq!(user.login.as_deref(), login);
 
         Ok(())
     }
