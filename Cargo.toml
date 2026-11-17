@@ -28,6 +28,7 @@ uuid = { version = "1.29.2", features = ["v4"] }
 anyhow             = "1.0.104"
 rstest             = "0.28.0"
 time               = { version = "0.3.55", features = ["macros"] }
+tokio              = { version = "1.54.1", features = ["io-util", "net"] }
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
 wiremock           = "0.6.5"
 

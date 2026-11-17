@@ -17,7 +17,7 @@ use crate::{
     errors::{BoxClientError, BoxClientResult},
     retry::{
         AttemptError, Idempotency, RetryPolicy, classify_error_response, classify_transport_error,
-        run_with_retry,
+        read_json, run_with_retry,
     },
 };
 
@@ -384,10 +384,7 @@ impl TokenManager {
             return Err(classify_error_response(response, idempotency).await);
         }
 
-        let body: TokenResponse = response
-            .json()
-            .await
-            .map_err(|e| classify_transport_error(e, idempotency))?;
+        let body: TokenResponse = read_json(response, idempotency).await?;
         let now = Instant::now();
         // 有効期限が表現できないほど大きい場合は、期限切れとして扱い、アクセストークンを取得し直させる。
         let expires_at = now
@@ -1041,7 +1038,7 @@ mod test_token_manager {
         let result = manager.access_token().await;
 
         assert!(
-            matches!(&result, Err(BoxClientError::Http(e)) if e.is_decode()),
+            matches!(&result, Err(BoxClientError::DeserializeResponse(_))),
             "result: {:?}",
             result.err()
         );

@@ -94,6 +94,10 @@ pub enum BoxClientError {
     #[error("HTTP request failed")]
     Http(#[from] reqwest::Error),
 
+    /// 成功レスポンスのボディのデシリアライズエラー
+    #[error("Failed to deserialize response body")]
+    DeserializeResponse(#[source] serde_json::Error),
+
     /// BOXのエラーレスポンス
     ///
     /// エラー型のサイズを小さく保つため、詳細をヒープに確保する。

@@ -8,6 +8,7 @@ use reqwest::{
     Method, Response, StatusCode,
     header::{HeaderMap, RETRY_AFTER},
 };
+use serde::de::DeserializeOwned;
 
 use crate::errors::{ApiError, BoxClientError, BoxClientResult};
 
@@ -388,7 +389,9 @@ pub(crate) fn is_retryable_error_response(
 ///
 /// 接続エラーはリクエストを送信する前の失敗であるため、冪等性によらず再試行する。
 /// タイムアウト、送信中または受信中の通信エラーは、サーバーが処理した可能性があるため、
-/// 冪等なリクエストのみ再試行する。レスポンスを解釈できない場合は再試行しない。
+/// 冪等なリクエストのみ再試行する。
+///
+/// 成功レスポンスのボディの受信中に発生したエラーは、この関数ではなく[`read_json`]で分類する。
 pub(crate) fn classify_transport_error(
     error: reqwest::Error,
     idempotency: Idempotency,
@@ -404,6 +407,33 @@ pub(crate) fn classify_transport_error(
     } else {
         AttemptError::Fatal(error.into())
     }
+}
+
+/// 成功レスポンスのボディを受信し、JSONとしてデシリアライズする。
+///
+/// reqwestは、ボディの受信中に発生した通信エラーを`is_body()`ではなく`is_decode()`が`true`を返すエラーとして返す。
+/// そのため、この関数はボディの受信とデシリアライズを分け、受信の失敗とJSONの解釈の失敗を区別する。
+///
+/// - ボディの受信中の通信エラーは、サーバーが処理した可能性があるため、冪等なリクエストのみ再試行する。
+/// - JSONを解釈できない場合は、再送しても同じレスポンスを受け取る可能性が高いため、再試行せずに
+///   [`BoxClientError::DeserializeResponse`]を返す。
+pub(crate) async fn read_json<T: DeserializeOwned>(
+    response: Response,
+    idempotency: Idempotency,
+) -> Result<T, AttemptError> {
+    let body = response.bytes().await.map_err(|error| {
+        if idempotency == Idempotency::Idempotent {
+            AttemptError::Retryable {
+                error: error.into(),
+                retry_after: None,
+            }
+        } else {
+            AttemptError::Fatal(error.into())
+        }
+    })?;
+
+    serde_json::from_slice(&body)
+        .map_err(|e| AttemptError::Fatal(BoxClientError::DeserializeResponse(e)))
 }
 
 /// 成功以外のレスポンスを、再試行できるエラーと再試行できないエラーに分類する。

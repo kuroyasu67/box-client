@@ -13,8 +13,8 @@ use crate::{
     errors::{BoxClientError, BoxClientResult},
     request::ApiRequest,
     retry::{
-        AttemptError, RetryPolicy, classify_error_response, classify_transport_error,
-        run_with_retry,
+        AttemptError, Idempotency, RetryPolicy, classify_error_response, classify_transport_error,
+        read_json, run_with_retry,
     },
 };
 
@@ -101,12 +101,14 @@ impl BoxClient {
     ///
     /// # Errors
     ///
+    /// 成功レスポンスのボディをJSONとして解釈できない場合は、再試行せずに
+    /// [`BoxClientError::DeserializeResponse`]を返す。
     /// 再試行できないエラーが発生した場合、または再試行回数の上限に達した場合はエラーを返す。
     pub async fn send_json<T: DeserializeOwned>(
         &self,
         request: ApiRequest<'_>,
     ) -> BoxClientResult<T> {
-        self.send(request, Response::json::<T>).await
+        self.send(request, read_json::<T>).await
     }
 
     /// リクエストを送信し、成功レスポンスのボディを読まずに破棄する。
@@ -117,14 +119,14 @@ impl BoxClient {
     ///
     /// 再試行できないエラーが発生した場合、または再試行回数の上限に達した場合はエラーを返す。
     pub async fn send_empty(&self, request: ApiRequest<'_>) -> BoxClientResult<()> {
-        self.send(request, |_| std::future::ready(Ok(()))).await
+        self.send(request, |_, _| std::future::ready(Ok(()))).await
     }
 
     /// 再試行設定に従ってリクエストを送信し、成功レスポンスを`handle`で処理した結果を返す。
     async fn send<T, F, Fut>(&self, request: ApiRequest<'_>, handle: F) -> BoxClientResult<T>
     where
-        F: Fn(Response) -> Fut,
-        Fut: Future<Output = reqwest::Result<T>>,
+        F: Fn(Response, Idempotency) -> Fut,
+        Fut: Future<Output = Result<T, AttemptError>>,
     {
         let url = request.url(&self.api_base_url)?;
         let span = tracing::info_span!(
@@ -150,8 +152,8 @@ impl BoxClient {
         handle: &F,
     ) -> Result<T, AttemptError>
     where
-        F: Fn(Response) -> Fut,
-        Fut: Future<Output = reqwest::Result<T>>,
+        F: Fn(Response, Idempotency) -> Fut,
+        Fut: Future<Output = Result<T, AttemptError>>,
     {
         let idempotency = request.idempotency;
         let mut token_refreshed = false;
@@ -189,9 +191,7 @@ impl BoxClient {
                 return Err(classify_error_response(response, idempotency).await);
             }
 
-            return handle(response)
-                .await
-                .map_err(|e| classify_transport_error(e, idempotency));
+            return handle(response, idempotency).await;
         }
     }
 }
@@ -326,20 +326,23 @@ impl Default for BoxClientTimeout {
 
 #[cfg(test)]
 mod test_box_client {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use rstest::rstest;
     use serde_json::json;
+    use tokio::{
+        io::{AsyncReadExt as _, AsyncWriteExt as _},
+        net::TcpListener,
+    };
     use wiremock::{
         Mock, MockServer, ResponseTemplate,
         matchers::{body_json, header, method, path},
     };
 
     use super::*;
-    use crate::{
-        retry::Idempotency,
-        test_support::{
-            TOKEN_PATH, create_client, create_client_with_timeout, mount_token, short_retry,
-            test_config,
-        },
+    use crate::test_support::{
+        TOKEN_PATH, create_client, create_client_with_timeout, mount_token, short_retry,
+        test_config,
     };
 
     /// APIのパス
@@ -717,10 +720,72 @@ mod test_box_client {
         let result: BoxClientResult<serde_json::Value> = client.send_json(request("GET")?).await;
 
         assert!(
-            matches!(&result, Err(BoxClientError::Http(e)) if e.is_decode()),
+            matches!(&result, Err(BoxClientError::DeserializeResponse(_))),
             "result: {result:?}"
         );
         assert_eq!(api_request_count(&server).await, 1);
+
+        Ok(())
+    }
+
+    /// 成功レスポンスのヘッダーを返した後、ボディの途中で接続を切るHTTPサーバーを起動する。
+    ///
+    /// 戻り値は、サーバーを指すREST APIのベースURLと、サーバーが受け付けた接続の数である。
+    async fn start_truncating_server() -> anyhow::Result<(Url, Arc<AtomicUsize>)> {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let api_base_url = Url::parse(&format!("http://{}/2.0", listener.local_addr()?))?;
+        let connections = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&connections);
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                counter.fetch_add(1, Ordering::SeqCst);
+                // リクエストヘッダーを読み終えてから、宣言した長さより短いボディを返して接続を切る。
+                let mut buffer = Vec::new();
+                let mut chunk = [0u8; 1024];
+                while !buffer.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match stream.read(&mut chunk).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => buffer.extend_from_slice(&chunk[..n]),
+                    }
+                }
+                let _ = stream
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\
+                          content-length: 100\r\n\r\n{\"id\":",
+                    )
+                    .await;
+            }
+        });
+
+        Ok((api_base_url, connections))
+    }
+
+    /// 成功レスポンスのボディの受信中に接続が切れた場合は、冪等なリクエストのみ再試行することを確認
+    #[rstest]
+    #[case::idempotent("GET", 3)]
+    #[case::non_idempotent("POST", 1)]
+    #[tokio::test]
+    async fn test_send_json_retries_body_error_only_if_idempotent(
+        #[case] method: &str,
+        #[case] expected_connections: usize,
+    ) -> anyhow::Result<()> {
+        let token_server = MockServer::start().await;
+        mount_token(&token_server).await;
+        let (api_base_url, connections) = start_truncating_server().await?;
+        let client = BoxClient::builder(test_config())
+            .retry(short_retry(2)?)
+            .endpoints(api_base_url, format!("{}{TOKEN_PATH}", token_server.uri()))
+            .build()
+            .await?;
+
+        let result: BoxClientResult<serde_json::Value> = client.send_json(request(method)?).await;
+
+        // ボディの受信の失敗は、JSONの解釈の失敗ではなく通信エラーとして返す。
+        assert!(
+            matches!(&result, Err(BoxClientError::Http(_))),
+            "result: {result:?}"
+        );
+        assert_eq!(connections.load(Ordering::SeqCst), expected_connections);
 
         Ok(())
     }
