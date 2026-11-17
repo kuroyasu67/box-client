@@ -124,7 +124,7 @@ pub enum ItemStatus {
     /// 有効
     Active,
 
-    /// ごみ箱に移動済み
+    /// ゴミ箱に移動済み
     Trashed,
 
     /// 削除済み

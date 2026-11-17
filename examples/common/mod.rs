@@ -5,11 +5,11 @@ use box_client::{
     api::trash::ListTrashedItemsOptions,
 };
 
-/// Box設定ファイルのパス
+/// BOX設定ファイルのパス
 // cspell:disable-next-line
 const BOX_CONFIG_FILE: &str = "resources/secrets/26695994_fhugry6j_config.json";
 
-/// `RUST_LOG`に従ってログを出力するサブスクライバーを登録し、Box設定ファイルで認証したクライアントを構築する。
+/// `RUST_LOG`に従ってログを出力するサブスクライバーを登録し、BOX設定ファイルで認証したクライアントを構築する。
 pub async fn setup() -> anyhow::Result<BoxClient> {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())

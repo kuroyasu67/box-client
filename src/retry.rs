@@ -430,7 +430,7 @@ pub(crate) async fn classify_error_response(
 
 /// `Retry-After`ヘッダーが示す待機時間を返す。
 ///
-/// Boxは`Retry-After`ヘッダーに秒数を設定するため、秒数として解釈できない場合は`None`を返し、
+/// BOXは`Retry-After`ヘッダーに秒数を設定するため、秒数として解釈できない場合は`None`を返し、
 /// 指数バックオフで待機させる。
 fn parse_retry_after(headers: &HeaderMap) -> Option<Duration> {
     headers

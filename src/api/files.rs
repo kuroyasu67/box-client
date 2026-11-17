@@ -52,11 +52,11 @@ pub struct File {
     #[serde(default, with = "time::serde::rfc3339::option")]
     pub modified_at: Option<OffsetDateTime>,
 
-    /// ファイルをごみ箱に移動した日時
+    /// ファイルをゴミ箱に移動した日時
     #[serde(default, with = "time::serde::rfc3339::option")]
     pub trashed_at: Option<OffsetDateTime>,
 
-    /// ごみ箱に移動したファイルを完全に削除する予定の日時
+    /// ゴミ箱に移動したファイルを完全に削除する予定の日時
     #[serde(default, with = "time::serde::rfc3339::option")]
     pub purged_at: Option<OffsetDateTime>,
 

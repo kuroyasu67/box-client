@@ -50,11 +50,11 @@ pub struct Folder {
     #[serde(default, with = "time::serde::rfc3339::option")]
     pub modified_at: Option<OffsetDateTime>,
 
-    /// フォルダをごみ箱に移動した日時
+    /// フォルダをゴミ箱に移動した日時
     #[serde(default, with = "time::serde::rfc3339::option")]
     pub trashed_at: Option<OffsetDateTime>,
 
-    /// ごみ箱に移動したフォルダを完全に削除する予定の日時
+    /// ゴミ箱に移動したフォルダを完全に削除する予定の日時
     #[serde(default, with = "time::serde::rfc3339::option")]
     pub purged_at: Option<OffsetDateTime>,
 
