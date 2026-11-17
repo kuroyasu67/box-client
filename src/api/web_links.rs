@@ -4,8 +4,8 @@ use serde::Deserialize;
 use time::OffsetDateTime;
 
 use crate::{
-    BoxClient, BoxClientResult, FolderItem, ItemStatus, PathCollection, UserMini, WebLinkId,
-    request::ApiRequest,
+    BoxClient, BoxClientResult, FolderItem, Idempotency, ItemStatus, PathCollection, UserMini,
+    WebLinkId, request::ApiRequest,
 };
 
 /// ウェブリンク情報
@@ -82,6 +82,39 @@ impl BoxClient {
     pub async fn web_link_information(&self, web_link_id: &WebLinkId) -> BoxClientResult<WebLink> {
         self.send_json(ApiRequest::get(["web_links", web_link_id.as_ref()]))
             .await
+    }
+
+    /// ウェブリンクを削除する。
+    ///
+    /// クライアントは、5xxを受け取った場合、またはタイムアウトした場合に、同じリクエストを再送して再試行する。
+    /// しかし、これらの場合は、BOXがウェブリンクの削除を完了している可能性がある。
+    /// BOXが削除した後にリクエストを再送すると、削除済みのウェブリンクに対する削除となるため、BOXはエラーを返しうる。
+    /// その結果、削除に成功したにもかかわらず、削除に失敗したと誤って判断するおそれがある。
+    /// したがって、HTTPメソッドがDELETEであっても冪等でないリクエストとして送信し、
+    /// BOXがリクエストを処理していないことが明らかな429、エラーコードが`operation_blocked_temporary`の409
+    /// および接続エラーの後にのみ再試行する。
+    ///
+    /// # Arguments
+    ///
+    /// - `web_link_id`: 削除するウェブリンクのID
+    ///
+    /// # Errors
+    ///
+    /// BOXがエラーレスポンスを返した場合は、[`BoxClientError::Api`](crate::BoxClientError::Api)を返す。
+    /// 公式ドキュメントは、このAPIが返すエラーのステータスを個別に記載していない。
+    ///
+    /// 再試行できないエラーが発生した場合、または再試行回数の上限に達した場合はエラーを返す。
+    /// 5xxまたはタイムアウトでエラーを返した場合は、BOXがウェブリンクを削除した可能性があるため、
+    /// [`BoxClient::web_link_information`]でウェブリンクの状態を確認する。
+    pub async fn delete_web_link(&self, web_link_id: &WebLinkId) -> BoxClientResult<()> {
+        let request = ApiRequest::delete(["web_links", web_link_id.as_ref()])
+            .idempotency(Idempotency::NonIdempotent);
+
+        self.send_empty(request).await?;
+
+        tracing::info!(web_link_id = web_link_id.as_ref(), "deleted web link");
+
+        Ok(())
     }
 }
 
@@ -270,6 +303,122 @@ mod test_web_link_information {
             matches!(&result, Err(BoxClientError::Api(e)) if e.status == 404),
             "result: {result:?}"
         );
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod test_delete_web_link {
+    use rstest::rstest;
+    use serde_json::json;
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{method, path},
+    };
+
+    use super::*;
+    use crate::{
+        BoxClientError,
+        test_support::{create_client, mount_token, short_retry},
+    };
+
+    /// ウェブリンクのAPIのパス
+    const WEB_LINK_PATH: &str = "/2.0/web_links/123";
+
+    /// ウェブリンクのAPIへのDELETEリクエストの数を返す。
+    async fn delete_count(server: &MockServer) -> usize {
+        server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .iter()
+            .filter(|r| r.method.as_str() == "DELETE" && r.url.path() == WEB_LINK_PATH)
+            .count()
+    }
+
+    /// DELETE /web_links/{web_link_id}を呼び出し、204を受け取ると成功することを確認
+    #[tokio::test]
+    async fn test_delete_web_link() -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        Mock::given(method("DELETE"))
+            .and(path(WEB_LINK_PATH))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = create_client(&server, short_retry(0)?).await?;
+
+        client.delete_web_link(&WebLinkId::new("123")).await?;
+
+        assert_eq!(delete_count(&server).await, 1);
+
+        Ok(())
+    }
+
+    /// BOXのエラーレスポンスを、再試行せずにそのまま返すことを確認
+    ///
+    /// 5xxの後に再送すると、削除済みのウェブリンクに対してエラーを受け取るおそれがあるため、
+    /// 再試行の上限に余裕があっても再送しない。
+    #[rstest]
+    #[case::forbidden(403)]
+    #[case::not_found(404)]
+    #[case::internal_server_error(500)]
+    #[case::service_unavailable(503)]
+    #[tokio::test]
+    async fn test_delete_web_link_error_is_not_retried(#[case] status: u16) -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        Mock::given(method("DELETE"))
+            .and(path(WEB_LINK_PATH))
+            .respond_with(ResponseTemplate::new(status))
+            .mount(&server)
+            .await;
+        let client = create_client(&server, short_retry(2)?).await?;
+
+        let result = client.delete_web_link(&WebLinkId::new("123")).await;
+
+        assert!(
+            matches!(&result, Err(BoxClientError::Api(e)) if e.status == status),
+            "result: {result:?}"
+        );
+        assert_eq!(delete_count(&server).await, 1);
+
+        Ok(())
+    }
+
+    /// 429または他の操作によるロックで409を受け取った場合は、冪等でないリクエストとして送信しても再試行することを確認
+    #[rstest]
+    #[case::too_many_requests(ResponseTemplate::new(429))]
+    #[case::operation_blocked_temporary(ResponseTemplate::new(409).set_body_json(json!({
+        "type": "error",
+        "status": 409,
+        "code": "operation_blocked_temporary",
+        "message": "The operation is blocked by another on-going operation",
+    })))]
+    #[tokio::test]
+    async fn test_delete_web_link_retries_request_not_processed(
+        #[case] first_response: ResponseTemplate,
+    ) -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        Mock::given(method("DELETE"))
+            .and(path(WEB_LINK_PATH))
+            .respond_with(first_response)
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path(WEB_LINK_PATH))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+        let client = create_client(&server, short_retry(1)?).await?;
+
+        client.delete_web_link(&WebLinkId::new("123")).await?;
+
+        assert_eq!(delete_count(&server).await, 2);
 
         Ok(())
     }
