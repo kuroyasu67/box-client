@@ -1,7 +1,7 @@
 //! ゴミ箱に関するAPI
 
 use crate::{
-    BoxClient, BoxClientResult, BoxItem,
+    BoxClient, BoxClientError, BoxClientResult, BoxItem, Folder, FolderId,
     api::folders::{ItemsPage, MAX_ITEMS_LIMIT, SortDirection, collect_all_pages, validate_limit},
     request::ApiRequest,
 };
@@ -22,6 +22,40 @@ pub struct ListTrashedItemsOptions {
 }
 
 impl BoxClient {
+    /// ゴミ箱内のフォルダの情報を取得する。
+    ///
+    /// 取得できるのは、ゴミ箱に直接移動したフォルダだけである。
+    /// 親フォルダをゴミ箱に移動したことでゴミ箱に入ったフォルダは取得できず、BOXは404を返す。
+    /// その場合は、ゴミ箱に直接移動した親フォルダの情報を取得する。
+    ///
+    /// # Arguments
+    ///
+    /// - `folder_id`: 情報を取得するゴミ箱内のフォルダのID
+    ///
+    /// # Errors
+    ///
+    /// ルートフォルダはゴミ箱に移動できないため、ルートフォルダを指定した場合は、
+    /// リクエストを送信せずに[`BoxClientError::InvalidArgument`]を返す。
+    /// BOXがエラーレスポンスを返した場合は、[`BoxClientError::Api`]を返す。主なステータスは次のとおり。
+    ///
+    /// - 404: フォルダがゴミ箱に直接移動されていない、フォルダが存在しない、
+    ///   またはフォルダにアクセスする権限がない。
+    ///
+    /// 再試行できないエラーが発生した場合、または再試行回数の上限に達した場合はエラーを返す。
+    pub async fn trashed_folder_information(
+        &self,
+        folder_id: &FolderId,
+    ) -> BoxClientResult<Folder> {
+        if folder_id.is_root() {
+            return Err(BoxClientError::InvalidArgument(
+                "the root folder cannot be in the trash",
+            ));
+        }
+
+        self.send_json(ApiRequest::get(["folders", folder_id.as_ref(), "trash"]))
+            .await
+    }
+
     /// ゴミ箱内の項目を1ページ分リストする。
     ///
     /// BOXは、ユーザーがゴミ箱に直接移動したファイル、フォルダおよびウェブリンクを返す。
@@ -90,6 +124,112 @@ impl BoxClient {
         tracing::info!(pages, items = items.len(), "listed all trashed items");
 
         Ok(items)
+    }
+}
+
+#[cfg(test)]
+mod test_trashed_folder_information {
+    use serde_json::json;
+    use time::macros::datetime;
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{method, path},
+    };
+
+    use super::*;
+    use crate::{
+        ItemStatus,
+        test_support::{create_client, mount_token, request_count, short_retry},
+    };
+
+    /// GET /folders/{folder_id}/trashを呼び出し、ゴミ箱に移動した日時と状態を含むフォルダ情報をデシリアライズすることを確認
+    #[tokio::test]
+    async fn test_trashed_folder_information() -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        Mock::given(method("GET"))
+            .and(path("/2.0/folders/12345/trash"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "type": "folder",
+                "id": "12345",
+                "etag": "1",
+                "sequence_id": "3",
+                "name": "Contracts",
+                "trashed_at": "2012-12-12T10:53:43-08:00",
+                "purged_at": "2013-01-11T10:53:43-08:00",
+                "parent": {"type": "folder", "id": "0", "etag": null, "name": "All Files"},
+                "item_status": "trashed",
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = create_client(&server, short_retry(0)?).await?;
+
+        let folder = client
+            .trashed_folder_information(&FolderId::new("12345"))
+            .await?;
+
+        assert_eq!(folder.id, FolderId::new("12345"));
+        assert_eq!(folder.name, "Contracts");
+        assert_eq!(
+            folder.trashed_at,
+            Some(datetime!(2012-12-12 10:53:43 -08:00))
+        );
+        assert_eq!(
+            folder.purged_at,
+            Some(datetime!(2013-01-11 10:53:43 -08:00))
+        );
+        assert_eq!(folder.item_status, Some(ItemStatus::Trashed));
+
+        Ok(())
+    }
+
+    /// ルートフォルダを指定した場合は、リクエストを送信せずにエラーを返すことを確認
+    #[tokio::test]
+    async fn test_trashed_folder_information_rejects_root() -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        let client = create_client(&server, short_retry(0)?).await?;
+        let requests_before = request_count(&server).await;
+
+        let result = client.trashed_folder_information(&FolderId::root()).await;
+
+        assert!(
+            matches!(result, Err(BoxClientError::InvalidArgument(_))),
+            "result: {result:?}"
+        );
+        assert_eq!(request_count(&server).await, requests_before);
+
+        Ok(())
+    }
+
+    /// フォルダがゴミ箱に直接移動されていない場合は、BOXのエラーレスポンスを返すことを確認
+    #[tokio::test]
+    async fn test_trashed_folder_information_not_found() -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        Mock::given(method("GET"))
+            .and(path("/2.0/folders/999/trash"))
+            .respond_with(ResponseTemplate::new(404).set_body_json(json!({
+                "type": "error",
+                "status": 404,
+                "code": "not_found",
+                "message": "Not Found",
+            })))
+            .mount(&server)
+            .await;
+        let client = create_client(&server, short_retry(0)?).await?;
+
+        let result = client
+            .trashed_folder_information(&FolderId::new("999"))
+            .await;
+
+        assert!(
+            matches!(&result, Err(BoxClientError::Api(e)) if e.status == 404),
+            "result: {result:?}"
+        );
+
+        Ok(())
     }
 }
 
