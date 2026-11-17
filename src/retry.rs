@@ -317,8 +317,10 @@ where
             Err(AttemptError::Retryable { error, retry_after }) => (error, retry_after),
         };
 
+        // 再試行を尽くしたエラーも呼び出し元に返すため、エラーの重さは呼び出し元が判断する。
+        // ただし、呼び出し元が受け取るエラーにない試行回数と経過時間を残すため、WARNで出力する。
         if policy.max_retries() <= number_of_retries {
-            tracing::error!(
+            tracing::warn!(
                 operation,
                 attempts,
                 elapsed_ms = started_at.elapsed().as_millis(),
@@ -334,7 +336,7 @@ where
         let delay = match policy.retry_delay(number_of_retries, retry_after, &mut rand::rng()) {
             Ok(delay) => delay,
             Err(retry_after) => {
-                tracing::error!(
+                tracing::warn!(
                     operation,
                     attempts,
                     elapsed_ms = started_at.elapsed().as_millis(),

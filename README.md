@@ -331,7 +331,9 @@ let client = BoxClient::builder(config)
 ### ログ
 
 再試行に関するイベントは、`tracing`で構造化ログとして出力する。
-ライブラリが利用者のアプリケーションのログを埋めないように、成功を知らせるイベントはDEBUGで出力し、利用者が対処を検討すべきイベントだけをWARNまたはERRORで出力する。
+ライブラリが利用者のアプリケーションのログを埋めないように、成功を知らせるイベントはDEBUGで出力し、利用者が対処を検討すべきイベントだけをWARNで出力する。
+このクレートはERRORのイベントを出力しない。
+エラーはすべて呼び出し元に返すため、エラーの重さは呼び出し元が判断し、必要に応じて記録する。
 再試行できないエラーは、再試行せずにそのまま呼び出し元に返すため、DEBUGで出力する。
 404のように呼び出し元が想定しているエラーもあるため、エラーを異常とみなすかどうかは呼び出し元が判断する。
 フォルダの削除やゴミ箱からの復元など、各APIの処理が完了したことを知らせるイベントも、DEBUGで出力する。
@@ -347,8 +349,8 @@ let client = BoxClient::builder(config)
 | WARN | `jwt assertion was rejected because of its expiration; adjusting to the box server time and resending` | JWTアサーションが有効期限を理由に拒否されたため、有効期限をBOXの時刻に合わせて再送する。BOXの時刻からシステム時刻を引いた秒数`clock_offset_secs`を含む。 |
 | WARN | `failed to refresh access token in background; using the cached token until it expires` | `BoxClient`が、アクセストークンをバックグラウンドで取得できなかった。`BoxClient`は、キャッシュしたアクセストークンを期限が切れるまで使用する。このイベントは、原因のエラー`error`と、次にバックグラウンドで取得し直すまでの間隔`retry_interval_ms`を含む。 |
 | DEBUG | `failed with non-retryable error` | 再試行できないエラーが発生した。 |
-| ERROR | `failed after reaching max retries` | 再試行回数が上限に達した。 |
-| ERROR | `gave up retrying` | `Retry-After`ヘッダーが示す待機時間が上限を超えたため、再試行を中止した。`Retry-After`ヘッダーが示す待機時間`retry_after_ms`と、待機時間の上限`max_delay_ms`を含む。 |
+| WARN | `failed after reaching max retries` | 再試行回数が上限に達した。 |
+| WARN | `gave up retrying` | `Retry-After`ヘッダーが示す待機時間が上限を超えたため、再試行を中止した。`Retry-After`ヘッダーが示す待機時間`retry_after_ms`と、待機時間の上限`max_delay_ms`を含む。 |
 
 ### キャンセル
 
