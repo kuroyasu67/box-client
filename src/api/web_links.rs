@@ -1,4 +1,4 @@
-//! ウェブリンクに関するAPI
+//! Webリンクに関するAPI
 
 use serde::Deserialize;
 use time::OffsetDateTime;
@@ -8,76 +8,76 @@ use crate::{
     WebLinkId, request::ApiRequest,
 };
 
-/// ウェブリンク情報
+/// Webリンク情報
 ///
 /// フォルダ情報およびファイル情報と同様に、BOXがnullを返したり省略したりしても取得を失敗させないため、
 /// IDおよび名前以外の属性を`Option`で受け取る。
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[non_exhaustive]
 pub struct WebLink {
-    /// ウェブリンクID
+    /// WebリンクID
     pub id: WebLinkId,
 
-    /// ウェブリンクのバージョンを識別する`ETag`
+    /// Webリンクのバージョンを識別する`ETag`
     pub etag: Option<String>,
 
-    /// ウェブリンクの変更を識別するシーケンスID
+    /// Webリンクの変更を識別するシーケンスID
     pub sequence_id: Option<String>,
 
-    /// ウェブリンク名
+    /// Webリンク名
     pub name: String,
 
-    /// ウェブリンクが指すURL
+    /// Webリンクが指すURL
     pub url: Option<String>,
 
-    /// ウェブリンクの説明
+    /// Webリンクの説明
     pub description: Option<String>,
 
-    /// ルートフォルダからこのウェブリンクの親フォルダまでのパス
+    /// ルートフォルダからこのWebリンクの親フォルダまでのパス
     pub path_collection: Option<PathCollection>,
 
-    /// BOX上でウェブリンクを作成した日時
+    /// BOX上でWebリンクを作成した日時
     #[serde(default, with = "time::serde::rfc3339::option")]
     pub created_at: Option<OffsetDateTime>,
 
-    /// BOX上でウェブリンクを最後に更新した日時
+    /// BOX上でWebリンクを最後に更新した日時
     #[serde(default, with = "time::serde::rfc3339::option")]
     pub modified_at: Option<OffsetDateTime>,
 
-    /// ウェブリンクをゴミ箱に移動した日時
+    /// Webリンクをゴミ箱に移動した日時
     #[serde(default, with = "time::serde::rfc3339::option")]
     pub trashed_at: Option<OffsetDateTime>,
 
-    /// ゴミ箱に移動したウェブリンクを完全に削除する予定の日時
+    /// ゴミ箱に移動したWebリンクを完全に削除する予定の日時
     #[serde(default, with = "time::serde::rfc3339::option")]
     pub purged_at: Option<OffsetDateTime>,
 
-    /// ウェブリンクを作成したユーザー
+    /// Webリンクを作成したユーザー
     pub created_by: Option<UserMini>,
 
-    /// ウェブリンクを最後に更新したユーザー
+    /// Webリンクを最後に更新したユーザー
     pub modified_by: Option<UserMini>,
 
-    /// ウェブリンクを所有するユーザー
+    /// Webリンクを所有するユーザー
     pub owned_by: Option<UserMini>,
 
     /// 親フォルダ
     pub parent: Option<FolderItem>,
 
-    /// ウェブリンクの状態
+    /// Webリンクの状態
     pub item_status: Option<ItemStatus>,
 }
 
 impl BoxClient {
-    /// ウェブリンク情報を取得する。
+    /// Webリンク情報を取得する。
     ///
     /// # Arguments
     ///
-    /// - `web_link_id`: 情報を取得するウェブリンクのID
+    /// - `web_link_id`: 情報を取得するWebリンクのID
     ///
     /// # Errors
     ///
-    /// ウェブリンクが存在しない場合、またはウェブリンクにアクセスする権限がない場合は、
+    /// Webリンクが存在しない場合、またはWebリンクにアクセスする権限がない場合は、
     /// [`BoxClientError::Api`](crate::BoxClientError::Api)を返す。
     /// 再試行できないエラーが発生した場合、または再試行回数の上限に達した場合はエラーを返す。
     pub async fn web_link_information(&self, web_link_id: &WebLinkId) -> BoxClientResult<WebLink> {
@@ -85,11 +85,11 @@ impl BoxClient {
             .await
     }
 
-    /// ウェブリンクを削除する。
+    /// Webリンクを削除する。
     ///
     /// クライアントは、5xxを受け取った場合、またはタイムアウトした場合に、同じリクエストを再送して再試行する。
-    /// しかし、これらの場合は、BOXがウェブリンクの削除を完了している可能性がある。
-    /// BOXが削除した後にリクエストを再送すると、削除済みのウェブリンクに対する削除となるため、BOXはエラーを返しうる。
+    /// しかし、これらの場合は、BOXがWebリンクの削除を完了している可能性がある。
+    /// BOXが削除した後にリクエストを再送すると、削除済みのWebリンクに対する削除となるため、BOXはエラーを返しうる。
     /// その結果、削除に成功したにもかかわらず、削除に失敗したと誤って判断するおそれがある。
     /// したがって、HTTPメソッドがDELETEであっても冪等でないリクエストとして送信し、
     /// BOXがリクエストを処理していないことが明らかな429、エラーコードが`operation_blocked_temporary`の409
@@ -97,7 +97,7 @@ impl BoxClient {
     ///
     /// # Arguments
     ///
-    /// - `web_link_id`: 削除するウェブリンクのID
+    /// - `web_link_id`: 削除するWebリンクのID
     ///
     /// # Errors
     ///
@@ -105,8 +105,8 @@ impl BoxClient {
     /// 公式ドキュメントは、このAPIが返すエラーのステータスを個別に記載していない。
     ///
     /// 再試行できないエラーが発生した場合、または再試行回数の上限に達した場合はエラーを返す。
-    /// 5xxまたはタイムアウトでエラーを返した場合は、BOXがウェブリンクを削除した可能性があるため、
-    /// [`BoxClient::web_link_information`]でウェブリンクの状態を確認する。
+    /// 5xxまたはタイムアウトでエラーを返した場合は、BOXがWebリンクを削除した可能性があるため、
+    /// [`BoxClient::web_link_information`]でWebリンクの状態を確認する。
     pub async fn delete_web_link(&self, web_link_id: &WebLinkId) -> BoxClientResult<()> {
         let request = ApiRequest::delete(["web_links", web_link_id.as_ref()])
             .idempotency(Idempotency::NonIdempotent);
@@ -204,7 +204,7 @@ mod test_web_link {
         Ok(())
     }
 
-    /// IDおよび名前以外の属性が欠落しているウェブリンクをデシリアライズすることを確認
+    /// IDおよび名前以外の属性が欠落しているWebリンクをデシリアライズすることを確認
     #[test]
     fn test_deserialize_minimal() -> anyhow::Result<()> {
         let web_link: WebLink = serde_json::from_value(json!({
@@ -249,7 +249,7 @@ mod test_web_link_information {
         test_support::{create_client, mount_token, short_retry},
     };
 
-    /// `GET /web_links/{web_link_id}`を呼び出し、ウェブリンク情報をデシリアライズすることを確認
+    /// `GET /web_links/{web_link_id}`を呼び出し、Webリンク情報をデシリアライズすることを確認
     #[tokio::test]
     async fn test_web_link_information() -> anyhow::Result<()> {
         let server = MockServer::start().await;
@@ -281,7 +281,7 @@ mod test_web_link_information {
         Ok(())
     }
 
-    /// ウェブリンクが存在しない場合は、BOXのエラーレスポンスを返すことを確認
+    /// Webリンクが存在しない場合は、BOXのエラーレスポンスを返すことを確認
     #[tokio::test]
     async fn test_web_link_information_not_found() -> anyhow::Result<()> {
         let server = MockServer::start().await;
@@ -324,10 +324,10 @@ mod test_delete_web_link {
         test_support::{create_client, mount_token, short_retry},
     };
 
-    /// ウェブリンクのAPIのパス
+    /// WebリンクのAPIのパス
     const WEB_LINK_PATH: &str = "/2.0/web_links/123";
 
-    /// ウェブリンクのAPIへのDELETEリクエストの数を返す。
+    /// WebリンクのAPIへのDELETEリクエストの数を返す。
     async fn delete_count(server: &MockServer) -> usize {
         server
             .received_requests()
@@ -360,7 +360,7 @@ mod test_delete_web_link {
 
     /// BOXのエラーレスポンスを、再試行せずにそのまま返すことを確認
     ///
-    /// 5xxの後に再送すると、削除済みのウェブリンクに対してエラーを受け取るおそれがあるため、
+    /// 5xxの後に再送すると、削除済みのWebリンクに対してエラーを受け取るおそれがあるため、
     /// 再試行の上限に余裕があっても再送しない。
     #[rstest]
     #[case::forbidden(403)]

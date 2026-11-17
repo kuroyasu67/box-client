@@ -25,13 +25,13 @@ pub struct ListTrashedItemsOptions {
     pub direction: Option<SortDirection>,
 }
 
-/// ゴミ箱内のフォルダ、ファイルまたはウェブリンクを復元するときのオプション
+/// ゴミ箱内のフォルダ、ファイルまたはWebリンクを復元するときのオプション
 ///
-/// BOXはフォルダ、ファイルおよびウェブリンクの復元で同じ形式のリクエストボディを受け付けるため、
+/// BOXはフォルダ、ファイルおよびWebリンクの復元で同じ形式のリクエストボディを受け付けるため、
 /// [`BoxClient::restore_folder`]、[`BoxClient::restore_file`]および[`BoxClient::restore_web_link`]で共有する。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RestoreItemOptions<'a> {
-    /// 復元後のフォルダ名、ファイル名またはウェブリンク名
+    /// 復元後のフォルダ名、ファイル名またはWebリンク名
     ///
     /// 復元先に同じ名前の項目がある場合に、別の名前で復元するために指定する。
     /// `None`の場合は、ゴミ箱に移動する前の名前で復元する。
@@ -44,10 +44,10 @@ pub struct RestoreItemOptions<'a> {
     pub parent_id: Option<&'a FolderId>,
 }
 
-/// フォルダ、ファイルまたはウェブリンクを復元するリクエストのボディ
+/// フォルダ、ファイルまたはWebリンクを復元するリクエストのボディ
 #[derive(Debug, Serialize)]
 struct RestoreItemBody<'a> {
-    /// 復元後のフォルダ名、ファイル名またはウェブリンク名
+    /// 復元後のフォルダ名、ファイル名またはWebリンク名
     #[serde(skip_serializing_if = "Option::is_none")]
     name: Option<&'a str>,
 
@@ -135,17 +135,17 @@ impl BoxClient {
             .await
     }
 
-    /// ゴミ箱内のウェブリンクの情報を取得する。
+    /// ゴミ箱内のWebリンクの情報を取得する。
     ///
     /// # Arguments
     ///
-    /// - `web_link_id`: 情報を取得するゴミ箱内のウェブリンクのID
+    /// - `web_link_id`: 情報を取得するゴミ箱内のWebリンクのID
     ///
     /// # Errors
     ///
     /// BOXがエラーレスポンスを返した場合は、[`BoxClientError::Api`]を返す。主なステータスは次のとおり。
     ///
-    /// - 404: ウェブリンクがゴミ箱にない。
+    /// - 404: Webリンクがゴミ箱にない。
     ///
     /// 再試行できないエラーが発生した場合、または再試行回数の上限に達した場合はエラーを返す。
     pub async fn trashed_web_link_information(
@@ -271,14 +271,14 @@ impl BoxClient {
         Ok(file)
     }
 
-    /// ゴミ箱内のウェブリンクを復元する。
+    /// ゴミ箱内のWebリンクを復元する。
     ///
-    /// BOXはウェブリンクを元の親フォルダに復元する。元の親フォルダが存在しない場合に限り、
+    /// BOXはWebリンクを元の親フォルダに復元する。元の親フォルダが存在しない場合に限り、
     /// `options.parent_id`で指定したフォルダに復元する。
     ///
     /// クライアントは、5xxを受け取った場合、またはタイムアウトした場合に、同じリクエストを再送して再試行する。
-    /// しかし、これらの場合は、BOXがウェブリンクの復元を完了している可能性がある。
-    /// 復元に成功したウェブリンクはゴミ箱からなくなるため、BOXが復元した後にリクエストを再送すると、BOXは404を返す。
+    /// しかし、これらの場合は、BOXがWebリンクの復元を完了している可能性がある。
+    /// 復元に成功したWebリンクはゴミ箱からなくなるため、BOXが復元した後にリクエストを再送すると、BOXは404を返す。
     /// その結果、復元に成功したにもかかわらず、復元に失敗したと誤って判断するおそれがある。
     /// したがって、このリクエストを冪等でないリクエストとして送信し、BOXがリクエストを処理していないことが
     /// 明らかな429、エラーコードが`operation_blocked_temporary`の409および接続エラーの後にのみ再試行する。
@@ -286,20 +286,20 @@ impl BoxClient {
     ///
     /// # Arguments
     ///
-    /// - `web_link_id`: 復元するゴミ箱内のウェブリンクのID
-    /// - `options`: 復元後のウェブリンク名および復元先の親フォルダのオプション
+    /// - `web_link_id`: 復元するゴミ箱内のWebリンクのID
+    /// - `options`: 復元後のWebリンク名および復元先の親フォルダのオプション
     ///
     /// # Errors
     ///
     /// BOXがエラーレスポンスを返した場合は、[`BoxClientError::Api`]を返す。主なステータスは次のとおり。
     ///
-    /// - 403: ゴミ箱からウェブリンクを復元する権限がない、または復元先のフォルダにアクセスする権限がない。
-    /// - 404: ウェブリンクがゴミ箱にない。
-    /// - 409: 復元先に同じ名前のウェブリンクがある。`options.name`に別の名前を指定して再度呼び出す。
+    /// - 403: ゴミ箱からWebリンクを復元する権限がない、または復元先のフォルダにアクセスする権限がない。
+    /// - 404: Webリンクがゴミ箱にない。
+    /// - 409: 復元先に同じ名前のWebリンクがある。`options.name`に別の名前を指定して再度呼び出す。
     ///
     /// 再試行できないエラーが発生した場合、または再試行回数の上限に達した場合はエラーを返す。
-    /// 5xxまたはタイムアウトでエラーを返した場合は、BOXがウェブリンクを復元した可能性があるため、
-    /// [`BoxClient::web_link_information`]でウェブリンクの状態を確認する。
+    /// 5xxまたはタイムアウトでエラーを返した場合は、BOXがWebリンクを復元した可能性があるため、
+    /// [`BoxClient::web_link_information`]でWebリンクの状態を確認する。
     pub async fn restore_web_link(
         &self,
         web_link_id: &WebLinkId,
@@ -320,7 +320,7 @@ impl BoxClient {
 
     /// ゴミ箱内の項目を1ページ分リストする。
     ///
-    /// BOXは、ユーザーがゴミ箱に直接移動したファイル、フォルダおよびウェブリンクを返す。
+    /// BOXは、ユーザーがゴミ箱に直接移動したファイル、フォルダおよびWebリンクを返す。
     /// ゴミ箱に直接移動したフォルダの子孫にあたる項目は、ゴミ箱に入っていても返さない。
     ///
     /// 1回の呼び出しで返す項目は最大で`limit`件であるため、ゴミ箱に後続の項目が残っている
@@ -604,7 +604,7 @@ mod test_trashed_web_link_information {
         test_support::{create_client, mount_token, short_retry},
     };
 
-    /// `GET /web_links/{web_link_id}/trash`を呼び出し、ゴミ箱に移動した日時と状態を含むウェブリンク情報をデシリアライズすることを確認
+    /// `GET /web_links/{web_link_id}/trash`を呼び出し、ゴミ箱に移動した日時と状態を含むWebリンク情報をデシリアライズすることを確認
     #[tokio::test]
     async fn test_trashed_web_link_information() -> anyhow::Result<()> {
         let server = MockServer::start().await;
@@ -619,7 +619,7 @@ mod test_trashed_web_link_information {
                 "name": "Example",
                 "url": "https://www.example.com/",
                 "description": "Example web site",
-                // BOXはゴミ箱内のウェブリンクのパスを、ETagおよびシーケンスIDがnullのゴミ箱フォルダで返す
+                // BOXはゴミ箱内のWebリンクのパスを、ETagおよびシーケンスIDがnullのゴミ箱フォルダで返す
                 "path_collection": {
                     "total_count": 1,
                     "entries": [
@@ -658,7 +658,7 @@ mod test_trashed_web_link_information {
         Ok(())
     }
 
-    /// ウェブリンクがゴミ箱にない場合は、BOXのエラーレスポンスを返すことを確認
+    /// Webリンクがゴミ箱にない場合は、BOXのエラーレスポンスを返すことを確認
     #[tokio::test]
     async fn test_trashed_web_link_information_not_found() -> anyhow::Result<()> {
         let server = MockServer::start().await;
@@ -1112,10 +1112,10 @@ mod test_restore_web_link {
         test_support::{create_client, mount_token, short_retry},
     };
 
-    /// ウェブリンクのAPIのパス
+    /// WebリンクのAPIのパス
     const WEB_LINK_PATH: &str = "/2.0/web_links/123";
 
-    /// 復元したウェブリンクのレスポンスを返す。
+    /// 復元したWebリンクのレスポンスを返す。
     fn restored_response() -> ResponseTemplate {
         ResponseTemplate::new(201).set_body_json(json!({
             "type": "web_link",
@@ -1131,7 +1131,7 @@ mod test_restore_web_link {
         }))
     }
 
-    /// ウェブリンクのAPIへのPOSTリクエストの数を返す。
+    /// WebリンクのAPIへのPOSTリクエストの数を返す。
     async fn post_count(server: &MockServer) -> usize {
         server
             .received_requests()
@@ -1142,7 +1142,7 @@ mod test_restore_web_link {
             .count()
     }
 
-    /// `POST /web_links/{web_link_id}`にオプションをボディとして送信し、復元したウェブリンク情報を返すことを確認
+    /// `POST /web_links/{web_link_id}`にオプションをボディとして送信し、復元したWebリンク情報を返すことを確認
     #[tokio::test]
     async fn test_restore_web_link() -> anyhow::Result<()> {
         let server = MockServer::start().await;
@@ -1179,7 +1179,7 @@ mod test_restore_web_link {
 
     /// BOXのエラーレスポンスを、再試行せずにそのまま返すことを確認
     ///
-    /// 5xxの後に再送すると、復元済みのウェブリンクに対して404を受け取るおそれがあるため、
+    /// 5xxの後に再送すると、復元済みのWebリンクに対して404を受け取るおそれがあるため、
     /// 再試行の上限に余裕があっても再送しない。
     #[rstest]
     #[case::forbidden(403)]

@@ -53,7 +53,7 @@ pub enum BoxItem {
     /// フォルダ
     Folder(FolderItem),
 
-    /// ウェブリンク
+    /// Webリンク
     WebLink(WebLinkItem),
 
     /// このクライアントが知らない種類の項目
@@ -91,17 +91,17 @@ pub struct FolderItem {
     pub etag: Option<String>,
 }
 
-/// フォルダ内のウェブリンク
+/// フォルダ内のWebリンク
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[non_exhaustive]
 pub struct WebLinkItem {
-    /// ウェブリンクID
+    /// WebリンクID
     pub id: WebLinkId,
 
-    /// ウェブリンク名
+    /// Webリンク名
     pub name: String,
 
-    /// ウェブリンクのバージョンを識別する`ETag`
+    /// Webリンクのバージョンを識別する`ETag`
     pub etag: Option<String>,
 }
 
