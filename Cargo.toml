@@ -7,6 +7,7 @@ exclude      = ["deny.toml", "prek.toml", "taplo.toml"]
 keywords     = ["box", "api", "client", "jwt", "cloud-storage"]
 license      = "MIT OR Apache-2.0"
 name         = "box-client"
+repository   = "https://github.com/kuroyasu67/box-client"
 rust-version = "1.91"
 version      = "0.1.0"
 
