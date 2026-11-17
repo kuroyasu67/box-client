@@ -129,7 +129,7 @@ impl RetryPolicy {
     ///
     /// - `number_of_retries`: 今回の再試行を含む再試行回数。`0`は最初のリクエストを表す。
     pub(crate) fn delay_duration(&self, number_of_retries: u32) -> Duration {
-        // 再試行でない場合は待機しない
+        // 再試行でない場合は待機しない。
         if number_of_retries < 1 {
             return Duration::ZERO;
         }
@@ -197,7 +197,7 @@ impl RetryPolicy {
         }
     }
 
-    /// `0`以上最大ジッター時間以下の乱数の時間を返す。
+    /// `0`以上`max_jitter`以下の乱数の時間を返す。
     ///
     /// # Arguments
     ///
@@ -209,7 +209,7 @@ impl RetryPolicy {
     fn jitter<R: Rng + ?Sized>(&self, rng: &mut R) -> Duration {
         const NANOS_PER_SEC: u128 = 1_000_000_000;
 
-        // 最大ジッター時間のナノ秒はu64に収まらない場合があるため、u128で乱数を生成
+        // `max_jitter`のナノ秒はu64に収まらない場合があるため、u128で乱数を生成する。
         let nanos = rng.random_range(0..=self.max_jitter.as_nanos());
         // `nanos`は`max_jitter`のナノ秒以下であるため、秒はu64に、秒未満のナノ秒はu32に収まる。
         Duration::new(
@@ -227,7 +227,7 @@ impl RetryPolicy {
 pub enum Idempotency {
     /// 同じリクエストを何度送信しても結果が変わらない。
     ///
-    /// 429、5xx、タイムアウトおよび通信エラーの後に再試行する。
+    /// 429、エラーコードが`operation_blocked_temporary`の409、5xx、タイムアウトおよび通信エラーの後に再試行する。
     Idempotent,
 
     /// 同じリクエストを送信するたびに結果が変わりうる。
@@ -460,13 +460,13 @@ mod test_retry_policy {
 
     /// 設定値が条件を満たす場合は、再試行設定を作成できることを確認
     #[rstest]
-    // 初期待機時間の下限
+    // `initial_delay`の下限
     #[case::min_initial_delay(Duration::from_nanos(1), Duration::from_secs(1))]
-    // 初期待機時間と最大待機時間が一致
+    // `initial_delay`が`max_delay`と一致
     #[case::initial_delay_equals_max_delay(Duration::from_secs(3), Duration::from_secs(1))]
     // ジッターを加算しない
     #[case::zero_jitter(Duration::from_millis(500), Duration::ZERO)]
-    // 最大ジッター時間が最大待機時間と一致
+    // `max_jitter`が`max_delay`と一致
     #[case::max_jitter_equals_max_delay(Duration::from_millis(500), Duration::from_secs(3))]
     fn test_new_valid(
         #[case] initial_delay: Duration,
@@ -486,14 +486,14 @@ mod test_retry_policy {
 
     /// 設定値が条件を満たさない場合は、再試行設定の不正エラーを返すことを確認
     #[rstest]
-    // 初期待機時間がゼロ
+    // `initial_delay`が0
     #[case::zero_initial_delay(Duration::ZERO, Duration::from_secs(1))]
-    // 初期待機時間が最大待機時間よりも1ナノ秒大きい
+    // `initial_delay`が`max_delay`よりも1ナノ秒大きい
     #[case::initial_delay_exceeds_max_delay(
         Duration::from_secs(3) + Duration::from_nanos(1),
         Duration::from_secs(1)
     )]
-    // 最大ジッター時間が最大待機時間よりも1ナノ秒大きい
+    // `max_jitter`が`max_delay`よりも1ナノ秒大きい
     #[case::max_jitter_exceeds_max_delay(
         Duration::from_millis(500),
         Duration::from_secs(3) + Duration::from_nanos(1)

@@ -335,7 +335,7 @@ impl BoxClient {
     ///
     /// # Errors
     ///
-    /// `options.limit`が範囲外の場合は、リクエストを送信せずに[`crate::BoxClientError::InvalidArgument`]を返す。
+    /// `options.limit`が範囲外の場合は、リクエストを送信せずに[`BoxClientError::InvalidArgument`]を返す。
     /// 再試行できないエラーが発生した場合、または再試行回数の上限に達した場合はエラーを返す。
     pub async fn list_trashed_items(
         &self,
@@ -368,8 +368,8 @@ impl BoxClient {
     ///
     /// # Errors
     ///
-    /// `options.limit`が範囲外の場合は、リクエストを送信せずに[`crate::BoxClientError::InvalidArgument`]を返す。
-    /// BOXが以前に返したマーカーを再び返した場合、このメソッドは無限ループを避けるため[`crate::BoxClientError::UnexpectedResponse`]を返す。
+    /// `options.limit`が範囲外の場合は、リクエストを送信せずに[`BoxClientError::InvalidArgument`]を返す。
+    /// BOXが以前に返したマーカーを再び返した場合、このメソッドは無限ループを避けるため[`BoxClientError::UnexpectedResponse`]を返す。
     /// いずれかのページの取得に失敗した場合は、取得済みの項目を破棄してエラーを返す。
     pub async fn list_all_trashed_items(
         &self,
@@ -525,7 +525,7 @@ mod test_trashed_file_information {
                 "name": "Contract.pdf",
                 "sha1": "85136c79cbf9fe36bb9d05d0639c70c265c18d37",
                 "size": 629_644,
-                // BOXはゴミ箱内のファイルのパスを、ETagおよびシーケンスIDがnullのゴミ箱フォルダで返す
+                // BOXはゴミ箱内のファイルのパスを、ETagおよびシーケンスIDがnullのゴミ箱フォルダで返す。
                 "path_collection": {
                     "total_count": 1,
                     "entries": [
@@ -619,7 +619,7 @@ mod test_trashed_web_link_information {
                 "name": "Example",
                 "url": "https://www.example.com/",
                 "description": "Example web site",
-                // BOXはゴミ箱内のWebリンクのパスを、ETagおよびシーケンスIDがnullのゴミ箱フォルダで返す
+                // BOXはゴミ箱内のWebリンクのパスを、ETagおよびシーケンスIDがnullのゴミ箱フォルダで返す。
                 "path_collection": {
                     "total_count": 1,
                     "entries": [
@@ -1394,7 +1394,7 @@ mod test_list_all_trashed_items {
     async fn test_list_all_trashed_items(#[case] last_marker: Value) -> anyhow::Result<()> {
         let server = MockServer::start().await;
         mount_token(&server).await;
-        // 項目数の上限を省略した場合は、上限の1000件ずつ取得する
+        // 項目数の上限を省略した場合は、上限の1000件ずつ取得する。
         Mock::given(method("GET"))
             .and(path(TRASH_ITEMS_PATH))
             .and(query_param("limit", "1000"))

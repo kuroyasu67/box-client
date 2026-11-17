@@ -255,9 +255,8 @@ impl BoxClient {
 
     /// フォルダを削除する。
     ///
-    /// BOXはフォルダをゴミ箱に移動するか、完全に削除する。
-    /// BOXはデフォルトでゴミ箱が有効になっており、ゴミ箱が有効な場合、フォルダをゴミ箱に移動する。
-    /// ゴミ箱が無効な場合、ゴミ箱を経由せず、フォルダを完全かつ永久的に削除する。
+    /// BOXは、ゴミ箱が有効な場合はフォルダをゴミ箱に移動し、無効な場合はフォルダを完全に削除する。
+    /// BOXでは、ゴミ箱は既定で有効である。
     ///
     /// 項目の多いフォルダの削除には時間がかかる。BOXは削除に600秒以上かかると503を返すが、削除処理はその後も継続する。
     /// ただし、[`BoxClientTimeout::request_timeout`](crate::BoxClientTimeout::request_timeout)の既定値は30秒であるため、
@@ -528,7 +527,7 @@ mod test_folder {
         assert_eq!(folder.id, FolderId::root());
         assert_eq!(folder.etag, None);
         assert_eq!(folder.created_at, None);
-        // レスポンスに存在しない日時の属性も`None`として受け入れる
+        // レスポンスに存在しない日時の属性も`None`として受け入れる。
         assert_eq!(folder.trashed_at, None);
         assert_eq!(folder.parent, None);
         assert_eq!(folder.path_collection.map(|p| p.entries.len()), Some(0));
@@ -1016,7 +1015,7 @@ mod test_list_all_items_in_folder {
     async fn test_list_all_items_in_folder(#[case] last_marker: Value) -> anyhow::Result<()> {
         let server = MockServer::start().await;
         mount_token(&server).await;
-        // 項目数の上限を省略した場合は、上限の1000件ずつ取得する
+        // 項目数の上限を省略した場合は、上限の1000件ずつ取得する。
         Mock::given(method("GET"))
             .and(path(ITEMS_PATH))
             .and(query_param("limit", "1000"))

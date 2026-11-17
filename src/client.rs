@@ -47,7 +47,7 @@ pub const MAX_REFRESH_BEFORE_EXPIRY: Duration = Duration::from_mins(30);
 /// BOXクライアント
 ///
 /// BOXのAPIを呼び出すそれぞれのメソッドは、再試行設定に従って待機と再試行を行い、アクセストークンの
-/// 有効期限が近づくと自動でアクセストークンを再取得する。
+/// 有効期限が近づくと自動でアクセストークンを取得し直す。
 ///
 /// APIメソッドを追加するときは、[`ApiRequest`]を組み立てて[`BoxClient::send_json`]または
 /// [`BoxClient::send_empty`]に渡す。
@@ -626,7 +626,7 @@ mod test_box_client {
         Ok(())
     }
 
-    /// 401を受けた場合は、アクセストークンを取得し直して1回だけ再送することを確認
+    /// 401を受け取った場合は、アクセストークンを取得し直して1回だけ再送することを確認
     #[rstest]
     #[case::get("GET")]
     #[case::post("POST")]
@@ -650,7 +650,7 @@ mod test_box_client {
         Ok(())
     }
 
-    /// アクセストークンを取得し直しても401を受けた場合は、エラーを返すことを確認
+    /// アクセストークンを取得し直しても401を受け取った場合は、エラーを返すことを確認
     #[tokio::test]
     async fn test_send_fails_on_repeated_unauthorized() -> anyhow::Result<()> {
         let server = MockServer::start().await;

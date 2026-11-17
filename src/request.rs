@@ -179,7 +179,7 @@ mod test_api_request {
     #[rstest]
     #[case::single(vec!["users"], "https://api.box.com/2.0/users")]
     #[case::with_id(vec!["folders", "123"], "https://api.box.com/2.0/folders/123")]
-    // パス要素に含まれる/および?をエンコードし、パス要素の一部として扱う
+    // パス要素に含まれる/および?をエンコードし、パス要素の一部として扱う。
     #[case::slash_in_id(vec!["folders", "1/items"], "https://api.box.com/2.0/folders/1%2Fitems")]
     #[case::query_in_id(vec!["folders", "1?a=b"], "https://api.box.com/2.0/folders/1%3Fa=b")]
     #[case::percent_in_id(vec!["folders", "%2E%2E"], "https://api.box.com/2.0/folders/%252E%252E")]

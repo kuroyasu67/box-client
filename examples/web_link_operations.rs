@@ -12,7 +12,7 @@ const USAGE: &str = "usage: RUST_LOG=info cargo run --quiet --example=web_link_o
 /// ```
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // 先頭の要素はプログラム名であるため読み飛ばす
+    // 先頭の要素はプログラム名であるため読み飛ばす。
     let args: Vec<String> = std::env::args().skip(1).collect();
     let (web_link_id, skip_to_restore) = match args.as_slice() {
         [web_link_id] => (WebLinkId::new(web_link_id.as_str()), false),

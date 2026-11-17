@@ -127,7 +127,7 @@ mod test_box_config {
     /// BOX設定ファイルをJSONとして解釈できない場合は、パスを含む解析エラーを返すことを確認
     #[test]
     fn test_from_file_invalid_json() -> anyhow::Result<()> {
-        // pretty-format-jsonフックが不正なJSONファイルを拒否するため、リポジトリに置かずに一時ファイルを作成する。
+        // 不正なJSONファイルをリポジトリに置かないように、テストの実行時に一時ファイルとして作成する。
         let path = std::env::temp_dir().join(format!("box-config-{}.json", uuid::Uuid::new_v4()));
         std::fs::write(&path, "not json")?;
 
