@@ -303,7 +303,9 @@ where
                 return Ok(value);
             }
             Err(AttemptError::Fatal(error)) => {
-                tracing::error!(
+                // 再試行できないエラーは、そのまま呼び出し元に返す。404のように呼び出し元が想定しているエラーもあり、
+                // 異常とみなすかどうかは呼び出し元が判断するため、DEBUGで出力する。
+                tracing::debug!(
                     operation,
                     attempts,
                     elapsed_ms = started_at.elapsed().as_millis(),

@@ -315,6 +315,8 @@ let client = BoxClient::builder(config)
 
 再試行に関するイベントは、`tracing`で構造化ログとして出力する。
 ライブラリが利用者のアプリケーションのログを埋めないように、成功を知らせるイベントはDEBUGで出力し、利用者が対処を検討すべきイベントだけをWARNまたはERRORで出力する。
+再試行できないエラーは、再試行せずにそのまま呼び出し元に返すため、DEBUGで出力する。
+404のように呼び出し元が想定しているエラーもあるため、エラーを異常とみなすかどうかは呼び出し元が判断する。
 フォルダの削除やゴミ箱からの復元など、各APIの処理が完了したことを知らせるイベントも、DEBUGで出力する。
 401を受け取ったとき、およびアクセストークンのバックグラウンドでの取得に失敗したときのイベントを除き、各イベントは処理名`operation`および試行回数`attempts`を含む。
 `operation`は、REST APIへのリクエストでは`box_api_request`、アクセストークンの取得では`fetch_access_token`である。
@@ -326,7 +328,7 @@ let client = BoxClient::builder(config)
 | WARN | `retrying` | 再試行する。待機時間`delay_ms`と、待機時間を決めた方法`delay_source`を含む。`delay_source`は`retry_after`または`backoff`である。 |
 | WARN | `access token was rejected; fetching a new one and resending` | 401を受け取り、アクセストークンを取得し直して再送する。 |
 | WARN | `failed to refresh access token in background; using the cached token until it expires` | `BoxClient`が、アクセストークンをバックグラウンドで取得できなかった。`BoxClient`は、キャッシュしたアクセストークンを期限が切れるまで使用する。このイベントは、原因のエラー`error`を含む。 |
-| ERROR | `failed with non-retryable error` | 再試行できないエラーが発生した。 |
+| DEBUG | `failed with non-retryable error` | 再試行できないエラーが発生した。 |
 | ERROR | `failed after reaching max retries` | 再試行回数が上限に達した。 |
 | ERROR | `gave up retrying` | `Retry-After`ヘッダーが示す待機時間が上限を超えたため、再試行を中止した。`Retry-After`ヘッダーが示す待機時間`retry_after_ms`と、待機時間の上限`max_delay_ms`を含む。 |
 
