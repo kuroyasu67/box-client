@@ -1,5 +1,118 @@
 # Box Client
 
+## 対応APIリスト
+
+`BoxClient`のメソッドから呼び出せるBOXのREST APIを、リソースごとに示す。
+
+### ユーザー
+
+#### 認証中のユーザーの取得
+
+- メソッド: `BoxClient::me`
+- BOX API: `GET /users/me`
+- 認証中のユーザーを取得する。
+  JWT認証でエンタープライズとして認証している場合は、アプリケーションのサービスアカウントを返す。
+
+### フォルダ
+
+#### フォルダ情報の取得
+
+- メソッド: `BoxClient::folder_information`
+- BOX API: `GET /folders/{folder_id}`
+- フォルダ情報を取得する。
+  ルートフォルダの情報を取得する場合は、フォルダIDに`FolderId::root()`を指定する。
+
+#### フォルダ内の項目のリスト
+
+- メソッド: `BoxClient::list_items_in_folder`および`BoxClient::list_all_items_in_folder`
+- BOX API: `GET /folders/{folder_id}/items`
+- フォルダ内のファイル、フォルダおよびウェブリンクをリストする。
+- `list_items_in_folder`は、マーカー方式のページ送りで1ページ分の項目を返す。
+  `list_all_items_in_folder`は、ページを送りながらすべての項目を返す。
+- 1ページで取得する項目数の上限、並び替えに使用する属性および並び替えの方向を、`ListItemsOptions`で指定する。
+
+#### フォルダの削除
+
+- メソッド: `BoxClient::delete_folder`
+- BOX API: `DELETE /folders/{folder_id}`
+- フォルダを削除する。
+  BOXは、ゴミ箱が有効な場合はフォルダをゴミ箱に移動し、無効な場合はフォルダを完全に削除する。
+- 空でないフォルダを削除するかどうか、およびETagを、`DeleteFolderOptions`で指定する。
+- ルートフォルダを指定した場合は、リクエストを送信せずにエラーを返す。
+- 冪等でないリクエストとして送信する。理由は「[冪等性の決定](#冪等性の決定)」を参照する。
+
+### ファイル
+
+#### ファイル情報の取得
+
+- メソッド: `BoxClient::file_information`
+- BOX API: `GET /files/{file_id}`
+- ファイル情報を取得する。
+
+#### ファイルの削除
+
+- メソッド: `BoxClient::delete_file`
+- BOX API: `DELETE /files/{file_id}`
+- ファイルを削除する。
+  BOXは、エンタープライズの設定に従って、ファイルをゴミ箱に移動するか、完全に削除する。
+- ETagを指定した場合は、`If-Match`ヘッダーで送信する。
+- 冪等でないリクエストとして送信する。理由は「[冪等性の決定](#冪等性の決定)」を参照する。
+
+### ウェブリンク
+
+#### ウェブリンク情報の取得
+
+- メソッド: `BoxClient::web_link_information`
+- BOX API: `GET /web_links/{web_link_id}`
+- ウェブリンク情報を取得する。
+
+### ゴミ箱
+
+#### ゴミ箱内の項目のリスト
+
+- メソッド: `BoxClient::list_trashed_items`および`BoxClient::list_all_trashed_items`
+- BOX API: `GET /folders/trash/items`
+- ゴミ箱に直接移動したファイル、フォルダおよびウェブリンクをリストする。
+  ゴミ箱に直接移動したフォルダの子孫にあたる項目は返さない。
+- `list_trashed_items`は、マーカー方式のページ送りで1ページ分の項目を返す。
+  `list_all_trashed_items`は、ページを送りながらすべての項目を返す。
+- 1ページで取得する項目数の上限および並び替えの方向を、`ListTrashedItemsOptions`で指定する。
+  BOXはマーカー方式のページ送りと並び替えに使用する属性の指定を併用できないため、並び替えに使用する属性は指定できない。
+
+#### ゴミ箱内のフォルダ情報の取得
+
+- メソッド: `BoxClient::trashed_folder_information`
+- BOX API: `GET /folders/{folder_id}/trash`
+- ゴミ箱に直接移動したフォルダの情報を取得する。
+  ゴミ箱に直接移動したフォルダの子孫フォルダを指定した場合、BOXは404を返す。
+- ルートフォルダを指定した場合は、リクエストを送信せずにエラーを返す。
+
+#### ゴミ箱内のファイル情報の取得
+
+- メソッド: `BoxClient::trashed_file_information`
+- BOX API: `GET /files/{file_id}/trash`
+- ゴミ箱に直接移動したファイルの情報を取得する。
+  ゴミ箱に直接移動したフォルダの子孫にあたるファイルを指定した場合、BOXは404を返す。
+
+#### ゴミ箱内のフォルダの復元
+
+- メソッド: `BoxClient::restore_folder`
+- BOX API: `POST /folders/{folder_id}`
+- ゴミ箱に直接移動したフォルダを、元の親フォルダに復元する。
+- 復元後のフォルダ名、および元の親フォルダが存在しない場合の復元先の親フォルダを、`RestoreItemOptions`で指定する。
+- ルートフォルダを指定した場合は、リクエストを送信せずにエラーを返す。
+- 復元に成功したフォルダはゴミ箱からなくなるため、BOXが復元した後に再送すると、BOXは404を返す。
+  したがって、冪等でないリクエストとして送信する。
+
+#### ゴミ箱内のファイルの復元
+
+- メソッド: `BoxClient::restore_file`
+- BOX API: `POST /files/{file_id}`
+- ゴミ箱に直接移動したファイルを、元の親フォルダに復元する。
+- 復元後のファイル名、および元の親フォルダが存在しない場合の復元先の親フォルダを、`RestoreItemOptions`で指定する。
+- 復元に成功したファイルはゴミ箱からなくなるため、BOXが復元した後に再送すると、BOXは404を返す。
+  したがって、冪等でないリクエストとして送信する。
+
 ## 再試行の仕組み
 
 `BoxClient`は、BOXのREST APIおよびトークンエンドポイントへのリクエストが失敗すると、失敗の種類とリクエストの冪等性から再試行するかどうかを判定する。
