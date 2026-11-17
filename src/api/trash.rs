@@ -24,10 +24,13 @@ pub struct ListTrashedItemsOptions {
     pub direction: Option<SortDirection>,
 }
 
-/// ゴミ箱内のフォルダを復元するときのオプション
+/// ゴミ箱内のフォルダまたはファイルを復元するときのオプション
+///
+/// BOXはフォルダの復元とファイルの復元で同じ形式のリクエストボディを受け付けるため、
+/// [`BoxClient::restore_folder`]および[`BoxClient::restore_file`]で共有する。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct RestoreFolderOptions<'a> {
-    /// 復元後のフォルダ名
+pub struct RestoreItemOptions<'a> {
+    /// 復元後のフォルダ名またはファイル名
     ///
     /// 復元先に同じ名前の項目がある場合に、別の名前で復元するために指定する。
     /// `None`の場合は、ゴミ箱に移動する前の名前で復元する。
@@ -40,10 +43,10 @@ pub struct RestoreFolderOptions<'a> {
     pub parent_id: Option<&'a FolderId>,
 }
 
-/// フォルダを復元するリクエストのボディ
+/// フォルダまたはファイルを復元するリクエストのボディ
 #[derive(Debug, Serialize)]
-struct RestoreFolderBody<'a> {
-    /// 復元後のフォルダ名
+struct RestoreItemBody<'a> {
+    /// 復元後のフォルダ名またはファイル名
     #[serde(skip_serializing_if = "Option::is_none")]
     name: Option<&'a str>,
 
@@ -59,8 +62,8 @@ struct ParentReference<'a> {
     id: &'a str,
 }
 
-impl<'a> From<&RestoreFolderOptions<'a>> for RestoreFolderBody<'a> {
-    fn from(options: &RestoreFolderOptions<'a>) -> Self {
+impl<'a> From<&RestoreItemOptions<'a>> for RestoreItemBody<'a> {
+    fn from(options: &RestoreItemOptions<'a>) -> Self {
         Self {
             name: options.name,
             parent: options
@@ -173,7 +176,7 @@ impl BoxClient {
     pub async fn restore_folder(
         &self,
         folder_id: &FolderId,
-        options: &RestoreFolderOptions<'_>,
+        options: &RestoreItemOptions<'_>,
     ) -> BoxClientResult<Folder> {
         if folder_id.is_root() {
             return Err(BoxClientError::InvalidArgument(
@@ -182,7 +185,7 @@ impl BoxClient {
         }
 
         let request = ApiRequest::post(["folders", folder_id.as_ref()])
-            .json(&RestoreFolderBody::from(options))?;
+            .json(&RestoreItemBody::from(options))?;
         let folder: Folder = self.send_json(request).await?;
 
         tracing::info!(
@@ -192,6 +195,54 @@ impl BoxClient {
         );
 
         Ok(folder)
+    }
+
+    /// ゴミ箱内のファイルを復元する。
+    ///
+    /// 復元できるのは、ゴミ箱に直接移動したファイルだけである。
+    /// BOXはファイルを元の親フォルダに復元する。元の親フォルダが存在しない場合に限り、
+    /// `options.parent_id`で指定したフォルダに復元する。
+    ///
+    /// クライアントは、5xxを受け取った場合、またはタイムアウトした場合に、同じリクエストを再送して再試行する。
+    /// しかし、これらの場合は、BOXがファイルの復元を完了している可能性がある。
+    /// 復元に成功したファイルはゴミ箱からなくなるため、BOXが復元した後にリクエストを再送すると、BOXは404を返す。
+    /// その結果、復元に成功したにもかかわらず、復元に失敗したと誤って判断するおそれがある。
+    /// したがって、このリクエストを冪等でないリクエストとして送信し、BOXがリクエストを処理していないことが
+    /// 明らかな429、エラーコードが`operation_blocked_temporary`の409および接続エラーの後にのみ再試行する。
+    /// POSTリクエストは既定で冪等でないリクエストとして扱われるため、冪等性を上書きしていない。
+    ///
+    /// # Arguments
+    ///
+    /// - `file_id`: 復元するゴミ箱内のファイルのID
+    /// - `options`: 復元後のファイル名および復元先の親フォルダのオプション
+    ///
+    /// # Errors
+    ///
+    /// BOXがエラーレスポンスを返した場合は、[`BoxClientError::Api`]を返す。主なステータスは次のとおり。
+    ///
+    /// - 403: ゴミ箱からファイルを復元する権限がない、または復元先のフォルダにアクセスする権限がない。
+    /// - 404: ファイルがゴミ箱にない。
+    /// - 409: 復元先に同じ名前のファイルがある。`options.name`に別の名前を指定して再度呼び出す。
+    ///
+    /// 再試行できないエラーが発生した場合、または再試行回数の上限に達した場合はエラーを返す。
+    /// 5xxまたはタイムアウトでエラーを返した場合は、BOXがファイルを復元した可能性があるため、
+    /// [`BoxClient::file_information`]でファイルの状態を確認する。
+    pub async fn restore_file(
+        &self,
+        file_id: &FileId,
+        options: &RestoreItemOptions<'_>,
+    ) -> BoxClientResult<File> {
+        let request =
+            ApiRequest::post(["files", file_id.as_ref()]).json(&RestoreItemBody::from(options))?;
+        let file: File = self.send_json(request).await?;
+
+        tracing::info!(
+            file_id = file_id.as_ref(),
+            parent_id = file.parent.as_ref().map(|p| p.id.as_ref()),
+            "restored file"
+        );
+
+        Ok(file)
     }
 
     /// ゴミ箱内の項目を1ページ分リストする。
@@ -466,7 +517,7 @@ mod test_trashed_file_information {
 }
 
 #[cfg(test)]
-mod test_restore_folder_body {
+mod test_restore_item_body {
     use rstest::rstest;
     use serde_json::{Value, json};
 
@@ -488,12 +539,12 @@ mod test_restore_folder_body {
         #[case] expected: Value,
     ) -> anyhow::Result<()> {
         let parent_id = parent_id.map(FolderId::new);
-        let options = RestoreFolderOptions {
+        let options = RestoreItemOptions {
             name,
             parent_id: parent_id.as_ref(),
         };
 
-        let body = serde_json::to_value(RestoreFolderBody::from(&options))?;
+        let body = serde_json::to_value(RestoreItemBody::from(&options))?;
 
         assert_eq!(body, expected);
 
@@ -560,7 +611,7 @@ mod test_restore_folder {
             .await;
         let client = create_client(&server, short_retry(0)?).await?;
         let parent_id = FolderId::new("111");
-        let options = RestoreFolderOptions {
+        let options = RestoreItemOptions {
             name: Some("restored"),
             parent_id: Some(&parent_id),
         };
@@ -587,7 +638,7 @@ mod test_restore_folder {
         let requests_before = request_count(&server).await;
 
         let result = client
-            .restore_folder(&FolderId::root(), &RestoreFolderOptions::default())
+            .restore_folder(&FolderId::root(), &RestoreItemOptions::default())
             .await;
 
         assert!(
@@ -621,7 +672,7 @@ mod test_restore_folder {
         let client = create_client(&server, short_retry(2)?).await?;
 
         let result = client
-            .restore_folder(&FolderId::new("123"), &RestoreFolderOptions::default())
+            .restore_folder(&FolderId::new("123"), &RestoreItemOptions::default())
             .await;
 
         assert!(
@@ -657,7 +708,7 @@ mod test_restore_folder {
         let client = create_client(&server, short_retry(1)?).await?;
 
         client
-            .restore_folder(&FolderId::new("123"), &RestoreFolderOptions::default())
+            .restore_folder(&FolderId::new("123"), &RestoreItemOptions::default())
             .await?;
 
         assert_eq!(post_count(&server).await, 2);
@@ -683,7 +734,7 @@ mod test_restore_folder {
         let client = create_client(&server, short_retry(2)?).await?;
 
         let result = client
-            .restore_folder(&FolderId::new("123"), &RestoreFolderOptions::default())
+            .restore_folder(&FolderId::new("123"), &RestoreItemOptions::default())
             .await;
 
         assert!(
@@ -716,7 +767,156 @@ mod test_restore_folder {
         let client = create_client(&server, short_retry(1)?).await?;
 
         client
-            .restore_folder(&FolderId::new("123"), &RestoreFolderOptions::default())
+            .restore_folder(&FolderId::new("123"), &RestoreItemOptions::default())
+            .await?;
+
+        assert_eq!(post_count(&server).await, 2);
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod test_restore_file {
+    use rstest::rstest;
+    use serde_json::json;
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{body_json, method, path},
+    };
+
+    use super::*;
+    use crate::{
+        ItemStatus,
+        test_support::{create_client, mount_token, short_retry},
+    };
+
+    /// ファイルのAPIのパス
+    const FILE_PATH: &str = "/2.0/files/123";
+
+    /// 復元したファイルのレスポンスを返す。
+    fn restored_response() -> ResponseTemplate {
+        ResponseTemplate::new(201).set_body_json(json!({
+            "type": "file",
+            "id": "123",
+            "etag": "2",
+            "name": "restored.pdf",
+            "trashed_at": null,
+            "purged_at": null,
+            "shared_link": null,
+            "parent": {"type": "folder", "id": "111", "etag": "0", "name": "Legal"},
+            "item_status": "active",
+        }))
+    }
+
+    /// ファイルのAPIへのPOSTリクエストの数を返す。
+    async fn post_count(server: &MockServer) -> usize {
+        server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .iter()
+            .filter(|r| r.method.as_str() == "POST" && r.url.path() == FILE_PATH)
+            .count()
+    }
+
+    /// POST /files/{file_id}にオプションをボディとして送信し、復元したファイル情報を返すことを確認
+    #[tokio::test]
+    async fn test_restore_file() -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        Mock::given(method("POST"))
+            .and(path(FILE_PATH))
+            .and(body_json(
+                json!({"name": "restored.pdf", "parent": {"id": "111"}}),
+            ))
+            .respond_with(restored_response())
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = create_client(&server, short_retry(0)?).await?;
+        let parent_id = FolderId::new("111");
+        let options = RestoreItemOptions {
+            name: Some("restored.pdf"),
+            parent_id: Some(&parent_id),
+        };
+
+        let file = client.restore_file(&FileId::new("123"), &options).await?;
+
+        assert_eq!(file.id, FileId::new("123"));
+        assert_eq!(file.name, "restored.pdf");
+        assert_eq!(file.parent.map(|p| p.id), Some(parent_id));
+        assert_eq!(file.trashed_at, None);
+        assert_eq!(file.item_status, Some(ItemStatus::Active));
+
+        Ok(())
+    }
+
+    /// BOXのエラーレスポンスを、再試行せずにそのまま返すことを確認
+    ///
+    /// 5xxの後に再送すると、復元済みのファイルに対して404を受け取るおそれがあるため、
+    /// 再試行の上限に余裕があっても再送しない。
+    #[rstest]
+    #[case::forbidden(403)]
+    #[case::not_found(404)]
+    #[case::name_conflict(409)]
+    #[case::internal_server_error(500)]
+    #[case::service_unavailable(503)]
+    #[tokio::test]
+    async fn test_restore_file_error_is_not_retried(#[case] status: u16) -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        Mock::given(method("POST"))
+            .and(path(FILE_PATH))
+            .respond_with(ResponseTemplate::new(status))
+            .mount(&server)
+            .await;
+        let client = create_client(&server, short_retry(2)?).await?;
+
+        let result = client
+            .restore_file(&FileId::new("123"), &RestoreItemOptions::default())
+            .await;
+
+        assert!(
+            matches!(&result, Err(BoxClientError::Api(e)) if e.status == status),
+            "result: {result:?}"
+        );
+        assert_eq!(post_count(&server).await, 1);
+
+        Ok(())
+    }
+
+    /// 429または他の操作によるロックで409を受け取った場合は、冪等でないリクエストとして送信しても再試行することを確認
+    #[rstest]
+    #[case::too_many_requests(ResponseTemplate::new(429))]
+    #[case::operation_blocked_temporary(ResponseTemplate::new(409).set_body_json(json!({
+        "type": "error",
+        "status": 409,
+        "code": "operation_blocked_temporary",
+        "message": "The operation is blocked by another on-going operation",
+    })))]
+    #[tokio::test]
+    async fn test_restore_file_retries_request_not_processed(
+        #[case] first_response: ResponseTemplate,
+    ) -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        Mock::given(method("POST"))
+            .and(path(FILE_PATH))
+            .respond_with(first_response)
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(FILE_PATH))
+            .and(body_json(json!({})))
+            .respond_with(restored_response())
+            .mount(&server)
+            .await;
+        let client = create_client(&server, short_retry(1)?).await?;
+
+        client
+            .restore_file(&FileId::new("123"), &RestoreItemOptions::default())
             .await?;
 
         assert_eq!(post_count(&server).await, 2);

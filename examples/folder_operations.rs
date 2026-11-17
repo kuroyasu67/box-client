@@ -2,7 +2,7 @@ mod common;
 
 use box_client::{
     FolderId,
-    api::{folders::DeleteFolderOptions, trash::RestoreFolderOptions},
+    api::{folders::DeleteFolderOptions, trash::RestoreItemOptions},
 };
 
 /// 使用方法
@@ -56,7 +56,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // フォルダを復元
-    let restore_options = RestoreFolderOptions::default();
+    let restore_options = RestoreItemOptions::default();
     match client.restore_folder(&folder_id, &restore_options).await {
         Ok(_) => tracing::info!("folder was restored successfully"),
         Err(e) => anyhow::bail!(e),
