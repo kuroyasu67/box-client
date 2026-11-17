@@ -33,3 +33,5 @@ wiremock           = "0.6.5"
 
 [lints.clippy]
 pedantic = { level = "warn", priority = -1 }
+# 日本語のドキュメントでは、英字と日本語が連続する語を識別子と誤認するため無効にする
+doc_markdown = "allow"
