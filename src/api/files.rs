@@ -3,9 +3,11 @@
 use serde::Deserialize;
 use time::OffsetDateTime;
 
+use reqwest::header::IF_MATCH;
+
 use crate::{
-    BoxClient, BoxClientResult, FileId, FolderItem, ItemStatus, PathCollection, UserMini,
-    request::ApiRequest,
+    BoxClient, BoxClientResult, FileId, FolderItem, Idempotency, ItemStatus, PathCollection,
+    UserMini, request::ApiRequest,
 };
 
 /// ファイル情報
@@ -110,6 +112,50 @@ impl BoxClient {
     pub async fn file_information(&self, file_id: &FileId) -> BoxClientResult<File> {
         self.send_json(ApiRequest::get(["files", file_id.as_ref()]))
             .await
+    }
+
+    /// ファイルを削除する。
+    ///
+    /// BOXは、エンタープライズの設定に従って、ファイルをゴミ箱に移動するか、完全に削除する。
+    ///
+    /// クライアントは、5xxを受け取った場合、またはタイムアウトした場合に、同じリクエストを再送して再試行する。
+    /// しかし、これらの場合は、BOXがファイルの削除を完了している可能性がある。
+    /// BOXは削除済みのファイルに対して404を返すため、BOXが削除した後にリクエストを再送すると、
+    /// 削除に成功したにもかかわらず、削除に失敗したと誤って判断するおそれがある。
+    /// したがって、HTTPメソッドがDELETEであっても冪等でないリクエストとして送信し、
+    /// BOXがリクエストを処理していないことが明らかな429、エラーコードが`operation_blocked_temporary`の409
+    /// および接続エラーの後にのみ再試行する。
+    ///
+    /// # Arguments
+    ///
+    /// - `file_id`: 削除するファイルのID
+    /// - `etag`: 最後に取得したファイルのETag。指定した場合は`If-Match`ヘッダーで送信し、
+    ///   ファイルがETagの取得後に変更されていると、BOXはファイルを削除せずに412を返す。
+    ///
+    /// # Errors
+    ///
+    /// `etag`に使用できない文字が含まれる場合は、リクエストを送信せずに
+    /// [`BoxClientError::InvalidHeaderValue`](crate::BoxClientError::InvalidHeaderValue)を返す。
+    /// BOXがエラーレスポンスを返した場合は、[`BoxClientError::Api`](crate::BoxClientError::Api)を返す。
+    /// 主なステータスは次のとおり。
+    ///
+    /// - 404: ファイルが存在しない、ファイルが削除済みである、またはファイルにアクセスする権限がない。
+    /// - 412: `etag`がファイルの現在のETagと一致しない。ファイルがETagの取得後に変更されている。
+    ///
+    /// 5xxまたはタイムアウトでエラーを返した場合は、BOXがファイルを削除した可能性があるため、
+    /// [`BoxClient::file_information`]でファイルの状態を確認する。
+    pub async fn delete_file(&self, file_id: &FileId, etag: Option<&str>) -> BoxClientResult<()> {
+        let mut request =
+            ApiRequest::delete(["files", file_id.as_ref()]).idempotency(Idempotency::NonIdempotent);
+        if let Some(etag) = etag {
+            request = request.header(IF_MATCH, etag)?;
+        }
+
+        self.send_empty(request).await?;
+
+        tracing::info!(file_id = file_id.as_ref(), "deleted file");
+
+        Ok(())
     }
 }
 
@@ -311,6 +357,143 @@ mod test_file_information {
             matches!(&result, Err(BoxClientError::Api(e)) if e.status == 404),
             "result: {result:?}"
         );
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod test_delete_file {
+    use rstest::rstest;
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{method, path},
+    };
+
+    use super::*;
+    use crate::{
+        BoxClientError,
+        test_support::{create_client, mount_token, request_count, short_retry},
+    };
+
+    /// ファイルのAPIのパス
+    const FILE_PATH: &str = "/2.0/files/123";
+
+    /// ファイルのAPIへのDELETEリクエストのIf-Matchヘッダーを返す。
+    async fn delete_requests(server: &MockServer) -> Vec<Option<String>> {
+        server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|r| r.method.as_str() == "DELETE" && r.url.path() == FILE_PATH)
+            .map(|r| {
+                r.headers
+                    .get("if-match")
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_owned)
+            })
+            .collect()
+    }
+
+    /// ETagを指定した場合だけ、If-Matchヘッダーを送信することを確認
+    #[rstest]
+    #[case::without_etag(None)]
+    #[case::with_etag(Some("1"))]
+    #[tokio::test]
+    async fn test_delete_file(#[case] etag: Option<&str>) -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        Mock::given(method("DELETE"))
+            .and(path(FILE_PATH))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+        let client = create_client(&server, short_retry(0)?).await?;
+
+        client.delete_file(&FileId::new("123"), etag).await?;
+
+        assert_eq!(
+            delete_requests(&server).await,
+            vec![etag.map(str::to_owned)]
+        );
+
+        Ok(())
+    }
+
+    /// ETagに使用できない文字が含まれる場合は、リクエストを送信せずにエラーを返すことを確認
+    #[tokio::test]
+    async fn test_delete_file_invalid_etag() -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        let client = create_client(&server, short_retry(0)?).await?;
+        let requests_before = request_count(&server).await;
+
+        let result = client
+            .delete_file(&FileId::new("123"), Some("1\r\nX-Injected: 1"))
+            .await;
+
+        assert!(
+            matches!(result, Err(BoxClientError::InvalidHeaderValue(_))),
+            "result: {result:?}"
+        );
+        assert_eq!(request_count(&server).await, requests_before);
+
+        Ok(())
+    }
+
+    /// BOXのエラーレスポンスを、再試行せずにそのまま返すことを確認
+    ///
+    /// 5xxの後に再送すると、削除済みのファイルに対して404を受け取るおそれがあるため、
+    /// 再試行の上限に余裕があっても再送しない。
+    #[rstest]
+    #[case::not_found(404)]
+    #[case::etag_mismatch(412)]
+    #[case::internal_server_error(500)]
+    #[case::service_unavailable(503)]
+    #[tokio::test]
+    async fn test_delete_file_error_is_not_retried(#[case] status: u16) -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        Mock::given(method("DELETE"))
+            .and(path(FILE_PATH))
+            .respond_with(ResponseTemplate::new(status))
+            .mount(&server)
+            .await;
+        let client = create_client(&server, short_retry(2)?).await?;
+
+        let result = client.delete_file(&FileId::new("123"), None).await;
+
+        assert!(
+            matches!(&result, Err(BoxClientError::Api(e)) if e.status == status),
+            "result: {result:?}"
+        );
+        assert_eq!(delete_requests(&server).await.len(), 1);
+
+        Ok(())
+    }
+
+    /// 429の場合は、冪等でないリクエストとして送信しても再試行することを確認
+    #[tokio::test]
+    async fn test_delete_file_retries_too_many_requests() -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        Mock::given(method("DELETE"))
+            .and(path(FILE_PATH))
+            .respond_with(ResponseTemplate::new(429))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path(FILE_PATH))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+        let client = create_client(&server, short_retry(1)?).await?;
+
+        client.delete_file(&FileId::new("123"), None).await?;
+
+        assert_eq!(delete_requests(&server).await.len(), 2);
 
         Ok(())
     }
