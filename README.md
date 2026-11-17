@@ -386,3 +386,10 @@ cargo install cargo-deny
 cargo install prek
 prek install
 ```
+
+## ライセンス
+
+このクレートは、次のいずれかのライセンスを利用者が選択して利用できる。
+
+- Apache License, Version 2.0（[LICENSE-APACHE](LICENSE-APACHE)）
+- MIT License（[LICENSE-MIT](LICENSE-MIT)）
