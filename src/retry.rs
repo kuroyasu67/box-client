@@ -280,6 +280,8 @@ where
     let started_at = Instant::now();
     let mut number_of_retries = 0;
 
+    // `BoxClientError`のメッセージは原因を含まないため、エラーを`%`で`Display`として記録すると原因がログから失われる。
+    // したがって、エラーを`dyn Error`として記録し、tracing-subscriberに原因の連鎖も出力させる。
     loop {
         let attempts = number_of_retries + 1;
         let (error, retry_after) = match attempt().await {
@@ -297,7 +299,7 @@ where
                     operation,
                     attempts,
                     elapsed_ms = started_at.elapsed().as_millis(),
-                    %error,
+                    error = &error as &(dyn std::error::Error + 'static),
                     "failed with non-retryable error"
                 );
                 return Err(error);
@@ -310,7 +312,7 @@ where
                 operation,
                 attempts,
                 elapsed_ms = started_at.elapsed().as_millis(),
-                %error,
+                error = &error as &(dyn std::error::Error + 'static),
                 "failed after reaching max retries"
             );
             return Err(error);
@@ -326,8 +328,8 @@ where
                     operation,
                     attempts,
                     elapsed_ms = started_at.elapsed().as_millis(),
-                    %error,
-                    %delay_error,
+                    error = &error as &(dyn std::error::Error + 'static),
+                    delay_error = &delay_error as &(dyn std::error::Error + 'static),
                     "gave up retrying"
                 );
                 return Err(delay_error);
@@ -342,7 +344,7 @@ where
             } else {
                 "backoff"
             },
-            %error,
+            error = &error as &(dyn std::error::Error + 'static),
             "retrying"
         );
         tokio::time::sleep(delay).await;

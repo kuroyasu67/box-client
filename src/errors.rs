@@ -1,19 +1,36 @@
-use std::{fmt, time::Duration};
+use std::{fmt, path::PathBuf, time::Duration};
 
 use reqwest::StatusCode;
 use serde::Deserialize;
 
 /// BOXクライアントエラー型
+///
+/// 原因となったエラーを[`std::error::Error::source`]で返し、メッセージには原因を含めない。
+/// 原因をメッセージにも含めると、`anyhow`の`{:#}`などで原因の連鎖を表示したときに同じ文言が二重に出力されるためである。
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum BoxClientError {
     /// BOX設定ファイルのオープンエラー
-    #[error("Failed to open config file: {0}")]
-    OpenConfigFile(std::io::Error),
+    #[error("Failed to open config file: {path}")]
+    OpenConfigFile {
+        /// BOX設定ファイルのパス
+        path: PathBuf,
+
+        /// 原因となったエラー
+        #[source]
+        source: std::io::Error,
+    },
 
     /// BOX設定ファイルの解析エラー
-    #[error("Failed to parse config file: {0}")]
-    ParseConfig(serde_json::Error),
+    #[error("Failed to parse config file: {path}")]
+    ParseConfig {
+        /// BOX設定ファイルのパス
+        path: PathBuf,
+
+        /// 原因となったエラー
+        #[source]
+        source: serde_json::Error,
+    },
 
     /// 再試行設定の不正エラー
     #[error("Invalid retry policy: {0}")]
@@ -38,38 +55,39 @@ pub enum BoxClientError {
     InvalidPathSegment(String),
 
     /// リクエストヘッダーの値の不正エラー
-    #[error("Invalid header value: {0}")]
-    InvalidHeaderValue(reqwest::header::InvalidHeaderValue),
+    #[error("Invalid header value")]
+    InvalidHeaderValue(#[source] reqwest::header::InvalidHeaderValue),
 
     /// リクエストボディのシリアライズエラー
-    #[error("Failed to serialize request body: {0}")]
-    SerializeBody(serde_json::Error),
+    #[error("Failed to serialize request body")]
+    SerializeBody(#[source] serde_json::Error),
 
     /// 秘密鍵の復号エラー
     ///
     /// 復号した秘密鍵をPEM形式に変換できない場合も、このエラーを返す。
-    #[error("Failed to decrypt private key: {0}")]
+    #[error("Failed to decrypt private key")]
     DecryptPrivateKey(#[from] pkcs8::Error),
 
     /// 復号した秘密鍵から署名鍵を作成できないエラー
-    #[error("Failed to create signing key: {0}")]
-    CreateSigningKey(jsonwebtoken::errors::Error),
+    #[error("Failed to create signing key")]
+    CreateSigningKey(#[source] jsonwebtoken::errors::Error),
 
     /// JWTアサーションの署名エラー
-    #[error("Failed to sign JWT assertion: {0}")]
+    #[error("Failed to sign JWT assertion")]
     SignAssertion(#[from] jsonwebtoken::errors::Error),
 
     /// システム時刻の取得エラー
-    #[error("Failed to get system time: {0}")]
+    #[error("Failed to get system time")]
     SystemTime(#[from] std::time::SystemTimeError),
 
     /// HTTP通信エラー
-    #[error("HTTP request failed: {0}")]
+    #[error("HTTP request failed")]
     Http(#[from] reqwest::Error),
 
     /// BOXのエラーレスポンス
     ///
     /// エラー型のサイズを小さく保つため、詳細をヒープに確保する。
+    /// [`ApiError`]は原因となったエラーではなくこのエラーの内容であるため、メッセージに含める。
     #[error("BOX API request failed: {0}")]
     Api(Box<ApiError>),
 
@@ -210,5 +228,109 @@ mod test_api_error {
         let error = ApiError::new(StatusCode::NOT_FOUND, body.to_owned());
 
         assert_eq!(error.to_string(), expected);
+    }
+}
+
+#[cfg(test)]
+mod test_box_client_error {
+    use std::error::Error as _;
+
+    use rstest::rstest;
+
+    use super::*;
+
+    /// 不正なヘッダーの値のエラーを返す。
+    fn invalid_header_value() -> anyhow::Result<BoxClientError> {
+        match reqwest::header::HeaderValue::from_str("1\n") {
+            Ok(_) => anyhow::bail!("header value must be invalid"),
+            Err(e) => Ok(BoxClientError::InvalidHeaderValue(e)),
+        }
+    }
+
+    /// JSONのシリアライズエラーを返す。
+    ///
+    /// 文字列以外をキーとするマップはJSONにシリアライズできない。
+    fn serialize_body() -> anyhow::Result<BoxClientError> {
+        let map = std::collections::HashMap::from([((1, 2), 3)]);
+        match serde_json::to_vec(&map) {
+            Ok(_) => anyhow::bail!("serialization must fail"),
+            Err(e) => Ok(BoxClientError::SerializeBody(e)),
+        }
+    }
+
+    /// 署名鍵の作成エラーを返す。
+    fn create_signing_key() -> anyhow::Result<BoxClientError> {
+        match jsonwebtoken::EncodingKey::from_rsa_pem(b"invalid") {
+            Ok(_) => anyhow::bail!("signing key must be invalid"),
+            Err(e) => Ok(BoxClientError::CreateSigningKey(e)),
+        }
+    }
+
+    /// BOX設定ファイルのオープンエラーを返す。
+    fn open_config_file() -> anyhow::Result<BoxClientError> {
+        Ok(BoxClientError::OpenConfigFile {
+            path: PathBuf::from("config.json"),
+            source: std::io::Error::from(std::io::ErrorKind::NotFound),
+        })
+    }
+
+    /// BOX設定ファイルの解析エラーを返す。
+    fn parse_config() -> anyhow::Result<BoxClientError> {
+        match serde_json::from_str::<serde_json::Value>("not json") {
+            Ok(_) => anyhow::bail!("parsing must fail"),
+            Err(source) => Ok(BoxClientError::ParseConfig {
+                path: PathBuf::from("config.json"),
+                source,
+            }),
+        }
+    }
+
+    /// 原因となったエラーを`source()`で返し、メッセージに原因の文言を含めないことを確認
+    #[rstest]
+    #[case::open_config_file(open_config_file)]
+    #[case::parse_config(parse_config)]
+    #[case::invalid_header_value(invalid_header_value)]
+    #[case::serialize_body(serialize_body)]
+    #[case::create_signing_key(create_signing_key)]
+    fn test_source(#[case] error: fn() -> anyhow::Result<BoxClientError>) -> anyhow::Result<()> {
+        let error = error()?;
+
+        let Some(source) = error.source() else {
+            anyhow::bail!("source must be set: {error:?}");
+        };
+        assert!(
+            !error.to_string().contains(&source.to_string()),
+            "message: {error}, source: {source}"
+        );
+
+        Ok(())
+    }
+
+    /// BOX設定ファイルのエラーのメッセージに、ファイルのパスを含めることを確認
+    #[rstest]
+    #[case::open_config_file(open_config_file, "Failed to open config file: config.json")]
+    #[case::parse_config(parse_config, "Failed to parse config file: config.json")]
+    fn test_config_file_message(
+        #[case] error: fn() -> anyhow::Result<BoxClientError>,
+        #[case] expected: &str,
+    ) -> anyhow::Result<()> {
+        assert_eq!(error()?.to_string(), expected);
+
+        Ok(())
+    }
+
+    /// BOXのエラーレスポンスは原因ではなくエラーの内容であるため、メッセージに含めて`source()`では返さないことを確認
+    #[test]
+    fn test_api_error_is_not_source() {
+        let error = BoxClientError::Api(Box::new(ApiError::new(
+            StatusCode::NOT_FOUND,
+            r#"{"code":"not_found","message":"Not Found"}"#.to_owned(),
+        )));
+
+        assert!(error.source().is_none());
+        assert_eq!(
+            error.to_string(),
+            "BOX API request failed: status=404 Not Found, code=not_found, message=Not Found"
+        );
     }
 }

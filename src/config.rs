@@ -58,10 +58,17 @@ impl BoxConfig {
     ///
     /// ファイルを開けない場合、またはBOX設定として解釈できない場合はエラーを返す。
     pub fn from_file<P: AsRef<Path>>(path: P) -> BoxClientResult<Self> {
-        let file = File::open(path).map_err(BoxClientError::OpenConfigFile)?;
+        let path = path.as_ref();
+        let file = File::open(path).map_err(|source| BoxClientError::OpenConfigFile {
+            path: path.to_path_buf(),
+            source,
+        })?;
         let reader = BufReader::new(file);
 
-        serde_json::from_reader(reader).map_err(BoxClientError::ParseConfig)
+        serde_json::from_reader(reader).map_err(|source| BoxClientError::ParseConfig {
+            path: path.to_path_buf(),
+            source,
+        })
     }
 }
 
@@ -100,14 +107,38 @@ mod test_box_config {
         Ok(())
     }
 
-    /// BOX設定ファイルが存在しない場合は、ファイルのオープンエラーを返すことを確認
+    /// BOX設定ファイルが存在しない場合は、パスと原因を含むファイルのオープンエラーを返すことを確認
     #[test]
     fn test_from_file_not_found() {
-        let result = BoxConfig::from_file("resources/tests/not_found.json");
+        let path = "resources/tests/not_found.json";
+
+        let result = BoxConfig::from_file(path);
 
         assert!(
-            matches!(result, Err(BoxClientError::OpenConfigFile(_))),
+            matches!(
+                &result,
+                Err(BoxClientError::OpenConfigFile { path: p, source })
+                    if p == Path::new(path) && source.kind() == std::io::ErrorKind::NotFound
+            ),
             "result: {result:?}"
         );
+    }
+
+    /// BOX設定ファイルをJSONとして解釈できない場合は、パスを含む解析エラーを返すことを確認
+    #[test]
+    fn test_from_file_invalid_json() -> anyhow::Result<()> {
+        // pretty-format-jsonフックが不正なJSONファイルを拒否するため、リポジトリに置かずに一時ファイルを作成する。
+        let path = std::env::temp_dir().join(format!("box-config-{}.json", uuid::Uuid::new_v4()));
+        std::fs::write(&path, "not json")?;
+
+        let result = BoxConfig::from_file(&path);
+        std::fs::remove_file(&path)?;
+
+        assert!(
+            matches!(&result, Err(BoxClientError::ParseConfig { path: p, .. }) if *p == path),
+            "result: {result:?}"
+        );
+
+        Ok(())
     }
 }
