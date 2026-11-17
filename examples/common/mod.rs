@@ -1,14 +1,21 @@
-use std::time::Duration;
+use std::{path::PathBuf, time::Duration};
 
 use box_client::{
     BoxClient, BoxClientTimeout, BoxConfig, BoxItem, ListTrashedItemsOptions, RetryPolicy,
 };
 
-/// BOX設定ファイルのパス
-// cspell:disable-next-line
-const BOX_CONFIG_FILE: &str = "resources/secrets/26695994_fhugry6j_config.json";
+/// BOX設定ファイルのパスを指定する環境変数の名前
+const BOX_CONFIG_FILE_ENV: &str = "BOX_CONFIG_FILE";
+
+/// 環境変数でBOX設定ファイルのパスを指定しない場合に使用するパス
+///
+/// `resources/secrets`は`.gitignore`で除外しているため、BOX設定ファイルを誤ってコミットしない。
+const DEFAULT_BOX_CONFIG_FILE: &str = "resources/secrets/config.json";
 
 /// `RUST_LOG`に従ってログを出力するサブスクライバーを登録し、BOX設定ファイルで認証したクライアントを構築する。
+///
+/// BOX設定ファイルのパスは、環境変数`BOX_CONFIG_FILE`で指定する。
+/// 指定しない場合は、`resources/secrets/config.json`を読み込む。
 pub async fn setup() -> anyhow::Result<BoxClient> {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
@@ -25,7 +32,9 @@ pub async fn setup() -> anyhow::Result<BoxClient> {
         Duration::from_secs(1),
     )?;
 
-    let client = BoxClient::builder(BoxConfig::from_file(BOX_CONFIG_FILE)?)
+    let config_file = std::env::var_os(BOX_CONFIG_FILE_ENV)
+        .map_or_else(|| PathBuf::from(DEFAULT_BOX_CONFIG_FILE), PathBuf::from);
+    let client = BoxClient::builder(BoxConfig::from_file(config_file)?)
         .timeout(timeout)
         .retry(retry)
         .build()

@@ -358,6 +358,21 @@ let client = BoxClient::builder(config)
 
 アクセストークンをバックグラウンドで取得し直すタスクは、リクエストを送信するfutureを破棄しても中断せず、取得の成功または失敗まで実行する。
 
+## サンプル
+
+`examples`ディレクトリのサンプルは、BOX設定ファイルを読み込んで認証する。
+BOX設定ファイルは、BOXの開発者コンソールでJWT認証のアプリケーションの公開鍵を生成したときにダウンロードできるJSONファイルである。
+
+サンプルは、環境変数`BOX_CONFIG_FILE`が示すパスからBOX設定ファイルを読み込む。
+環境変数を指定しない場合は、`resources/secrets/config.json`を読み込む。
+`resources/secrets`は`.gitignore`で除外しているため、BOX設定ファイルをこのディレクトリに置けば、誤ってコミットすることはない。
+
+```shell
+BOX_CONFIG_FILE=path/to/config.json RUST_LOG=info cargo run --quiet --example=me
+```
+
+各サンプルの実行方法は、各ファイルの`main`関数のドキュメントを参照する。
+
 ## 開発環境
 
 ### prek
