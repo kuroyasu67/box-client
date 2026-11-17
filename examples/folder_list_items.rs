@@ -2,15 +2,14 @@ mod common;
 
 use box_client::{BoxItem, FolderId, api::folders::ListItemsOptions};
 
-/// `9010_一時共有フォルダのフォルダID`
-const TEMPORARY_SHARING_FOLDER_ID: &str = "180035284927";
-
-/// ルートフォルダ内のすべての項目を表示する。
+/// フォルダ内のすべての項目を表示する。
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let client = common::setup().await?;
+    let folder_id = std::env::args().nth(1).map(FolderId::new).ok_or_else(|| {
+        anyhow::anyhow!("usage: RUST_LOG=info cargo run --example=folder_list_items -- <folder-id>")
+    })?;
 
-    let folder_id = FolderId::new(TEMPORARY_SHARING_FOLDER_ID);
+    let client = common::setup().await?;
 
     let items = client
         .list_all_items_in_folder(&folder_id, &ListItemsOptions::default())

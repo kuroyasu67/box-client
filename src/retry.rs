@@ -221,7 +221,8 @@ pub enum Idempotency {
 
     /// 同じリクエストを送信するたびに結果が変わりうる。
     ///
-    /// サーバーがリクエストを処理していないことが確実な、429および接続エラーの後にのみ再試行する。
+    /// サーバーがリクエストを処理していないことが確実な、429、エラーコードが`operation_blocked_temporary`の409
+    /// および接続エラーの後にのみ再試行する。
     NonIdempotent,
 }
 
@@ -348,13 +349,24 @@ where
     }
 }
 
-/// 再試行すれば成功する可能性があるHTTPステータスかどうかを返す。
+/// 移動、コピー、削除または復元の操作が項目をロックしているため、BOXが操作を拒否したことを示すエラーコード
+const OPERATION_BLOCKED_TEMPORARY: &str = "operation_blocked_temporary";
+
+/// 再試行すれば成功する可能性があるエラーレスポンスかどうかを返す。
 ///
 /// 429はサーバーがリクエストを処理せずに拒否したため、冪等性によらず再試行する。
+/// エラーコードが`operation_blocked_temporary`の409も、他の操作によるロックが解除されるまで
+/// BOXがリクエストを処理せずに拒否したため、冪等性によらず再試行する。
 /// 5xxはサーバーが処理した可能性があるため、冪等なリクエストのみ再試行する。
 /// そのほかの4xxは、リクエストの内容に問題があり、再送しても結果が変わらないため再試行しない。
-pub(crate) fn is_retryable_status(status: StatusCode, idempotency: Idempotency) -> bool {
+/// 名前の重複などによる409も、再送しても結果が変わらないため再試行しない。
+pub(crate) fn is_retryable_error_response(
+    status: StatusCode,
+    code: Option<&str>,
+    idempotency: Idempotency,
+) -> bool {
     status == StatusCode::TOO_MANY_REQUESTS
+        || (status == StatusCode::CONFLICT && code == Some(OPERATION_BLOCKED_TEMPORARY))
         || (idempotency == Idempotency::Idempotent && status.is_server_error())
 }
 
@@ -392,8 +404,10 @@ pub(crate) async fn classify_error_response(
         .text()
         .await
         .unwrap_or_else(|e| format!("<failed to read response body: {e}>"));
-    let error = BoxClientError::Api(Box::new(ApiError::new(status, body)));
-    if is_retryable_status(status, idempotency) {
+    let api_error = ApiError::new(status, body);
+    let retryable = is_retryable_error_response(status, api_error.code.as_deref(), idempotency);
+    let error = BoxClientError::Api(Box::new(api_error));
+    if retryable {
         AttemptError::Retryable { error, retry_after }
     } else {
         AttemptError::Fatal(error)
@@ -705,7 +719,7 @@ mod test_idempotency {
 }
 
 #[cfg(test)]
-mod test_is_retryable_status {
+mod test_is_retryable_error_response {
     use rstest::rstest;
 
     use super::*;
@@ -726,13 +740,46 @@ mod test_is_retryable_status {
     #[case::max_server_error(599, Idempotent, true)]
     #[case::max_server_error_non_idempotent(599, NonIdempotent, false)]
     #[case::after_server_error(600, Idempotent, false)]
-    fn test_is_retryable_status(
+    fn test_is_retryable_error_response(
         #[case] status: u16,
         #[case] idempotency: Idempotency,
         #[case] expected: bool,
     ) -> anyhow::Result<()> {
         assert_eq!(
-            is_retryable_status(StatusCode::from_u16(status)?, idempotency),
+            is_retryable_error_response(StatusCode::from_u16(status)?, None, idempotency),
+            expected
+        );
+
+        Ok(())
+    }
+
+    /// エラーコードが`operation_blocked_temporary`の409だけを、冪等性によらず再試行することを確認
+    #[rstest]
+    #[case::blocked(409, Some("operation_blocked_temporary"), Idempotent, true)]
+    #[case::blocked_non_idempotent(409, Some("operation_blocked_temporary"), NonIdempotent, true)]
+    #[case::conflict_without_code(409, None, NonIdempotent, false)]
+    #[case::name_in_use(409, Some("item_name_in_use"), NonIdempotent, false)]
+    #[case::code_differs_in_case(409, Some("OPERATION_BLOCKED_TEMPORARY"), NonIdempotent, false)]
+    #[case::blocked_code_before_conflict(
+        408,
+        Some("operation_blocked_temporary"),
+        NonIdempotent,
+        false
+    )]
+    #[case::blocked_code_after_conflict(
+        410,
+        Some("operation_blocked_temporary"),
+        NonIdempotent,
+        false
+    )]
+    fn test_is_retryable_error_response_conflict(
+        #[case] status: u16,
+        #[case] code: Option<&str>,
+        #[case] idempotency: Idempotency,
+        #[case] expected: bool,
+    ) -> anyhow::Result<()> {
+        assert_eq!(
+            is_retryable_error_response(StatusCode::from_u16(status)?, code, idempotency),
             expected
         );
 

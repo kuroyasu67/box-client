@@ -145,7 +145,7 @@ impl BoxClient {
     /// 復元に成功したフォルダはゴミ箱からなくなるため、BOXが復元した後にリクエストを再送すると、BOXは404を返す。
     /// その結果、復元に成功したにもかかわらず、復元に失敗したと誤って判断するおそれがある。
     /// したがって、このリクエストを冪等でないリクエストとして送信し、BOXがリクエストを処理していないことが
-    /// 明らかな429および接続エラーの後にのみ再試行する。
+    /// 明らかな429、エラーコードが`operation_blocked_temporary`の409および接続エラーの後にのみ再試行する。
     /// POSTリクエストは既定で冪等でないリクエストとして扱われるため、冪等性を上書きしていない。
     ///
     /// # Arguments
@@ -164,7 +164,8 @@ impl BoxClient {
     /// - 409: 次のいずれかの理由で復元できない。
     ///   - 復元先に同じ名前のフォルダがある。`options.name`に別の名前を指定して再度呼び出す。
     ///   - 移動、コピー、削除または復元の操作が、復元するフォルダまたは復元先のフォルダをロックしている。
-    ///     エラーコードは`operation_blocked_temporary`である。時間をおいて再度呼び出す。
+    ///     エラーコードは`operation_blocked_temporary`である。クライアントは再試行設定に従って再試行し、
+    ///     再試行回数の上限に達してもロックが解除されない場合にこのエラーを返す。
     ///
     /// 再試行できないエラーが発生した場合、または再試行回数の上限に達した場合はエラーを返す。
     /// 5xxまたはタイムアウトでエラーを返した場合は、BOXがフォルダを復元した可能性があるため、
@@ -605,7 +606,7 @@ mod test_restore_folder {
     #[rstest]
     #[case::forbidden(403)]
     #[case::not_found(404)]
-    #[case::conflict_or_locked(409)]
+    #[case::conflict_without_code(409)]
     #[case::internal_server_error(500)]
     #[case::service_unavailable(503)]
     #[tokio::test]
@@ -625,6 +626,69 @@ mod test_restore_folder {
 
         assert!(
             matches!(&result, Err(BoxClientError::Api(e)) if e.status == status),
+            "result: {result:?}"
+        );
+        assert_eq!(post_count(&server).await, 1);
+
+        Ok(())
+    }
+
+    /// 他の操作によるロックで409を受け取った場合は、冪等でないリクエストとして送信しても再試行することを確認
+    #[tokio::test]
+    async fn test_restore_folder_retries_operation_blocked_temporary() -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        Mock::given(method("POST"))
+            .and(path(FOLDER_PATH))
+            .respond_with(ResponseTemplate::new(409).set_body_json(json!({
+                "type": "error",
+                "status": 409,
+                "code": "operation_blocked_temporary",
+                "message": "The operation is blocked by another on-going operation",
+            })))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(FOLDER_PATH))
+            .respond_with(restored_response())
+            .mount(&server)
+            .await;
+        let client = create_client(&server, short_retry(1)?).await?;
+
+        client
+            .restore_folder(&FolderId::new("123"), &RestoreFolderOptions::default())
+            .await?;
+
+        assert_eq!(post_count(&server).await, 2);
+
+        Ok(())
+    }
+
+    /// 名前の重複で409を受け取った場合は、再試行せずにエラーを返すことを確認
+    #[tokio::test]
+    async fn test_restore_folder_name_conflict_is_not_retried() -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        Mock::given(method("POST"))
+            .and(path(FOLDER_PATH))
+            .respond_with(ResponseTemplate::new(409).set_body_json(json!({
+                "type": "error",
+                "status": 409,
+                "code": "item_name_in_use",
+                "message": "Item with the same name already exists",
+            })))
+            .mount(&server)
+            .await;
+        let client = create_client(&server, short_retry(2)?).await?;
+
+        let result = client
+            .restore_folder(&FolderId::new("123"), &RestoreFolderOptions::default())
+            .await;
+
+        assert!(
+            matches!(&result, Err(BoxClientError::Api(e))
+                if e.status == 409 && e.code.as_deref() == Some("item_name_in_use")),
             "result: {result:?}"
         );
         assert_eq!(post_count(&server).await, 1);

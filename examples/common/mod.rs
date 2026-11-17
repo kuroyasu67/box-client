@@ -21,9 +21,9 @@ pub async fn setup() -> anyhow::Result<BoxClient> {
         connect_timeout: Duration::from_secs(5),
     };
     let retry = RetryPolicy::new(
-        5,
+        10,
         Duration::from_millis(200),
-        Duration::from_secs(10),
+        Duration::from_secs(60),
         Duration::from_secs(1),
     )?;
 
