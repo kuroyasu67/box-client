@@ -36,6 +36,8 @@ async fn main() -> anyhow::Result<()> {
     if let Some(folder_item) = folder_item {
         let folder = client.folder_information(&folder_item.id).await?;
         tracing::info!("folder information: {folder:?}");
+    } else {
+        tracing::info!("there is no folder in the folder");
     }
 
     // ファイルの情報を取得
@@ -46,6 +48,20 @@ async fn main() -> anyhow::Result<()> {
     if let Some(file_item) = file_item {
         let file = client.file_information(&file_item.id).await?;
         tracing::info!("file information: {file:?}");
+    } else {
+        tracing::info!("there is no file in the folder");
+    }
+
+    // Webリンクの情報を取得
+    let link_item = items.iter().find_map(|item| match item {
+        BoxItem::WebLink(link) => Some(link),
+        _ => None,
+    });
+    if let Some(link_item) = link_item {
+        let link = client.web_link_information(&link_item.id).await?;
+        tracing::info!("web link information: {link:?}");
+    } else {
+        tracing::info!("there is no web link in the folder");
     }
 
     Ok(())

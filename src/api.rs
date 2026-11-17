@@ -6,3 +6,4 @@ pub mod files;
 pub mod folders;
 pub mod types;
 pub mod users;
+pub mod web_links;
