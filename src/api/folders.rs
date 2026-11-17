@@ -159,7 +159,8 @@ pub struct ListItemsOptions {
 
     /// 並び替えに使用する属性
     ///
-    /// ルートフォルダでは、マーカー方式のページ送りと並び替えを併用できない。
+    /// BOXはルートフォルダでマーカー方式のページ送りと並び替えの併用を受け付けない。
+    /// このクライアントは常にマーカー方式でページを送るため、ルートフォルダでは指定できない。
     pub sort: Option<ItemSort>,
 
     /// 並び替えの方向
@@ -343,6 +344,7 @@ impl BoxClient {
     /// # Errors
     ///
     /// `options.limit`が範囲外の場合は、リクエストを送信せずに[`BoxClientError::InvalidArgument`]を返す。
+    /// ルートフォルダで`options.sort`を指定した場合も、リクエストを送信せずに[`BoxClientError::InvalidArgument`]を返す。
     /// 再試行できないエラーが発生した場合、または再試行回数の上限に達した場合はエラーを返す。
     pub async fn list_items_in_folder(
         &self,
@@ -350,6 +352,12 @@ impl BoxClient {
         marker: Option<&str>,
         options: &ListItemsOptions,
     ) -> BoxClientResult<ItemsPage> {
+        if folder_id.is_root() && options.sort.is_some() {
+            return Err(BoxClientError::InvalidArgument(
+                "sort is not supported for marker-based pagination in the root folder",
+            ));
+        }
+
         let mut request =
             ApiRequest::get(["folders", folder_id.as_ref(), "items"]).query("usemarker", "true");
         if let Some(limit) = options.limit {
@@ -382,6 +390,7 @@ impl BoxClient {
     /// # Errors
     ///
     /// `options.limit`が範囲外の場合は、リクエストを送信せずに[`BoxClientError::InvalidArgument`]を返す。
+    /// ルートフォルダで`options.sort`を指定した場合も、リクエストを送信せずに[`BoxClientError::InvalidArgument`]を返す。
     /// BOXが以前に返したマーカーを再び返した場合、このメソッドは無限ループを避けるため[`BoxClientError::UnexpectedResponse`]を返す。
     /// いずれかのページの取得に失敗した場合は、取得済みの項目を破棄してエラーを返す。
     pub async fn list_all_items_in_folder(
@@ -968,6 +977,78 @@ mod test_list_items_in_folder {
             "result: {result:?}"
         );
         assert_eq!(items_queries(&server).await, Vec::<String>::new());
+
+        Ok(())
+    }
+
+    /// ルートフォルダの項目のAPIのパス
+    const ROOT_ITEMS_PATH: &str = "/2.0/folders/0/items";
+
+    /// ルートフォルダの項目のAPIへのリクエストのクエリ文字列を返す。
+    async fn root_items_queries(server: &MockServer) -> Vec<String> {
+        server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|r| r.url.path() == ROOT_ITEMS_PATH)
+            .map(|r| r.url.query().unwrap_or_default().to_owned())
+            .collect()
+    }
+
+    /// ルートフォルダで並び替えに使用する属性を指定した場合は、リクエストを送信せずにエラーを返すことを確認
+    #[tokio::test]
+    async fn test_list_items_in_folder_root_with_sort() -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        let client = create_client(&server, short_retry(0)?).await?;
+        let options = ListItemsOptions {
+            sort: Some(ItemSort::Name),
+            ..ListItemsOptions::default()
+        };
+
+        let result = client
+            .list_items_in_folder(&FolderId::root(), None, &options)
+            .await;
+
+        assert!(
+            matches!(result, Err(BoxClientError::InvalidArgument(_))),
+            "result: {result:?}"
+        );
+        assert_eq!(root_items_queries(&server).await, Vec::<String>::new());
+
+        Ok(())
+    }
+
+    /// ルートフォルダでも、並び替えに使用する属性を指定しなければ、並び替えの方向とともにリストできることを確認
+    #[tokio::test]
+    async fn test_list_items_in_folder_root_without_sort() -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        Mock::given(method("GET"))
+            .and(path(ROOT_ITEMS_PATH))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "entries": [],
+                "limit": 100,
+                "next_marker": null,
+            })))
+            .mount(&server)
+            .await;
+        let client = create_client(&server, short_retry(0)?).await?;
+        let options = ListItemsOptions {
+            direction: Some(SortDirection::Desc),
+            ..ListItemsOptions::default()
+        };
+
+        let page = client
+            .list_items_in_folder(&FolderId::root(), None, &options)
+            .await?;
+
+        assert_eq!(page.entries, Vec::<BoxItem>::new());
+        assert_eq!(
+            root_items_queries(&server).await,
+            vec!["usemarker=true&direction=DESC"]
+        );
 
         Ok(())
     }
