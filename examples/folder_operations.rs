@@ -7,6 +7,10 @@ const USAGE: &str =
     "usage: RUST_LOG=info cargo run --example=folder_operations -- <folder-id> [--skip-to-restore]";
 
 /// フォルダを操作する。
+///
+/// ```shell
+/// RUST_LOG=info cargo run --quiet --example=folder_operations -- <folder-id>
+/// ```
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // 先頭の要素はプログラム名であるため読み飛ばす

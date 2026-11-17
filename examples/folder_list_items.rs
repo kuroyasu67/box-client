@@ -2,12 +2,19 @@ mod common;
 
 use box_client::{BoxItem, FolderId, ListItemsOptions};
 
+const USAGE: &str = "usage: RUST_LOG=info cargo run --example=folder_list_items -- <folder-id>";
+
 /// フォルダ内のすべての項目を表示する。
+///
+/// ```shell
+/// RUST_LOG=info cargo run --quiet --example=folder_list_items -- <folder-id>
+/// ```
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let folder_id = std::env::args().nth(1).map(FolderId::new).ok_or_else(|| {
-        anyhow::anyhow!("usage: RUST_LOG=info cargo run --example=folder_list_items -- <folder-id>")
-    })?;
+    let folder_id = std::env::args()
+        .nth(1)
+        .map(FolderId::new)
+        .ok_or_else(|| anyhow::anyhow!(USAGE))?;
 
     let client = common::setup().await?;
 

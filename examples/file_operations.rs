@@ -3,10 +3,13 @@ mod common;
 use box_client::{FileId, RestoreItemOptions};
 
 /// 使用方法
-const USAGE: &str =
-    "usage: RUST_LOG=info cargo run --example=file_operations -- <file-id> [--skip-to-restore]";
+const USAGE: &str = "usage: RUST_LOG=info cargo run --quiet --example=file_operations -- <file-id> [--skip-to-restore]";
 
 /// ファイルを操作する。
+///
+/// ```shell
+/// RUST_LOG=info cargo run --example=file_operations -- <file-id> [--skip-to-restore]
+/// ```
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // 先頭の要素はプログラム名であるため読み飛ばす

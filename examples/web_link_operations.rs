@@ -5,7 +5,11 @@ use box_client::{RestoreItemOptions, WebLinkId};
 /// 使用方法
 const USAGE: &str = "usage: RUST_LOG=info cargo run --example=web_link_operations -- <web-link-id> [--skip-to-restore]";
 
-/// ウェブリンクを操作する。
+/// Webリンクを操作する。
+///
+/// ```shell
+/// RUST_LOG=info cargo run --quiet --example=web_link_operations -- <web-link-id>
+/// ```
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // 先頭の要素はプログラム名であるため読み飛ばす
@@ -23,13 +27,13 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("web link id: {web_link_id}");
 
     if !skip_to_restore {
-        // ウェブリンクの情報を取得
+        // Webリンクの情報を取得
         match client.web_link_information(&web_link_id).await {
             Ok(web_link) => tracing::info!("web link: {web_link:?}"),
             Err(e) => anyhow::bail!(e),
         }
 
-        // ウェブリンクを削除
+        // Webリンクを削除
         match client.delete_web_link(&web_link_id).await {
             Ok(()) => tracing::info!("web link was deleted successfully"),
             Err(e) => anyhow::bail!(e),
@@ -38,7 +42,7 @@ async fn main() -> anyhow::Result<()> {
         // 待機
         tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
 
-        // ゴミ箱にある削除したウェブリンクの情報を取得
+        // ゴミ箱にある削除したWebリンクの情報を取得
         match client.trashed_web_link_information(&web_link_id).await {
             Ok(web_link) => {
                 tracing::info!(
@@ -49,7 +53,7 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    // ウェブリンクを復元
+    // Webリンクを復元
     let restore_options = RestoreItemOptions::default();
     match client
         .restore_web_link(&web_link_id, &restore_options)
@@ -62,7 +66,7 @@ async fn main() -> anyhow::Result<()> {
     // 待機
     tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
 
-    // 復元したウェブリンクの情報を取得
+    // 復元したWebリンクの情報を取得
     match client.web_link_information(&web_link_id).await {
         Ok(web_link) => tracing::info!("restored web link: {web_link:?}"),
         Err(e) => anyhow::bail!(e),
