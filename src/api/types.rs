@@ -93,3 +93,13 @@ pub struct WebLinkItem {
     /// ウェブリンクのバージョンを識別するETag
     pub etag: Option<String>,
 }
+
+/// ルートフォルダから項目の親フォルダまでのパス
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct PathCollection {
+    /// パスに含まれるフォルダの数
+    pub total_count: u64,
+
+    /// ルートフォルダから順に並べた、パスに含まれるフォルダ
+    pub entries: Vec<FolderItem>,
+}

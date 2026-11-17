@@ -1,11 +1,104 @@
 //! フォルダに関するAPI
 
 use serde::Deserialize;
+use time::OffsetDateTime;
 
-use crate::{BoxClient, BoxClientError, BoxClientResult, BoxItem, FolderId, request::ApiRequest};
+use crate::{
+    BoxClient, BoxClientError, BoxClientResult, BoxItem, FolderId, FolderItem, UserMini,
+    api::types::PathCollection, request::ApiRequest,
+};
 
 /// 1回のリクエストで取得できる項目数の上限
 pub const MAX_ITEMS_LIMIT: u32 = 1000;
+
+/// フォルダ情報
+///
+/// ルートフォルダでは、ETag、作成日時、親フォルダなどの多くの属性をBOXがnullで返すため、
+/// IDおよび名前以外の属性を`Option`で受け取る。
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct Folder {
+    /// フォルダID
+    pub id: FolderId,
+
+    /// フォルダのバージョンを識別するETag
+    pub etag: Option<String>,
+
+    /// フォルダの変更を識別するシーケンスID
+    pub sequence_id: Option<String>,
+
+    /// フォルダ名
+    pub name: String,
+
+    /// フォルダの説明
+    pub description: Option<String>,
+
+    /// フォルダ内のすべてのファイルの合計バイト数
+    pub size: Option<u64>,
+
+    /// ルートフォルダからこのフォルダの親フォルダまでのパス
+    pub path_collection: Option<PathCollection>,
+
+    /// BOX上でフォルダを作成した日時
+    #[serde(default, with = "time::serde::rfc3339::option")]
+    pub created_at: Option<OffsetDateTime>,
+
+    /// BOX上でフォルダを最後に更新した日時
+    #[serde(default, with = "time::serde::rfc3339::option")]
+    pub modified_at: Option<OffsetDateTime>,
+
+    /// フォルダをごみ箱に移動した日時
+    #[serde(default, with = "time::serde::rfc3339::option")]
+    pub trashed_at: Option<OffsetDateTime>,
+
+    /// ごみ箱に移動したフォルダを完全に削除する予定の日時
+    #[serde(default, with = "time::serde::rfc3339::option")]
+    pub purged_at: Option<OffsetDateTime>,
+
+    /// フォルダの内容を作成した日時
+    #[serde(default, with = "time::serde::rfc3339::option")]
+    pub content_created_at: Option<OffsetDateTime>,
+
+    /// フォルダの内容を最後に更新した日時
+    #[serde(default, with = "time::serde::rfc3339::option")]
+    pub content_modified_at: Option<OffsetDateTime>,
+
+    /// フォルダを作成したユーザー
+    pub created_by: Option<UserMini>,
+
+    /// フォルダを最後に更新したユーザー
+    pub modified_by: Option<UserMini>,
+
+    /// フォルダを所有するユーザー
+    pub owned_by: Option<UserMini>,
+
+    /// 親フォルダ
+    ///
+    /// ルートフォルダの場合は`None`になる。
+    pub parent: Option<FolderItem>,
+
+    /// フォルダの状態
+    pub item_status: Option<ItemStatus>,
+}
+
+/// 項目の状態
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ItemStatus {
+    /// 有効
+    Active,
+
+    /// ごみ箱に移動済み
+    Trashed,
+
+    /// 削除済み
+    Deleted,
+
+    /// このクライアントが知らない状態
+    ///
+    /// BOXが状態を追加しても、フォルダ情報の取得を失敗させないために受け入れる。
+    #[serde(other)]
+    Unknown,
+}
 
 /// フォルダ内の項目の1ページ
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -99,6 +192,22 @@ fn validate_limit(limit: u32) -> BoxClientResult<u32> {
 }
 
 impl BoxClient {
+    /// フォルダ情報を取得する。
+    ///
+    /// # Arguments
+    ///
+    /// - `folder_id`: 情報を取得するフォルダのID。ルートフォルダの場合は[`FolderId::root`]を指定する。
+    ///
+    /// # Errors
+    ///
+    /// フォルダが存在しない場合、またはフォルダにアクセスする権限がない場合は、
+    /// [`BoxClientError::Api`]を返す。
+    /// 再試行できないエラーが発生した場合、または再試行回数の上限に達した場合はエラーを返す。
+    pub async fn folder_information(&self, folder_id: &FolderId) -> BoxClientResult<Folder> {
+        self.send_json(ApiRequest::get(["folders", folder_id.as_ref()]))
+            .await
+    }
+
     /// フォルダ内の項目を1ページ分リストする。
     ///
     /// 1回の呼び出しで返す項目は最大で`limit`件であるため、フォルダに後続の項目が残っている
@@ -201,7 +310,6 @@ impl BoxClient {
     }
 }
 
-/*
 #[cfg(test)]
 mod test_folder_id {
     use super::*;
@@ -212,7 +320,220 @@ mod test_folder_id {
         assert_eq!(FolderId::root().as_ref(), "0");
     }
 }
-*/
+
+#[cfg(test)]
+mod test_folder {
+    use rstest::rstest;
+    use serde_json::json;
+    use time::macros::datetime;
+
+    use super::*;
+
+    /// 日時をRFC 3339形式で解析し、パス、親フォルダおよびユーザーをデシリアライズすることを確認
+    #[test]
+    fn test_deserialize() -> anyhow::Result<()> {
+        let user = json!({"type": "user", "id": "33224", "name": "Test User", "login": "user@example.com"});
+        let folder: Folder = serde_json::from_value(json!({
+            "type": "folder",
+            "id": "12345",
+            "etag": "1",
+            "sequence_id": "3",
+            "name": "Contracts",
+            "description": "Legal contracts",
+            "size": 629_644,
+            "path_collection": {
+                "total_count": 2,
+                "entries": [
+                    {"type": "folder", "id": "0", "sequence_id": null, "etag": null, "name": "All Files"},
+                    {"type": "folder", "id": "111", "sequence_id": "0", "etag": "0", "name": "Legal"},
+                ],
+            },
+            "created_at": "2012-12-12T10:53:43-08:00",
+            "modified_at": "2012-12-12T11:15:04+09:00",
+            "trashed_at": null,
+            "purged_at": null,
+            "content_created_at": "2012-12-12T10:53:43Z",
+            "content_modified_at": "2012-12-12T11:15:04Z",
+            "created_by": user,
+            "modified_by": user,
+            "owned_by": user,
+            "parent": {"type": "folder", "id": "111", "sequence_id": "0", "etag": "0", "name": "Legal"},
+            "item_status": "active",
+            "item_collection": {"total_count": 0, "entries": []},
+        }))?;
+
+        let user = UserMini {
+            id: "33224".to_owned(),
+            user_type: "user".to_owned(),
+            name: "Test User".to_owned(),
+            login: "user@example.com".to_owned(),
+        };
+        let legal = FolderItem {
+            id: FolderId::new("111"),
+            name: "Legal".to_owned(),
+            etag: Some("0".to_owned()),
+        };
+        assert_eq!(
+            folder,
+            Folder {
+                id: FolderId::new("12345"),
+                etag: Some("1".to_owned()),
+                sequence_id: Some("3".to_owned()),
+                name: "Contracts".to_owned(),
+                description: Some("Legal contracts".to_owned()),
+                size: Some(629_644),
+                path_collection: Some(PathCollection {
+                    total_count: 2,
+                    entries: vec![
+                        FolderItem {
+                            id: FolderId::root(),
+                            name: "All Files".to_owned(),
+                            etag: None,
+                        },
+                        legal.clone(),
+                    ],
+                }),
+                created_at: Some(datetime!(2012-12-12 10:53:43 -08:00)),
+                modified_at: Some(datetime!(2012-12-12 11:15:04 +09:00)),
+                trashed_at: None,
+                purged_at: None,
+                content_created_at: Some(datetime!(2012-12-12 10:53:43 UTC)),
+                content_modified_at: Some(datetime!(2012-12-12 11:15:04 UTC)),
+                created_by: Some(user.clone()),
+                modified_by: Some(user.clone()),
+                owned_by: Some(user),
+                parent: Some(legal),
+                item_status: Some(ItemStatus::Active),
+            }
+        );
+
+        Ok(())
+    }
+
+    /// 日時、親フォルダなどがnullまたは欠落しているルートフォルダをデシリアライズすることを確認
+    #[test]
+    fn test_deserialize_root() -> anyhow::Result<()> {
+        let folder: Folder = serde_json::from_value(json!({
+            "type": "folder",
+            "id": "0",
+            "etag": null,
+            "sequence_id": null,
+            "name": "All Files",
+            "created_at": null,
+            "modified_at": null,
+            "path_collection": {"total_count": 0, "entries": []},
+            "parent": null,
+            "item_status": "active",
+        }))?;
+
+        assert_eq!(folder.id, FolderId::root());
+        assert_eq!(folder.etag, None);
+        assert_eq!(folder.created_at, None);
+        // レスポンスに存在しない日時の属性も`None`として受け入れる
+        assert_eq!(folder.trashed_at, None);
+        assert_eq!(folder.parent, None);
+        assert_eq!(folder.path_collection.map(|p| p.entries.len()), Some(0));
+
+        Ok(())
+    }
+
+    /// フォルダの状態をデシリアライズし、知らない状態を受け入れることを確認
+    #[rstest]
+    #[case::active("active", ItemStatus::Active)]
+    #[case::trashed("trashed", ItemStatus::Trashed)]
+    #[case::deleted("deleted", ItemStatus::Deleted)]
+    #[case::unknown("archived", ItemStatus::Unknown)]
+    fn test_deserialize_item_status(
+        #[case] value: &str,
+        #[case] expected: ItemStatus,
+    ) -> anyhow::Result<()> {
+        let status: ItemStatus = serde_json::from_value(json!(value))?;
+
+        assert_eq!(status, expected);
+
+        Ok(())
+    }
+
+    /// RFC 3339形式でない日時の場合は、デシリアライズに失敗することを確認
+    #[test]
+    fn test_deserialize_invalid_datetime() {
+        let result = serde_json::from_value::<Folder>(json!({
+            "id": "12345",
+            "name": "Contracts",
+            "created_at": "2012/12/12 10:53:43",
+        }));
+
+        assert!(result.is_err(), "result: {result:?}");
+    }
+}
+
+#[cfg(test)]
+mod test_folder_information {
+    use serde_json::json;
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{method, path},
+    };
+
+    use super::*;
+    use crate::test_support::{create_client, mount_token, short_retry};
+
+    /// GET /folders/{folder_id}を呼び出し、フォルダ情報をデシリアライズすることを確認
+    #[tokio::test]
+    async fn test_folder_information() -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        Mock::given(method("GET"))
+            .and(path("/2.0/folders/12345"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "type": "folder",
+                "id": "12345",
+                "etag": "1",
+                "name": "Contracts",
+                "created_at": "2012-12-12T10:53:43-08:00",
+                "parent": {"type": "folder", "id": "0", "etag": null, "name": "All Files"},
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = create_client(&server, short_retry(0)?).await?;
+
+        let folder = client.folder_information(&FolderId::new("12345")).await?;
+
+        assert_eq!(folder.id, FolderId::new("12345"));
+        assert_eq!(folder.name, "Contracts");
+        assert_eq!(folder.parent.map(|p| p.id), Some(FolderId::root()));
+
+        Ok(())
+    }
+
+    /// フォルダが存在しない場合は、BOXのエラーレスポンスを返すことを確認
+    #[tokio::test]
+    async fn test_folder_information_not_found() -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        Mock::given(method("GET"))
+            .and(path("/2.0/folders/999"))
+            .respond_with(ResponseTemplate::new(404).set_body_json(json!({
+                "type": "error",
+                "status": 404,
+                "code": "not_found",
+                "message": "Not Found",
+            })))
+            .mount(&server)
+            .await;
+        let client = create_client(&server, short_retry(0)?).await?;
+
+        let result = client.folder_information(&FolderId::new("999")).await;
+
+        assert!(
+            matches!(&result, Err(BoxClientError::Api(e)) if e.status == 404),
+            "result: {result:?}"
+        );
+
+        Ok(())
+    }
+}
 
 #[cfg(test)]
 mod test_validate_limit {
@@ -246,7 +567,7 @@ mod test_items_page {
 
     use crate::{
         FileItem, FolderItem, WebLinkItem,
-        api::models::{FileId, FolderId, WebLinkId},
+        api::types::{FileId, FolderId, WebLinkId},
     };
 
     use super::*;

@@ -1,14 +1,44 @@
 //! ユーザーに関するAPI
 
 use serde::Deserialize;
+use time::OffsetDateTime;
 
 use crate::{BoxClient, BoxClientResult, request::ApiRequest};
 
 /// BOXのユーザー
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct User {
     /// ユーザーID
     pub id: String,
+
+    /// タイプ
+    #[serde(rename = "type")]
+    pub user_type: String,
+
+    /// 表示名
+    pub name: String,
+
+    /// ログインに使用するメールアドレス
+    pub login: String,
+
+    /// 作成した日時
+    #[serde(default, with = "time::serde::rfc3339::option")]
+    pub created_at: Option<OffsetDateTime>,
+
+    /// 最後に更新した日時
+    #[serde(default, with = "time::serde::rfc3339::option")]
+    pub modified_at: Option<OffsetDateTime>,
+}
+
+/// 最小限のユーザー情報
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct UserMini {
+    /// ユーザーID
+    pub id: String,
+
+    /// タイプ
+    #[serde(rename = "type")]
+    pub user_type: String,
 
     /// 表示名
     pub name: String,

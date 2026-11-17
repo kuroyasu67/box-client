@@ -28,5 +28,16 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    let folder_item = items
+        .iter()
+        .find_map(|item| match item {
+            BoxItem::Folder(folder) => Some(folder),
+            _ => None,
+        })
+        .ok_or_else(|| anyhow::anyhow!("nof folder in this folder (folder id: {})", folder_id))?;
+
+    let folder = client.folder_information(&folder_item.id).await?;
+    tracing::info!("folder information: {folder:?}");
+
     Ok(())
 }
