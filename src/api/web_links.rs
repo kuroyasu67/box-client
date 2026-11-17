@@ -18,7 +18,7 @@ pub struct WebLink {
     /// ウェブリンクID
     pub id: WebLinkId,
 
-    /// ウェブリンクのバージョンを識別するETag
+    /// ウェブリンクのバージョンを識別する`ETag`
     pub etag: Option<String>,
 
     /// ウェブリンクの変更を識別するシーケンスID
@@ -249,7 +249,7 @@ mod test_web_link_information {
         test_support::{create_client, mount_token, short_retry},
     };
 
-    /// GET /web_links/{web_link_id}を呼び出し、ウェブリンク情報をデシリアライズすることを確認
+    /// `GET /web_links/{web_link_id}`を呼び出し、ウェブリンク情報をデシリアライズすることを確認
     #[tokio::test]
     async fn test_web_link_information() -> anyhow::Result<()> {
         let server = MockServer::start().await;
@@ -338,7 +338,7 @@ mod test_delete_web_link {
             .count()
     }
 
-    /// DELETE /web_links/{web_link_id}を呼び出し、204を受け取ると成功することを確認
+    /// `DELETE /web_links/{web_link_id}`を呼び出し、204を受け取ると成功することを確認
     #[tokio::test]
     async fn test_delete_web_link() -> anyhow::Result<()> {
         let server = MockServer::start().await;

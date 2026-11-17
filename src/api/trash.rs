@@ -404,7 +404,7 @@ mod test_trashed_folder_information {
         test_support::{create_client, mount_token, request_count, short_retry},
     };
 
-    /// GET /folders/{folder_id}/trashを呼び出し、ゴミ箱に移動した日時と状態を含むフォルダ情報をデシリアライズすることを確認
+    /// `GET /folders/{folder_id}/trash`を呼び出し、ゴミ箱に移動した日時と状態を含むフォルダ情報をデシリアライズすることを確認
     #[tokio::test]
     async fn test_trashed_folder_information() -> anyhow::Result<()> {
         let server = MockServer::start().await;
@@ -510,7 +510,7 @@ mod test_trashed_file_information {
         test_support::{create_client, mount_token, short_retry},
     };
 
-    /// GET /files/{file_id}/trashを呼び出し、ゴミ箱に移動した日時と状態を含むファイル情報をデシリアライズすることを確認
+    /// `GET /files/{file_id}/trash`を呼び出し、ゴミ箱に移動した日時と状態を含むファイル情報をデシリアライズすることを確認
     #[tokio::test]
     async fn test_trashed_file_information() -> anyhow::Result<()> {
         let server = MockServer::start().await;
@@ -604,7 +604,7 @@ mod test_trashed_web_link_information {
         test_support::{create_client, mount_token, short_retry},
     };
 
-    /// GET /web_links/{web_link_id}/trashを呼び出し、ゴミ箱に移動した日時と状態を含むウェブリンク情報をデシリアライズすることを確認
+    /// `GET /web_links/{web_link_id}/trash`を呼び出し、ゴミ箱に移動した日時と状態を含むウェブリンク情報をデシリアライズすることを確認
     #[tokio::test]
     async fn test_trashed_web_link_information() -> anyhow::Result<()> {
         let server = MockServer::start().await;
@@ -767,7 +767,7 @@ mod test_restore_folder {
             .count()
     }
 
-    /// POST /folders/{folder_id}にオプションをボディとして送信し、復元したフォルダ情報を返すことを確認
+    /// `POST /folders/{folder_id}`にオプションをボディとして送信し、復元したフォルダ情報を返すことを確認
     #[tokio::test]
     async fn test_restore_folder() -> anyhow::Result<()> {
         let server = MockServer::start().await;
@@ -992,7 +992,7 @@ mod test_restore_file {
             .count()
     }
 
-    /// POST /files/{file_id}にオプションをボディとして送信し、復元したファイル情報を返すことを確認
+    /// `POST /files/{file_id}`にオプションをボディとして送信し、復元したファイル情報を返すことを確認
     #[tokio::test]
     async fn test_restore_file() -> anyhow::Result<()> {
         let server = MockServer::start().await;
@@ -1142,7 +1142,7 @@ mod test_restore_web_link {
             .count()
     }
 
-    /// POST /web_links/{web_link_id}にオプションをボディとして送信し、復元したウェブリンク情報を返すことを確認
+    /// `POST /web_links/{web_link_id}`にオプションをボディとして送信し、復元したウェブリンク情報を返すことを確認
     #[tokio::test]
     async fn test_restore_web_link() -> anyhow::Result<()> {
         let server = MockServer::start().await;
@@ -1280,7 +1280,7 @@ mod test_list_trashed_items {
             .collect()
     }
 
-    /// GET /folders/trash/itemsを呼び出し、マーカーとオプションをクエリパラメーターに変換することを確認
+    /// `GET /folders/trash/items`を呼び出し、マーカーとオプションをクエリパラメーターに変換することを確認
     #[rstest]
     #[case::default(None, ListTrashedItemsOptions::default(), "usemarker=true")]
     #[case::min_limit(
@@ -1344,7 +1344,7 @@ mod test_list_trashed_items {
             matches!(result, Err(BoxClientError::InvalidArgument(_))),
             "result: {result:?}"
         );
-        assert!(trash_queries(&server).await.is_empty());
+        assert_eq!(trash_queries(&server).await, Vec::<String>::new());
 
         Ok(())
     }
@@ -1369,7 +1369,7 @@ mod test_list_all_trashed_items {
     const TRASH_ITEMS_PATH: &str = "/2.0/folders/trash/items";
 
     /// 指定したIDのフォルダだけを含むページのレスポンスを返す。
-    fn page_response(id: &str, next_marker: Value) -> ResponseTemplate {
+    fn page_response(id: &str, next_marker: &Value) -> ResponseTemplate {
         ResponseTemplate::new(200).set_body_json(json!({
             "entries": [{"type": "folder", "id": id, "name": id, "etag": "0"}],
             "limit": 1000,
@@ -1386,7 +1386,7 @@ mod test_list_all_trashed_items {
         })
     }
 
-    /// next_markerがnullまたは空文字列になるまでページを送り、すべての項目を返すことを確認
+    /// `next_marker`がnullまたは空文字列になるまでページを送り、すべての項目を返すことを確認
     #[rstest]
     #[case::null(Value::Null)]
     #[case::empty(json!(""))]
@@ -1399,7 +1399,7 @@ mod test_list_all_trashed_items {
             .and(path(TRASH_ITEMS_PATH))
             .and(query_param("limit", "1000"))
             .and(query_param_is_missing("marker"))
-            .respond_with(page_response("first", json!("m1")))
+            .respond_with(page_response("first", &json!("m1")))
             .expect(1)
             .mount(&server)
             .await;
@@ -1407,7 +1407,7 @@ mod test_list_all_trashed_items {
             .and(path(TRASH_ITEMS_PATH))
             .and(query_param("limit", "1000"))
             .and(query_param("marker", "m1"))
-            .respond_with(page_response("second", last_marker))
+            .respond_with(page_response("second", &last_marker))
             .expect(1)
             .mount(&server)
             .await;
@@ -1432,7 +1432,7 @@ mod test_list_all_trashed_items {
             .and(query_param("limit", "1"))
             .and(query_param("direction", "DESC"))
             .and(query_param_is_missing("marker"))
-            .respond_with(page_response("first", json!("m1")))
+            .respond_with(page_response("first", &json!("m1")))
             .expect(1)
             .mount(&server)
             .await;
@@ -1441,7 +1441,7 @@ mod test_list_all_trashed_items {
             .and(query_param("limit", "1"))
             .and(query_param("direction", "DESC"))
             .and(query_param("marker", "m1"))
-            .respond_with(page_response("second", Value::Null))
+            .respond_with(page_response("second", &Value::Null))
             .expect(1)
             .mount(&server)
             .await;
@@ -1465,7 +1465,7 @@ mod test_list_all_trashed_items {
         mount_token(&server).await;
         Mock::given(method("GET"))
             .and(path(TRASH_ITEMS_PATH))
-            .respond_with(page_response("same", json!("m1")))
+            .respond_with(page_response("same", &json!("m1")))
             .expect(2)
             .mount(&server)
             .await;
@@ -1491,7 +1491,7 @@ mod test_list_all_trashed_items {
         Mock::given(method("GET"))
             .and(path(TRASH_ITEMS_PATH))
             .and(query_param_is_missing("marker"))
-            .respond_with(page_response("first", json!("m1")))
+            .respond_with(page_response("first", &json!("m1")))
             .mount(&server)
             .await;
         Mock::given(method("GET"))

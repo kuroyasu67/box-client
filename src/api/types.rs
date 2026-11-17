@@ -30,11 +30,13 @@ box_item_struct!(FileId);
 box_item_struct!(WebLinkId);
 
 impl FolderId {
+    #[must_use]
     pub fn root() -> Self {
         FolderId::new("0")
     }
 
     /// ルートフォルダのIDであるかを返す。
+    #[must_use]
     pub fn is_root(&self) -> bool {
         self.0 == "0"
     }
@@ -71,7 +73,7 @@ pub struct FileItem {
     /// ファイル名
     pub name: String,
 
-    /// ファイルのバージョンを識別するETag
+    /// ファイルのバージョンを識別する`ETag`
     pub etag: Option<String>,
 }
 
@@ -85,7 +87,7 @@ pub struct FolderItem {
     /// フォルダ名
     pub name: String,
 
-    /// フォルダのバージョンを識別するETag
+    /// フォルダのバージョンを識別する`ETag`
     pub etag: Option<String>,
 }
 
@@ -99,7 +101,7 @@ pub struct WebLinkItem {
     /// ウェブリンク名
     pub name: String,
 
-    /// ウェブリンクのバージョンを識別するETag
+    /// ウェブリンクのバージョンを識別する`ETag`
     pub etag: Option<String>,
 }
 

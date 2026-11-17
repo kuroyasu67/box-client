@@ -30,7 +30,7 @@ async fn main() -> anyhow::Result<()> {
 
         // ファイルを削除
         match client.delete_file(&file_id, None).await {
-            Ok(_) => tracing::info!("file was deleted successfully"),
+            Ok(()) => tracing::info!("file was deleted successfully"),
             Err(e) => anyhow::bail!(e),
         }
 
@@ -40,7 +40,7 @@ async fn main() -> anyhow::Result<()> {
         // ゴミ箱にある削除したファイルの情報を取得
         match client.trashed_file_information(&file_id).await {
             Ok(file) => {
-                tracing::info!("trashed file information was fetched successfully: {file:?}")
+                tracing::info!("trashed file information was fetched successfully: {file:?}");
             }
             Err(e) => anyhow::bail!(e),
         }

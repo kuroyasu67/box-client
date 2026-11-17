@@ -30,3 +30,6 @@ rstest             = "0.28.0"
 time               = { version = "0.3.55", features = ["macros"] }
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
 wiremock           = "0.6.5"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }

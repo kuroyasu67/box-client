@@ -42,7 +42,7 @@ const DEFAULT_REFRESH_BEFORE_EXPIRY: Duration = Duration::from_secs(60);
 /// その結果、トークン管理者は、APIが呼び出されるたびにバックグラウンドで新しいアクセストークンを取得し、
 /// トークンエンドポイントへのリクエストが絶えず発生する。
 /// したがって、この上限を有効期間の半分とし、トークン管理者に、取得したアクセストークンを少なくとも有効期間の半分は再利用させる。
-pub const MAX_REFRESH_BEFORE_EXPIRY: Duration = Duration::from_secs(30 * 60);
+pub const MAX_REFRESH_BEFORE_EXPIRY: Duration = Duration::from_mins(30);
 
 /// BOXクライアント
 ///
@@ -83,6 +83,7 @@ impl BoxClient {
     /// # Arguments
     ///
     /// - `config`: BOX設定
+    #[must_use]
     pub fn builder(config: BoxConfig) -> BoxClientBuilder {
         BoxClientBuilder {
             config,
@@ -110,7 +111,7 @@ impl BoxClient {
 
     /// リクエストを送信し、成功レスポンスのボディを読まずに破棄する。
     ///
-    /// 204 No Contentを返すDELETEなどに使用する。
+    /// `204 No Content`を返すDELETEなどに使用する。
     ///
     /// # Errors
     ///
@@ -219,6 +220,7 @@ pub struct BoxClientBuilder {
 
 impl BoxClientBuilder {
     /// タイムアウト設定を指定する。
+    #[must_use]
     pub fn timeout(mut self, timeout: BoxClientTimeout) -> Self {
         self.timeout = timeout;
         self
@@ -227,6 +229,7 @@ impl BoxClientBuilder {
     /// 再試行設定を指定する。
     ///
     /// アクセストークンの取得とREST APIの呼び出しの両方に適用する。
+    #[must_use]
     pub fn retry(mut self, retry: RetryPolicy) -> Self {
         self.retry = retry;
         self
@@ -241,6 +244,7 @@ impl BoxClientBuilder {
     /// 再試行を含めてアクセストークンの取得にかかる時間より長くする。
     ///
     /// [`MAX_REFRESH_BEFORE_EXPIRY`]以下を指定する。上限を超える値は[`BoxClientBuilder::build`]でエラーになる。
+    #[must_use]
     pub fn refresh_before_expiry(mut self, refresh_before_expiry: Duration) -> Self {
         self.refresh_before_expiry = refresh_before_expiry;
         self
@@ -407,7 +411,7 @@ mod test_box_client {
     #[rstest]
     #[case::zero(Duration::ZERO, true)]
     #[case::default(DEFAULT_REFRESH_BEFORE_EXPIRY, true)]
-    #[case::below_max(MAX_REFRESH_BEFORE_EXPIRY - Duration::from_nanos(1), true)]
+    #[case::below_max(MAX_REFRESH_BEFORE_EXPIRY.saturating_sub(Duration::from_nanos(1)), true)]
     #[case::equal_to_max(MAX_REFRESH_BEFORE_EXPIRY, true)]
     #[case::above_max(MAX_REFRESH_BEFORE_EXPIRY + Duration::from_nanos(1), false)]
     #[case::token_lifetime(Duration::from_secs(3600), false)]

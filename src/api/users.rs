@@ -72,7 +72,7 @@ mod test_get_current_user {
 
     use crate::test_support::{create_client, mount_token, short_retry};
 
-    /// GET /users/meを呼び出し、ユーザー情報をデシリアライズすることを確認
+    /// `GET /users/me`を呼び出し、ユーザー情報をデシリアライズすることを確認
     #[tokio::test]
     async fn test_get_current_user() -> anyhow::Result<()> {
         let server = MockServer::start().await;

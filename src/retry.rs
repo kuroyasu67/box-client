@@ -100,21 +100,25 @@ impl RetryPolicy {
     }
 
     /// 最大再試行回数を返す。
+    #[must_use]
     pub fn max_retries(&self) -> u32 {
         self.max_retries
     }
 
     /// 1回目の再試行前に待機する時間を返す。
+    #[must_use]
     pub fn initial_delay(&self) -> Duration {
         self.initial_delay
     }
 
     /// 待機時間の上限を返す。
+    #[must_use]
     pub fn max_delay(&self) -> Duration {
         self.max_delay
     }
 
     /// 待機時間に加算するジッターの上限を返す。
+    #[must_use]
     pub fn max_jitter(&self) -> Duration {
         self.max_jitter
     }
@@ -198,6 +202,10 @@ impl RetryPolicy {
     /// # Arguments
     ///
     /// - `rng`: 乱数生成器
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "`nanos`は`max_jitter`のナノ秒以下であるため、秒はu64に、秒未満のナノ秒はu32に収まる"
+    )]
     fn jitter<R: Rng + ?Sized>(&self, rng: &mut R) -> Duration {
         const NANOS_PER_SEC: u128 = 1_000_000_000;
 
@@ -233,6 +241,7 @@ impl Idempotency {
     /// HTTPメソッドの意味から冪等性を決定する。
     ///
     /// GET、HEAD、PUT、DELETE、OPTIONSおよびTRACEは冪等、それ以外は冪等でないとする。
+    #[must_use]
     pub fn from_method(method: &Method) -> Self {
         if method.is_idempotent() {
             Self::Idempotent
@@ -563,7 +572,7 @@ mod test_retry_policy {
         )?)
     }
 
-    /// 上限で切り詰めた待機時間にジッターを加算し、ジッターが0とmax_jitterの両端の値を取りうることを確認
+    /// 上限で切り詰めた待機時間にジッターを加算し、ジッターが0と`max_jitter`の両端の値を取りうることを確認
     #[test]
     fn test_jittered_delay_duration_reaches_both_ends() -> anyhow::Result<()> {
         // 取りうるジッターを0ナノ秒と1ナノ秒の2通りに限定し、結果が両端の値だけになることを確かめる。

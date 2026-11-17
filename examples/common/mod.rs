@@ -49,10 +49,10 @@ pub async fn list_trashed_items(client: &BoxClient) -> anyhow::Result<()> {
         match item {
             BoxItem::File(file) => tracing::info!("file: id={}, name={}", file.id, file.name),
             BoxItem::Folder(folder) => {
-                tracing::info!("folder: id={}, name={}", folder.id, folder.name)
+                tracing::info!("folder: id={}, name={}", folder.id, folder.name);
             }
             BoxItem::WebLink(link) => {
-                tracing::info!("web_link: id={}, name={}", link.id, link.name)
+                tracing::info!("web_link: id={}, name={}", link.id, link.name);
             }
             // `BoxItem`は`#[non_exhaustive]`であるため、`BoxItem::Unknown`と将来追加される種類をまとめて扱う。
             _ => tracing::info!("unknown item"),

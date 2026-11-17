@@ -16,7 +16,7 @@ pub const MAX_ITEMS_LIMIT: u32 = 1000;
 
 /// フォルダ情報
 ///
-/// ルートフォルダでは、ETag、作成日時、親フォルダなどの多くの属性をBOXがnullで返すため、
+/// ルートフォルダでは、`ETag`、作成日時、親フォルダなどの多くの属性をBOXがnullで返すため、
 /// IDおよび名前以外の属性を`Option`で受け取る。
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[non_exhaustive]
@@ -24,7 +24,7 @@ pub struct Folder {
     /// フォルダID
     pub id: FolderId,
 
-    /// フォルダのバージョンを識別するETag
+    /// フォルダのバージョンを識別する`ETag`
     pub etag: Option<String>,
 
     /// フォルダの変更を識別するシーケンスID
@@ -174,9 +174,9 @@ pub struct DeleteFolderOptions<'a> {
     /// `false`の場合に空でないフォルダを削除しようとすると、BOXは400（`folder_not_empty`）を返す。
     pub recursive: bool,
 
-    /// 最後に取得したフォルダのETag
+    /// 最後に取得したフォルダの`ETag`
     ///
-    /// 指定した場合は、`If-Match`ヘッダーで送信する。フォルダがETagの取得後に変更されていると、
+    /// 指定した場合は、`If-Match`ヘッダーで送信する。フォルダが`ETag`の取得後に変更されていると、
     /// BOXはフォルダを削除せずに412を返す。
     pub etag: Option<&'a str>,
 }
@@ -272,7 +272,7 @@ impl BoxClient {
     /// # Arguments
     ///
     /// - `folder_id`: 削除するフォルダのID
-    /// - `options`: 再帰的に削除するかどうか、およびETagのオプション
+    /// - `options`: 再帰的に削除するかどうか、および`ETag`のオプション
     ///
     /// # Errors
     ///
@@ -287,7 +287,7 @@ impl BoxClient {
     /// - 409: 移動、コピーなど、他の操作がフォルダをロックしている。エラーコードが`operation_blocked_temporary`の
     ///   場合、クライアントは再試行設定に従って再試行し、再試行回数の上限に達してもロックが解除されない場合に
     ///   このエラーを返す。
-    /// - 412: `options.etag`がフォルダの現在のETagと一致しない。
+    /// - 412: `options.etag`がフォルダの現在の`ETag`と一致しない。
     /// - 500: BOXの内部エラー。BOXがフォルダを削除した可能性がある。
     /// - 503: 削除に600秒以上かかっている。削除処理は継続している。
     ///
@@ -560,7 +560,7 @@ mod test_folder_information {
     use super::*;
     use crate::test_support::{create_client, mount_token, short_retry};
 
-    /// GET /folders/{folder_id}を呼び出し、フォルダ情報をデシリアライズすることを確認
+    /// `GET /folders/{folder_id}`を呼び出し、フォルダ情報をデシリアライズすることを確認
     #[tokio::test]
     async fn test_folder_information() -> anyhow::Result<()> {
         let server = MockServer::start().await;
@@ -862,7 +862,7 @@ mod test_items_page {
         Ok(())
     }
 
-    /// next_markerがnullの場合と省略された場合に、後続がないと判定することを確認
+    /// `next_marker`がnullの場合と省略された場合に、後続がないと判定することを確認
     #[test]
     fn test_deserialize_without_next_marker() -> anyhow::Result<()> {
         let null_marker: ItemsPage =
@@ -968,7 +968,7 @@ mod test_list_items_in_folder {
             matches!(result, Err(BoxClientError::InvalidArgument(_))),
             "result: {result:?}"
         );
-        assert!(items_queries(&server).await.is_empty());
+        assert_eq!(items_queries(&server).await, Vec::<String>::new());
 
         Ok(())
     }
@@ -990,7 +990,7 @@ mod test_list_all_items_in_folder {
     const ITEMS_PATH: &str = "/2.0/folders/123/items";
 
     /// 指定した名前のファイルだけを含むページのレスポンスを返す。
-    fn page_response(name: &str, next_marker: Value) -> ResponseTemplate {
+    fn page_response(name: &str, next_marker: &Value) -> ResponseTemplate {
         ResponseTemplate::new(200).set_body_json(json!({
             "entries": [{"type": "file", "id": name, "name": name, "etag": "0"}],
             "limit": 1000,
@@ -1008,7 +1008,7 @@ mod test_list_all_items_in_folder {
         }
     }
 
-    /// next_markerがnullまたは空文字列になるまでページを送り、すべての項目を返すことを確認
+    /// `next_marker`がnullまたは空文字列になるまでページを送り、すべての項目を返すことを確認
     #[rstest]
     #[case::null(Value::Null)]
     #[case::empty(json!(""))]
@@ -1021,7 +1021,7 @@ mod test_list_all_items_in_folder {
             .and(path(ITEMS_PATH))
             .and(query_param("limit", "1000"))
             .and(query_param_is_missing("marker"))
-            .respond_with(page_response("first", json!("m1")))
+            .respond_with(page_response("first", &json!("m1")))
             .expect(1)
             .mount(&server)
             .await;
@@ -1029,7 +1029,7 @@ mod test_list_all_items_in_folder {
             .and(path(ITEMS_PATH))
             .and(query_param("limit", "1000"))
             .and(query_param("marker", "m1"))
-            .respond_with(page_response("second", last_marker))
+            .respond_with(page_response("second", &last_marker))
             .expect(1)
             .mount(&server)
             .await;
@@ -1052,7 +1052,7 @@ mod test_list_all_items_in_folder {
         mount_token(&server).await;
         Mock::given(method("GET"))
             .and(path(ITEMS_PATH))
-            .respond_with(page_response("same", json!("m1")))
+            .respond_with(page_response("same", &json!("m1")))
             .expect(2)
             .mount(&server)
             .await;

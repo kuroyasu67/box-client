@@ -39,7 +39,7 @@ async fn main() -> anyhow::Result<()> {
             etag: None,
         };
         match client.delete_folder(&folder_id, &delete_options).await {
-            Ok(_) => tracing::info!("folder was deleted successfully"),
+            Ok(()) => tracing::info!("folder was deleted successfully"),
             Err(e) => anyhow::bail!(e),
         }
 
@@ -49,7 +49,7 @@ async fn main() -> anyhow::Result<()> {
         // ゴミ箱にある削除したフォルダの情報を取得
         match client.trashed_folder_information(&folder_id).await {
             Ok(folder) => {
-                tracing::info!("trashed folder information was fetched successfully: {folder:?}")
+                tracing::info!("trashed folder information was fetched successfully: {folder:?}");
             }
             Err(e) => anyhow::bail!(e),
         }

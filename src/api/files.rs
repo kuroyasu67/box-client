@@ -20,7 +20,7 @@ pub struct File {
     /// ファイルID
     pub id: FileId,
 
-    /// ファイルのバージョンを識別するETag
+    /// ファイルのバージョンを識別する`ETag`
     pub etag: Option<String>,
 
     /// ファイルの変更を識別するシーケンスID
@@ -131,8 +131,8 @@ impl BoxClient {
     /// # Arguments
     ///
     /// - `file_id`: 削除するファイルのID
-    /// - `etag`: 最後に取得したファイルのETag。指定した場合は`If-Match`ヘッダーで送信し、
-    ///   ファイルがETagの取得後に変更されていると、BOXはファイルを削除せずに412を返す。
+    /// - `etag`: 最後に取得したファイルの`ETag`。指定した場合は`If-Match`ヘッダーで送信し、
+    ///   ファイルが`ETag`の取得後に変更されていると、BOXはファイルを削除せずに412を返す。
     ///
     /// # Errors
     ///
@@ -142,7 +142,7 @@ impl BoxClient {
     /// 主なステータスは次のとおり。
     ///
     /// - 404: ファイルが存在しない、ファイルが削除済みである、またはファイルにアクセスする権限がない。
-    /// - 412: `etag`がファイルの現在のETagと一致しない。ファイルがETagの取得後に変更されている。
+    /// - 412: `etag`がファイルの現在の`ETag`と一致しない。ファイルが`ETag`の取得後に変更されている。
     ///
     /// 5xxまたはタイムアウトでエラーを返した場合は、BOXがファイルを削除した可能性があるため、
     /// [`BoxClient::file_information`]でファイルの状態を確認する。
@@ -306,7 +306,7 @@ mod test_file_information {
         test_support::{create_client, mount_token, short_retry},
     };
 
-    /// GET /files/{file_id}を呼び出し、ファイル情報をデシリアライズすることを確認
+    /// `GET /files/{file_id}`を呼び出し、ファイル情報をデシリアライズすることを確認
     #[tokio::test]
     async fn test_file_information() -> anyhow::Result<()> {
         let server = MockServer::start().await;
@@ -398,7 +398,7 @@ mod test_delete_file {
             .collect()
     }
 
-    /// ETagを指定した場合だけ、If-Matchヘッダーを送信することを確認
+    /// `ETag`を指定した場合だけ、If-Matchヘッダーを送信することを確認
     #[rstest]
     #[case::without_etag(None)]
     #[case::with_etag(Some("1"))]
@@ -423,7 +423,7 @@ mod test_delete_file {
         Ok(())
     }
 
-    /// ETagに使用できない文字が含まれる場合は、リクエストを送信せずにエラーを返すことを確認
+    /// `ETag`に使用できない文字が含まれる場合は、リクエストを送信せずにエラーを返すことを確認
     #[tokio::test]
     async fn test_delete_file_invalid_etag() -> anyhow::Result<()> {
         let server = MockServer::start().await;

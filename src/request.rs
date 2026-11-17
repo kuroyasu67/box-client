@@ -12,7 +12,7 @@ use crate::{
     retry::Idempotency,
 };
 
-/// BoxのREST APIへのリクエスト
+/// BOXのREST APIへのリクエスト
 ///
 /// 再試行のたびに同じリクエストを組み立てられるように、送信する内容を保持する。
 ///
@@ -92,6 +92,7 @@ impl<'a> ApiRequest<'a> {
     }
 
     /// クエリパラメーターを追加する。
+    #[must_use]
     pub fn query(mut self, key: &'a str, value: impl Into<Cow<'a, str>>) -> Self {
         self.query.push((key, value.into()));
         self
@@ -131,6 +132,7 @@ impl<'a> ApiRequest<'a> {
     ///
     /// BOXが重複を検出して409を返すPOSTなど、再送しても安全だとわかっているAPIで
     /// [`Idempotency::Idempotent`]を指定し、5xxおよびタイムアウトの後にも再試行させる。
+    #[must_use]
     pub fn idempotency(mut self, idempotency: Idempotency) -> Self {
         self.idempotency = idempotency;
         self

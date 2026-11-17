@@ -31,7 +31,7 @@ async fn main() -> anyhow::Result<()> {
 
         // ウェブリンクを削除
         match client.delete_web_link(&web_link_id).await {
-            Ok(_) => tracing::info!("web link was deleted successfully"),
+            Ok(()) => tracing::info!("web link was deleted successfully"),
             Err(e) => anyhow::bail!(e),
         }
 
@@ -43,7 +43,7 @@ async fn main() -> anyhow::Result<()> {
             Ok(web_link) => {
                 tracing::info!(
                     "trashed web link information was fetched successfully: {web_link:?}"
-                )
+                );
             }
             Err(e) => anyhow::bail!(e),
         }

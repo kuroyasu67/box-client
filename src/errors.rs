@@ -277,6 +277,10 @@ mod test_box_client_error {
     }
 
     /// BOX設定ファイルのオープンエラーを返す。
+    #[expect(
+        clippy::unnecessary_wraps,
+        reason = "rstestのケースに渡す関数ポインターの型を、失敗しうる他の関数と揃えるため"
+    )]
     fn open_config_file() -> anyhow::Result<BoxClientError> {
         Ok(BoxClientError::OpenConfigFile {
             path: PathBuf::from("config.json"),

@@ -431,7 +431,7 @@ mod test_assertion_signer {
     /// JWTアサーションの受信者
     const AUDIENCE: &str = "https://example.com/oauth2/token";
 
-    /// Boxが求めるヘッダーとクレームを持つJWTアサーションに署名することを確認
+    /// BOXが求めるヘッダーとクレームを持つJWTアサーションに署名することを確認
     #[test]
     fn test_sign() -> anyhow::Result<()> {
         let assertion_signer = AssertionSigner::new(&test_config(), AUDIENCE)?;
