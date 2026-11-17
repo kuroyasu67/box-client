@@ -369,7 +369,7 @@ impl BoxClient {
     /// # Errors
     ///
     /// `options.limit`が範囲外の場合は、リクエストを送信せずに[`crate::BoxClientError::InvalidArgument`]を返す。
-    /// BOXが同じマーカーを返し続ける場合は、無限ループを避けるため[`crate::BoxClientError::UnexpectedResponse`]を返す。
+    /// BOXが以前に返したマーカーを再び返した場合、このメソッドは無限ループを避けるため[`crate::BoxClientError::UnexpectedResponse`]を返す。
     /// いずれかのページの取得に失敗した場合は、取得済みの項目を破棄してエラーを返す。
     pub async fn list_all_trashed_items(
         &self,
@@ -1458,7 +1458,7 @@ mod test_list_all_trashed_items {
         Ok(())
     }
 
-    /// BOXが同じマーカーを返し続ける場合は、無限ループせずにエラーを返すことを確認
+    /// BOXが同じマーカーを続けて返す場合は、無限ループせずにエラーを返すことを確認
     #[tokio::test]
     async fn test_list_all_trashed_items_marker_not_advanced() -> anyhow::Result<()> {
         let server = MockServer::start().await;

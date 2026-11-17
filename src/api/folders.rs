@@ -1,5 +1,7 @@
 //! フォルダに関するAPI
 
+use std::collections::HashSet;
+
 use serde::Deserialize;
 use time::OffsetDateTime;
 
@@ -197,14 +199,17 @@ pub(crate) fn validate_limit(limit: u32) -> BoxClientResult<u32> {
 ///
 /// # Errors
 ///
-/// BOXが同じマーカーを返し続ける場合は、無限ループを避けるため[`BoxClientError::UnexpectedResponse`]を返す。
-/// `fetch_page`がエラーを返した場合は、取得済みの項目を破棄してそのエラーを返す。
+/// BOXが以前に返したマーカーを再び返した場合、この関数は無限ループを避けるため[`BoxClientError::UnexpectedResponse`]を返す。
+/// `fetch_page`がエラーを返した場合、この関数は取得済みの項目を破棄してそのエラーを返す。
 pub(crate) async fn collect_all_pages<F>(mut fetch_page: F) -> BoxClientResult<(Vec<BoxItem>, u32)>
 where
     F: AsyncFnMut(Option<&str>) -> BoxClientResult<ItemsPage>,
 {
     let mut items = Vec::new();
     let mut marker: Option<String> = None;
+    // `m1 → m2 → m1`のように、BOXが以前のマーカーを再び返す循環も検出するため、使用したマーカーを記録する。
+    // 現在のマーカーは`marker`が保持するため、このセットには現在のマーカーより前に使用したマーカーだけを記録する。
+    let mut used_markers: HashSet<String> = HashSet::new();
     let mut pages: u32 = 0;
 
     loop {
@@ -215,12 +220,14 @@ where
         // BOXは最終ページで`next_marker`をnullにするが、空文字列を返す場合もあるため、どちらも終端として扱う。
         match page.next_marker {
             Some(next) if !next.is_empty() => {
-                if marker.as_deref() == Some(next.as_str()) {
+                if marker.as_deref() == Some(next.as_str()) || used_markers.contains(&next) {
                     return Err(BoxClientError::UnexpectedResponse(
-                        "next_marker did not advance",
+                        "next_marker was already returned",
                     ));
                 }
-                marker = Some(next);
+                if let Some(previous) = marker.replace(next) {
+                    used_markers.insert(previous);
+                }
             }
             _ => break,
         }
@@ -376,7 +383,7 @@ impl BoxClient {
     /// # Errors
     ///
     /// `options.limit`が範囲外の場合は、リクエストを送信せずに[`BoxClientError::InvalidArgument`]を返す。
-    /// BOXが同じマーカーを返し続ける場合は、無限ループを避けるため[`BoxClientError::UnexpectedResponse`]を返す。
+    /// BOXが以前に返したマーカーを再び返した場合、このメソッドは無限ループを避けるため[`BoxClientError::UnexpectedResponse`]を返す。
     /// いずれかのページの取得に失敗した場合は、取得済みの項目を破棄してエラーを返す。
     pub async fn list_all_items_in_folder(
         &self,
@@ -1038,7 +1045,7 @@ mod test_list_all_items_in_folder {
         Ok(())
     }
 
-    /// BOXが同じマーカーを返し続ける場合は、無限ループせずにエラーを返すことを確認
+    /// BOXが同じマーカーを続けて返す場合は、無限ループせずにエラーを返すことを確認
     #[tokio::test]
     async fn test_list_all_items_in_folder_marker_not_advanced() -> anyhow::Result<()> {
         let server = MockServer::start().await;
@@ -1061,5 +1068,87 @@ mod test_list_all_items_in_folder {
         );
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod test_collect_all_pages {
+    use rstest::rstest;
+
+    use super::*;
+
+    /// `next_markers`の順に`next_marker`を返すページを取得し、`fetch_page`に渡されたマーカーを記録する。
+    ///
+    /// 用意したページを使い切った後に呼び出された場合は、無限ループでテストが終わらなくなるのを防ぐため、エラーを返す。
+    async fn collect(
+        next_markers: &[Option<&str>],
+    ) -> (BoxClientResult<(Vec<BoxItem>, u32)>, Vec<Option<String>>) {
+        let mut received_markers = Vec::new();
+        let mut remaining = next_markers.iter();
+        let result = collect_all_pages(async |marker: Option<&str>| {
+            received_markers.push(marker.map(str::to_owned));
+            let Some(next_marker) = remaining.next() else {
+                return Err(BoxClientError::InvalidArgument("no more pages"));
+            };
+            Ok(ItemsPage {
+                entries: vec![BoxItem::Unknown],
+                limit: 1,
+                next_marker: next_marker.map(str::to_owned),
+            })
+        })
+        .await;
+
+        (result, received_markers)
+    }
+
+    /// 終端までマーカーが重複しない場合は、すべてのページの項目とページ数を返し、前のページのマーカーを渡すことを確認
+    #[rstest]
+    #[case::single_page(vec![None], vec![None])]
+    #[case::empty_marker_terminates(vec![Some("")], vec![None])]
+    #[case::three_pages(
+        vec![Some("m1"), Some("m2"), None],
+        vec![None, Some("m1"), Some("m2")]
+    )]
+    #[tokio::test]
+    async fn test_collect_all_pages(
+        #[case] next_markers: Vec<Option<&str>>,
+        #[case] expected_markers: Vec<Option<&str>>,
+    ) -> anyhow::Result<()> {
+        let (result, received_markers) = collect(&next_markers).await;
+
+        let (items, pages) = result?;
+        assert_eq!(items.len(), next_markers.len());
+        assert_eq!(pages as usize, next_markers.len());
+        assert_eq!(
+            received_markers,
+            expected_markers
+                .into_iter()
+                .map(|m| m.map(str::to_owned))
+                .collect::<Vec<_>>()
+        );
+
+        Ok(())
+    }
+
+    /// BOXが以前に返したマーカーを再び返した場合は、そのマーカーでページを取得せずにエラーを返すことを確認
+    #[rstest]
+    // 直前のマーカーと同じマーカーを返す
+    #[case::same_as_previous(vec![Some("m1"), Some("m1")], 2)]
+    // 2つ前のマーカーに戻る
+    #[case::two_page_cycle(vec![Some("m1"), Some("m2"), Some("m1")], 3)]
+    // 最初のマーカーに戻る
+    #[case::back_to_first(vec![Some("m1"), Some("m2"), Some("m3"), Some("m1")], 4)]
+    #[tokio::test]
+    async fn test_collect_all_pages_detects_repeated_marker(
+        #[case] next_markers: Vec<Option<&str>>,
+        #[case] expected_fetches: usize,
+    ) {
+        let (result, received_markers) = collect(&next_markers).await;
+
+        assert!(
+            matches!(result, Err(BoxClientError::UnexpectedResponse(_))),
+            "result: {result:?}"
+        );
+        assert_eq!(received_markers.len(), expected_fetches);
     }
 }
