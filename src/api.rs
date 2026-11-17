@@ -2,6 +2,7 @@
 //!
 //! リソースごとにサブモジュールを分け、各サブモジュールで`impl BoxClient`を定義する。
 
+pub mod files;
 pub mod folders;
 pub mod types;
 pub mod users;

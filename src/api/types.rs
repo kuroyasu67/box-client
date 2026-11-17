@@ -103,3 +103,45 @@ pub struct PathCollection {
     /// ルートフォルダから順に並べた、パスに含まれるフォルダ
     pub entries: Vec<FolderItem>,
 }
+
+/// 項目の状態
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ItemStatus {
+    /// 有効
+    Active,
+
+    /// ごみ箱に移動済み
+    Trashed,
+
+    /// 削除済み
+    Deleted,
+
+    /// このクライアントが知らない状態
+    ///
+    /// BOXが状態を追加しても、項目の情報の取得を失敗させないために受け入れる。
+    #[serde(other)]
+    Unknown,
+}
+
+#[cfg(test)]
+mod test_item_status {
+    use rstest::rstest;
+    use serde_json::json;
+
+    use super::*;
+
+    /// 項目の状態をデシリアライズし、知らない状態を受け入れることを確認
+    #[rstest]
+    #[case::active("active", ItemStatus::Active)]
+    #[case::trashed("trashed", ItemStatus::Trashed)]
+    #[case::deleted("deleted", ItemStatus::Deleted)]
+    #[case::unknown("archived", ItemStatus::Unknown)]
+    fn test_deserialize(#[case] value: &str, #[case] expected: ItemStatus) -> anyhow::Result<()> {
+        let status: ItemStatus = serde_json::from_value(json!(value))?;
+
+        assert_eq!(status, expected);
+
+        Ok(())
+    }
+}

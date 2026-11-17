@@ -4,8 +4,8 @@ use serde::Deserialize;
 use time::OffsetDateTime;
 
 use crate::{
-    BoxClient, BoxClientError, BoxClientResult, BoxItem, FolderId, FolderItem, UserMini,
-    api::types::PathCollection, request::ApiRequest,
+    BoxClient, BoxClientError, BoxClientResult, BoxItem, FolderId, FolderItem, ItemStatus,
+    UserMini, api::types::PathCollection, request::ApiRequest,
 };
 
 /// 1回のリクエストで取得できる項目数の上限
@@ -78,26 +78,6 @@ pub struct Folder {
 
     /// フォルダの状態
     pub item_status: Option<ItemStatus>,
-}
-
-/// 項目の状態
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ItemStatus {
-    /// 有効
-    Active,
-
-    /// ごみ箱に移動済み
-    Trashed,
-
-    /// 削除済み
-    Deleted,
-
-    /// このクライアントが知らない状態
-    ///
-    /// BOXが状態を追加しても、フォルダ情報の取得を失敗させないために受け入れる。
-    #[serde(other)]
-    Unknown,
 }
 
 /// フォルダ内の項目の1ページ
@@ -323,7 +303,6 @@ mod test_folder_id {
 
 #[cfg(test)]
 mod test_folder {
-    use rstest::rstest;
     use serde_json::json;
     use time::macros::datetime;
 
@@ -433,23 +412,6 @@ mod test_folder {
         assert_eq!(folder.trashed_at, None);
         assert_eq!(folder.parent, None);
         assert_eq!(folder.path_collection.map(|p| p.entries.len()), Some(0));
-
-        Ok(())
-    }
-
-    /// フォルダの状態をデシリアライズし、知らない状態を受け入れることを確認
-    #[rstest]
-    #[case::active("active", ItemStatus::Active)]
-    #[case::trashed("trashed", ItemStatus::Trashed)]
-    #[case::deleted("deleted", ItemStatus::Deleted)]
-    #[case::unknown("archived", ItemStatus::Unknown)]
-    fn test_deserialize_item_status(
-        #[case] value: &str,
-        #[case] expected: ItemStatus,
-    ) -> anyhow::Result<()> {
-        let status: ItemStatus = serde_json::from_value(json!(value))?;
-
-        assert_eq!(status, expected);
 
         Ok(())
     }

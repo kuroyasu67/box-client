@@ -28,16 +28,25 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    let folder_item = items
-        .iter()
-        .find_map(|item| match item {
-            BoxItem::Folder(folder) => Some(folder),
-            _ => None,
-        })
-        .ok_or_else(|| anyhow::anyhow!("nof folder in this folder (folder id: {})", folder_id))?;
+    // フォルダの情報を取得
+    let folder_item = items.iter().find_map(|item| match item {
+        BoxItem::Folder(folder) => Some(folder),
+        _ => None,
+    });
+    if let Some(folder_item) = folder_item {
+        let folder = client.folder_information(&folder_item.id).await?;
+        tracing::info!("folder information: {folder:?}");
+    }
 
-    let folder = client.folder_information(&folder_item.id).await?;
-    tracing::info!("folder information: {folder:?}");
+    // ファイルの情報を取得
+    let file_item = items.iter().find_map(|item| match item {
+        BoxItem::File(file) => Some(file),
+        _ => None,
+    });
+    if let Some(file_item) = file_item {
+        let file = client.file_information(&file_item.id).await?;
+        tracing::info!("file information: {file:?}");
+    }
 
     Ok(())
 }
