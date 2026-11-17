@@ -10,6 +10,7 @@ const BOX_CONFIG_FILE: &str = "resources/secrets/26695994_fhugry6j_config.json";
 pub async fn setup() -> anyhow::Result<BoxClient> {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_ansi(false)
         .init();
 
     let timeout = BoxClientTimeout {
