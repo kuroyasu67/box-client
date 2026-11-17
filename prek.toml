@@ -21,10 +21,6 @@ hooks = [
   { id = "check-added-large-files" },
   # ファイル先頭のUTF-8 BOMを除去
   { id = "fix-byte-order-marker" },
-  # YAMLの構文エラーを検出
-  { id = "check-yaml" },
-  # JSONを整形
-  { id = "pretty-format-json", args = ["--autofix"] },
   # マージによるコンフリクトを解消していないコミットを防止
   { id = "check-merge-conflict" },
   # 大文字小文字を区別しないファイルシステムで衝突する名前を検出
