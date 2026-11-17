@@ -138,6 +138,55 @@ BOXが提供するAPIのラッパークレート
 - 復元に成功したウェブリンクはゴミ箱からなくなるため、BOXが復元した後に再送すると、BOXは404を返す。
   したがって、冪等でないリクエストとして送信する。
 
+## アクセストークンの管理
+
+`BoxClient`は、JWT認証で取得したアクセストークンをキャッシュし、アクセストークンの有効期限が近づくと、アクセストークンを自動で取得し直す。
+BOXが発行するアクセストークンの有効期間は60分である。
+
+### アクセストークンを取得し直す時期と方式
+
+`BoxClient`は、アクセストークンを取得し直す時期を、有効期限までの残り時間と`refresh_before_expiry`から決める。
+
+| キャッシュしたアクセストークンの状態 | `BoxClient`の動作 |
+| --- | --- |
+| 有効期限までの残り時間が`refresh_before_expiry`より長い | `BoxClient`は、キャッシュしたアクセストークンを使用する。 |
+| 有効期限までの残り時間が`refresh_before_expiry`以下で、アクセストークンがまだ期限切れでない | `BoxClient`は、バックグラウンドのタスクで新しいアクセストークンを取得する。`BoxClient`は取得を終えるまでキャッシュしたアクセストークンを使用するため、APIの呼び出しは取得を待たない。 |
+| アクセストークンが期限切れ、またはキャッシュがない | APIの呼び出しは、`BoxClient`がアクセストークンを取得し終えるまで待つ。 |
+
+複数のタスクが同時にAPIを呼び出しても、`BoxClient`はアクセストークンを取得するタスクを1つに限る。
+
+バックグラウンドでの取得に失敗した場合、`BoxClient`はWARNログを出力し、キャッシュしたアクセストークンを期限が切れるまで使用し続ける。
+次にAPIが呼び出されたとき、`BoxClient`は再びバックグラウンドでアクセストークンを取得し直す。
+
+### `refresh_before_expiry`の決め方
+
+`refresh_before_expiry`は、アクセストークンを有効期限のどれだけ前に取得し直すかを表す設定値である。
+利用者は、アクセストークンの有効期間60分を考慮して、`refresh_before_expiry`を次の範囲で決める。
+
+- `refresh_before_expiry`は、再試行を含めてアクセストークンの取得にかかる時間より長くする。
+  バックグラウンドでの取得が期限切れまでに終わらないと、APIの呼び出しがアクセストークンの取得を待つためである。
+- `refresh_before_expiry`は、`MAX_REFRESH_BEFORE_EXPIRY`（30分）以下にする。
+  `refresh_before_expiry`に有効期間の60分以上を指定すると、`BoxClient`は、取得した直後からアクセストークンを取得し直す必要があると判定する。
+  その結果、`BoxClient`は、APIが呼び出されるたびにトークンエンドポイントへリクエストする。
+  したがって、`MAX_REFRESH_BEFORE_EXPIRY`を有効期間の半分とし、`BoxClient`に、取得したアクセストークンを少なくとも有効期間の半分は再利用させる。
+  上限を超える値を指定すると、`BoxClientBuilder::build()`は`BoxClientError::InvalidRefreshBeforeExpiry`を返す。
+
+`refresh_before_expiry`の既定値は60秒であり、`BoxClient`は発行から約59分後にアクセストークンを取得し直す。
+通常、`BoxClient`はアクセストークンを1秒未満で取得できる。
+したがって、トークンエンドポイントが一時的に失敗し、`BoxClient`が数回再試行しても、`BoxClient`は期限内にアクセストークンを取得し終えられる。
+再試行設定の待機時間やタイムアウトを長くした場合、利用者は`refresh_before_expiry`もそれに合わせて長くする。
+
+```rust
+use std::time::Duration;
+
+use box_client::BoxClient;
+
+let client = BoxClient::builder(config)
+    .refresh_before_expiry(Duration::from_secs(5 * 60))
+    .build()
+    .await?;
+```
+
 ## 再試行の仕組み
 
 `BoxClient`は、BOXのREST APIおよびトークンエンドポイントへのリクエストが失敗すると、失敗の種類とリクエストの冪等性から再試行するかどうかを判定する。
@@ -263,7 +312,7 @@ let client = BoxClient::builder(config)
 ### ログ
 
 再試行に関するイベントは、`tracing`で構造化ログとして出力する。
-401を受け取ったときのイベントを除き、各イベントは処理名`operation`および試行回数`attempts`を含む。
+401を受け取ったとき、およびアクセストークンのバックグラウンドでの取得に失敗したときのイベントを除き、各イベントは処理名`operation`および試行回数`attempts`を含む。
 `operation`は、REST APIへのリクエストでは`box_api_request`、アクセストークンの取得では`fetch_access_token`である。
 `retrying`以外のイベントは、最初のリクエストからの経過時間`elapsed_ms`も含む。
 
@@ -272,6 +321,7 @@ let client = BoxClient::builder(config)
 | INFO | `succeeded` | リクエストが成功した。 |
 | WARN | `retrying` | 再試行する。待機時間`delay_ms`と、待機時間を決めた方法`delay_source`を含む。`delay_source`は`retry_after`または`backoff`である。 |
 | WARN | `access token was rejected; fetching a new one and resending` | 401を受け取り、アクセストークンを取得し直して再送する。 |
+| WARN | `failed to refresh access token in background; using the cached token until it expires` | `BoxClient`が、アクセストークンをバックグラウンドで取得できなかった。`BoxClient`は、キャッシュしたアクセストークンを期限が切れるまで使用する。このイベントは、原因のエラー`error`を含む。 |
 | ERROR | `failed with non-retryable error` | 再試行できないエラーが発生した。 |
 | ERROR | `failed after reaching max retries` | 再試行回数が上限に達した。 |
 | ERROR | `gave up retrying` | `Retry-After`ヘッダーが示す待機時間が上限を超えたため、再試行を中止した。 |
@@ -281,6 +331,8 @@ let client = BoxClient::builder(config)
 リクエストを送信するfutureは、待機中または送信中に破棄しても状態を残さない。
 したがって、`tokio::time::timeout`などで処理全体の時間を制限できる。
 ただし、送信中に破棄した場合は、BOXがリクエストを処理したかどうかを判断できない。
+
+アクセストークンをバックグラウンドで取得し直すタスクは、リクエストを送信するfutureを破棄しても中断せず、取得の成功または失敗まで実行する。
 
 ## 開発環境
 

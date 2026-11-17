@@ -1,4 +1,4 @@
-use std::{future::Future, time::Duration};
+use std::{future::Future, sync::Arc, time::Duration};
 
 use reqwest::{
     Response, StatusCode, Url,
@@ -26,18 +26,22 @@ const BOX_API_BASE_URL: &str = "https://api.box.com/2.0";
 /// <https://developer.box.com/guides/api-calls/permissions-and-errors/expiration>
 ///
 /// 上記ドキュメントによると、アクセストークンは発行から60分後に期限切れになる。
-/// ただし、BOXが発行した時刻と、クライアントがトークンレスポンスを受信して有効期限を計算した時刻にはずれがある。
-/// また、キャッシュからアクセストークンを取り出してから、BOXがリクエストを受信して検証するまでに、
-/// 接続の確立などで時間がかかる。
-/// これらの時間を十分に上回るように60秒とし、有効期限の60秒前、つまり発行から約59分後に取得し直す。
+/// 有効期限までの残り時間がこの値以下になると、トークン管理者はバックグラウンドで新しいアクセストークンを取得する。
+/// トークン管理者は、取得を終えるまで、期限が切れていないキャッシュのアクセストークンを使い続ける。
+/// 期限が切れるまでにトークン管理者が取得を終えられないと、APIを呼び出すタスクは取得を待つことになる。
+/// したがって、この値は、再試行を含めてアクセストークンの取得にかかる時間より長くする必要がある。
+///
+/// 通常、トークン管理者はアクセストークンを1秒未満で取得できる。トークンエンドポイントが一時的に失敗し、
+/// トークン管理者が再試行設定に従って数回再試行しても期限内に取得を終えられるように、この既定値を60秒とする。
+/// その結果、トークン管理者は発行から約59分後にアクセストークンを取得し直す。
 const DEFAULT_REFRESH_BEFORE_EXPIRY: Duration = Duration::from_secs(60);
 
 /// アクセストークンを有効期限のどれだけ前に取得し直すかの上限
 ///
-/// アクセストークンの有効期間である60分以上を指定すると、取得した直後から取得し直す必要があると判定する。
-/// その結果、APIを呼び出すたびにトークンエンドポイントへリクエストし、さらにキャッシュの書き込みロックによって
-/// すべてのリクエストが直列化される。
-/// したがって、上限を有効期間の半分とし、取得したアクセストークンを少なくとも有効期間の半分は再利用させる。
+/// アクセストークンの有効期間である60分以上を指定すると、トークン管理者は、取得した直後からアクセストークンを取得し直す必要があると判定する。
+/// その結果、トークン管理者は、APIが呼び出されるたびにバックグラウンドで新しいアクセストークンを取得し、
+/// トークンエンドポイントへのリクエストが絶えず発生する。
+/// したがって、この上限を有効期間の半分とし、トークン管理者に、取得したアクセストークンを少なくとも有効期間の半分は再利用させる。
 pub const MAX_REFRESH_BEFORE_EXPIRY: Duration = Duration::from_secs(30 * 60);
 
 /// BOXクライアント
@@ -58,7 +62,9 @@ pub struct BoxClient {
     retry: RetryPolicy,
 
     /// トークン管理者
-    token_manager: TokenManager,
+    ///
+    /// アクセストークンをバックグラウンドで取得し直すタスクと共有するため、`Arc`で保持する。
+    token_manager: Arc<TokenManager>,
 }
 
 impl std::fmt::Debug for BoxClient {
@@ -228,6 +234,12 @@ impl BoxClientBuilder {
 
     /// アクセストークンを有効期限のどれだけ前に取得し直すかを指定する。既定値は60秒とする。
     ///
+    /// アクセストークンの有効期間は60分である。有効期限までの残り時間がこの値以下になると、
+    /// BOXクライアントはバックグラウンドで新しいアクセストークンを取得する。BOXクライアントは、取得を終えるまで、
+    /// 期限が切れていないアクセストークンを使い続けるため、APIの呼び出しを待たせない。
+    /// 利用者は、期限が切れるまでにBOXクライアントが取得を終えられるように、この値を、
+    /// 再試行を含めてアクセストークンの取得にかかる時間より長くする。
+    ///
     /// [`MAX_REFRESH_BEFORE_EXPIRY`]以下を指定する。上限を超える値は[`BoxClientBuilder::build`]でエラーになる。
     pub fn refresh_before_expiry(mut self, refresh_before_expiry: Duration) -> Self {
         self.refresh_before_expiry = refresh_before_expiry;
@@ -270,13 +282,13 @@ impl BoxClientBuilder {
             .timeout(self.timeout.request_timeout)
             .connect_timeout(self.timeout.connect_timeout)
             .build()?;
-        let token_manager = TokenManager::new(
+        let token_manager = Arc::new(TokenManager::new(
             http_client.clone(),
             &self.config,
             token_url,
             self.retry.clone(),
             self.refresh_before_expiry,
-        )?;
+        )?);
         token_manager.access_token().await?;
 
         Ok(BoxClient {

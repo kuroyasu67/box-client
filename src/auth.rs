@@ -7,7 +7,8 @@ use jsonwebtoken::{Algorithm, EncodingKey, Header};
 use pkcs8::{DecodePrivateKey as _, EncodePrivateKey as _, LineEnding, PrivateKeyInfoOwned};
 use secrecy::{ExposeSecret as _, SecretString};
 use serde::{Deserialize, Serialize};
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, OwnedMutexGuard, RwLock};
+use tracing::Instrument as _;
 use uuid::Uuid;
 
 use crate::{
@@ -164,7 +165,17 @@ struct TokenResponse {
 
 /// アクセストークンをキャッシュし、有効期限が近づいたら取得し直すトークン管理者
 ///
-/// 複数のタスクから同時に呼び出されても、トークンエンドポイントへのリクエストを1つにまとめる。
+/// 複数のタスクから同時に呼び出されても、トークン管理者はトークンエンドポイントへのリクエストを1つにまとめる。
+///
+/// トークン管理者は、キャッシュしたアクセストークンの状態に応じて、次のように振る舞う。
+///
+/// - 有効期限までの残り時間が`refresh_before_expiry`より長い場合、トークン管理者はキャッシュしたアクセストークンを返す。
+/// - 有効期限までの残り時間が`refresh_before_expiry`以下で、アクセストークンがまだ期限切れでない場合、
+///   トークン管理者はバックグラウンドのタスクでアクセストークンを取得し直し、呼び出し元にはキャッシュしたアクセストークンを返す。
+///   キャッシュしたアクセストークンは期限が切れるまで使用できるため、トークン管理者は呼び出し元を取得の完了まで待たせない。
+/// - アクセストークンが期限切れの場合、またはキャッシュがない場合、トークン管理者はアクセストークンを取得し終えるまで呼び出し元を待たせる。
+///
+/// バックグラウンドのタスクはトークン管理者の`Arc`を保持するため、呼び出し元は[`TokenManager::access_token`]を`Arc<Self>`から呼び出す。
 pub(crate) struct TokenManager {
     /// HTTPクライアント
     http_client: reqwest::Client,
@@ -188,7 +199,13 @@ pub(crate) struct TokenManager {
     ///
     /// 401を受けたときに、別のタスクが取得し直した新しいトークンを誤って破棄しないように、
     /// `Arc`のポインターでトークンを識別する。
+    /// トークンエンドポイントと通信する間は、このロックを保持しない。
     cache: RwLock<Option<Arc<AccessToken>>>,
+
+    /// アクセストークンを取得するタスクを1つに限るためのロック
+    ///
+    /// バックグラウンドのタスクにロックを渡せるように、`Arc`で保持する。
+    refresh_lock: Arc<Mutex<()>>,
 }
 
 impl TokenManager {
@@ -224,34 +241,82 @@ impl TokenManager {
             retry,
             refresh_before_expiry,
             cache: RwLock::new(None),
+            refresh_lock: Arc::new(Mutex::new(())),
         })
     }
 
     /// 有効なアクセストークンを返す。
     ///
-    /// キャッシュしたアクセストークンの有効期限が近い場合、またはキャッシュがない場合は取得し直す。
-    /// 処理の途中でfutureを破棄しても、キャッシュは更新されないだけで、不整合は生じない。
+    /// キャッシュしたアクセストークンの有効期限が近い場合、このメソッドはバックグラウンドのタスクにアクセストークンを取得し直させ、
+    /// キャッシュしたアクセストークンを返す。
+    /// キャッシュしたアクセストークンが期限切れの場合、またはキャッシュがない場合、このメソッドはアクセストークンを取得してから返す。
+    ///
+    /// 呼び出し元が取得を待つ途中でfutureを破棄しても、ロックが解放されてキャッシュが更新されないだけで、不整合は生じない。
+    /// ただし、バックグラウンドのタスクは、呼び出し元がfutureを破棄しても中断せず、取得の成功または失敗まで実行する。
     ///
     /// # Errors
     ///
-    /// アクセストークンを取得できない場合はエラーを返す。
-    pub(crate) async fn access_token(&self) -> BoxClientResult<Arc<AccessToken>> {
-        if let Some(token) = self.fresh_cached_token(&*self.cache.read().await) {
+    /// キャッシュしたアクセストークンが期限切れの場合、またはキャッシュがない場合に、
+    /// このメソッドはアクセストークンを取得できなければエラーを返す。
+    pub(crate) async fn access_token(self: &Arc<Self>) -> BoxClientResult<Arc<AccessToken>> {
+        let cached = self.cache.read().await.clone();
+        if let Some(token) = cached {
+            let now = Instant::now();
+            if !needs_refresh(token.expires_at, now, self.refresh_before_expiry) {
+                return Ok(token);
+            }
+            if !is_expired(token.expires_at, now) {
+                self.spawn_refresh();
+                return Ok(token);
+            }
+        }
+
+        // キャッシュしたアクセストークンが期限切れの場合、またはキャッシュがない場合は、ロックを得た1つのタスクだけが取得し、
+        // 他のタスクはロックを待つことで、そのタスクの取得を待つ。
+        let _guard = self.refresh_lock.lock().await;
+
+        // ロックを待つ間に別のタスクまたはバックグラウンドのタスクが取得し直している場合、このタスクはそのアクセストークンを返す。
+        if let Some(token) = self.unexpired_cached_token().await {
             return Ok(token);
         }
 
-        let mut cache = self.cache.write().await;
-
-        // 書き込みロックを待つ間に、別のタスクが取得し直している場合は、別のタスクが取得したアクセストークンを返す。
-        if let Some(token) = self.fresh_cached_token(&cache) {
-            return Ok(token);
-        }
-
-        // 有効なアクセストークンがキャッシュにない場合は、アクセストークンを取得してキャッシュする。
         let token = Arc::new(self.fetch().await?);
-        *cache = Some(Arc::clone(&token));
+        *self.cache.write().await = Some(Arc::clone(&token));
 
         Ok(token)
+    }
+
+    /// アクセストークンを取得し直すバックグラウンドのタスクを起動する。
+    ///
+    /// 別のタスクがすでにアクセストークンを取得している場合、このメソッドは何もしない。
+    fn spawn_refresh(self: &Arc<Self>) {
+        let Ok(guard) = Arc::clone(&self.refresh_lock).try_lock_owned() else {
+            return;
+        };
+        let manager = Arc::clone(self);
+        // 取得のきっかけとなったリクエストとログを関連付けるため、バックグラウンドのタスクは呼び出し元のスパンを引き継ぐ。
+        tokio::spawn(async move { manager.refresh(guard).await }.in_current_span());
+    }
+
+    /// アクセストークンを取得し直してキャッシュする。
+    ///
+    /// `_guard`はアクセストークンを取得するタスクを1つに限るためのロックであり、このメソッドは取得を終えるとロックを解放する。
+    /// 取得に失敗した場合、このメソッドはログを出力するだけにする。
+    /// キャッシュしたアクセストークンは期限が切れるまで使用できるためである。
+    /// 次に呼び出し元が[`TokenManager::access_token`]を呼び出したとき、トークン管理者は再びアクセストークンを取得し直す。
+    async fn refresh(&self, _guard: OwnedMutexGuard<()>) {
+        // ロックを得るまでの間に別のタスクが取得し直している場合、このタスクはアクセストークンを取得しない。
+        if self.fresh_cached_token().await.is_some() {
+            return;
+        }
+
+        match self.fetch().await {
+            Ok(token) => *self.cache.write().await = Some(Arc::new(token)),
+            Err(error) => tracing::warn!(
+                error = &error as &(dyn std::error::Error + 'static),
+                "failed to refresh access token in background; using the cached token until it expires"
+            ),
+        }
     }
 
     /// BOXに拒否されたアクセストークンをキャッシュから破棄する。
@@ -267,13 +332,25 @@ impl TokenManager {
         }
     }
 
-    /// キャッシュしたアクセストークンが更新不要な場合に、そのアクセストークンを返す。
-    fn fresh_cached_token(&self, cache: &Option<Arc<AccessToken>>) -> Option<Arc<AccessToken>> {
-        cache
+    /// キャッシュしたアクセストークンが取得し直す必要のない場合に、そのアクセストークンを返す。
+    async fn fresh_cached_token(&self) -> Option<Arc<AccessToken>> {
+        self.cache
+            .read()
+            .await
             .as_ref()
             .filter(|token| {
                 !needs_refresh(token.expires_at, Instant::now(), self.refresh_before_expiry)
             })
+            .map(Arc::clone)
+    }
+
+    /// キャッシュしたアクセストークンが期限切れでない場合に、そのアクセストークンを返す。
+    async fn unexpired_cached_token(&self) -> Option<Arc<AccessToken>> {
+        self.cache
+            .read()
+            .await
+            .as_ref()
+            .filter(|token| !is_expired(token.expires_at, Instant::now()))
             .map(Arc::clone)
     }
 
@@ -326,9 +403,17 @@ impl TokenManager {
 
 /// アクセストークンを取得し直す必要があるかどうかを返す。
 ///
-/// 有効期限までの残り時間が`refresh_before_expiry`以下の場合は、通信中に期限が切れないように取得し直す。
+/// 有効期限までの残り時間が`refresh_before_expiry`以下の場合、トークン管理者は、期限が切れる前に新しいアクセストークンを用意するため、
+/// アクセストークンを取得し直す。
 fn needs_refresh(expires_at: Instant, now: Instant, refresh_before_expiry: Duration) -> bool {
     expires_at.saturating_duration_since(now) <= refresh_before_expiry
+}
+
+/// アクセストークンが期限切れかどうかを返す。
+///
+/// 有効期限の時刻ちょうどのアクセストークンはBOXが拒否する可能性があるため、この関数は期限切れとして扱う。
+fn is_expired(expires_at: Instant, now: Instant) -> bool {
+    expires_at <= now
 }
 
 #[cfg(test)]
@@ -440,6 +525,31 @@ mod test_needs_refresh {
 }
 
 #[cfg(test)]
+mod test_is_expired {
+    use rstest::rstest;
+
+    use super::*;
+
+    /// 有効期限の時刻ちょうど以降を期限切れと判定することを確認
+    #[rstest]
+    #[case::before_expiration(Duration::from_secs(1), Duration::ZERO, false)]
+    #[case::at_expiration(Duration::ZERO, Duration::ZERO, true)]
+    #[case::after_expiration(Duration::ZERO, Duration::from_secs(1), true)]
+    fn test_is_expired(
+        #[case] until_expiration: Duration,
+        #[case] since_now: Duration,
+        #[case] expected: bool,
+    ) {
+        let base = Instant::now();
+
+        assert_eq!(
+            is_expired(base + until_expiration, base + since_now),
+            expected
+        );
+    }
+}
+
+#[cfg(test)]
 mod test_token_manager {
     use rstest::rstest;
     use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
@@ -459,15 +569,60 @@ mod test_token_manager {
         timeout: Duration,
         retry: RetryPolicy,
         refresh_before_expiry: Duration,
-    ) -> anyhow::Result<TokenManager> {
+    ) -> anyhow::Result<Arc<TokenManager>> {
         let http_client = reqwest::Client::builder().timeout(timeout).build()?;
-        Ok(TokenManager::new(
+        Ok(Arc::new(TokenManager::new(
             http_client,
             &test_config(),
             format!("{}{TOKEN_PATH}", server.uri()),
             retry,
             refresh_before_expiry,
-        )?)
+        )?))
+    }
+
+    /// 指定したアクセストークンと有効期間を返すトークンエンドポイントの成功レスポンスを返す。
+    fn token_response_with(access_token: &str, expires_in: u64) -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "access_token": access_token,
+            "expires_in": expires_in,
+            "token_type": "bearer",
+        }))
+    }
+
+    /// キャッシュしたアクセストークンが`access_token`になるまで待ち、そのアクセストークンを返す。
+    ///
+    /// バックグラウンドのタスクがアクセストークンを取得し直すのを待つために使用する。
+    async fn wait_for_cached_token(
+        manager: &TokenManager,
+        access_token: &str,
+    ) -> anyhow::Result<Arc<AccessToken>> {
+        let wait = async {
+            loop {
+                if let Some(token) = manager.cache.read().await.clone()
+                    && token.secret() == access_token
+                {
+                    return token;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(2), wait)
+            .await
+            .map_err(|_| anyhow::anyhow!("access token was not refreshed: {access_token}"))
+    }
+
+    /// トークンエンドポイントが受信したリクエストの数が`expected`になるまで待つ。
+    ///
+    /// バックグラウンドのタスクが取得を終えるのを待つために使用する。
+    async fn wait_for_request_count(server: &MockServer, expected: usize) -> anyhow::Result<()> {
+        let wait = async {
+            while request_count(server).await < expected {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(2), wait)
+            .await
+            .map_err(|_| anyhow::anyhow!("token endpoint did not receive {expected} requests"))
     }
 
     /// 最初の`n`回だけ`response`を返すモックを登録する。
@@ -516,23 +671,141 @@ mod test_token_manager {
         Ok(())
     }
 
-    /// 有効期限までの残り時間が`refresh_before_expiry`以下の場合は、アクセストークンを取得し直すことを確認
+    /// 有効期限までの残り時間が`refresh_before_expiry`以下の場合は、取得を待たずにキャッシュしたアクセストークンを返し、
+    /// バックグラウンドで取得し直すことを確認
     #[tokio::test]
-    async fn test_access_token_refreshes_near_expiration() -> anyhow::Result<()> {
+    async fn test_access_token_refreshes_in_background() -> anyhow::Result<()> {
         let server = MockServer::start().await;
-        mount_always(&server, token_response()).await;
-        // `refresh_before_expiry`がトークンの有効期間3600秒以上であるため、毎回取得し直す。
+        mount_first_n(&server, token_response_with("old-token", 3600), 1).await;
+        // 呼び出し元が取得を待っていないことを確かめるため、取得し直すときのレスポンスを遅らせる。
+        mount_always(
+            &server,
+            token_response_with("new-token", 3600).set_delay(Duration::from_millis(500)),
+        )
+        .await;
+        // `refresh_before_expiry`がトークンの有効期間3600秒と等しいため、取得した直後から取得し直す期間に入る。
         let manager = create_manager(
             &server,
             Duration::from_secs(2),
             short_retry(0)?,
             Duration::from_secs(3600),
         )?;
+        let old = manager.access_token().await?;
 
-        manager.access_token().await?;
-        manager.access_token().await?;
+        let cached =
+            tokio::time::timeout(Duration::from_millis(200), manager.access_token()).await??;
 
+        assert!(Arc::ptr_eq(&old, &cached));
+        let new = wait_for_cached_token(&manager, "new-token").await?;
+        assert!(!Arc::ptr_eq(&old, &new));
         assert_eq!(request_count(&server).await, 2);
+
+        Ok(())
+    }
+
+    /// 有効期限が近いときに同時に呼び出されても、バックグラウンドで取得し直すタスクを1つに限ることを確認
+    #[tokio::test]
+    async fn test_access_token_refreshes_in_background_once() -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_first_n(&server, token_response_with("old-token", 3600), 1).await;
+        // すべての呼び出しがバックグラウンドの取得中に行われるように、レスポンスを遅らせる。
+        mount_always(
+            &server,
+            token_response_with("new-token", 3600).set_delay(Duration::from_millis(500)),
+        )
+        .await;
+        let manager = create_manager(
+            &server,
+            Duration::from_secs(2),
+            short_retry(0)?,
+            Duration::from_secs(3600),
+        )?;
+        let old = manager.access_token().await?;
+
+        let (a, b, c) = tokio::join!(
+            manager.access_token(),
+            manager.access_token(),
+            manager.access_token()
+        );
+
+        for token in [a?, b?, c?] {
+            assert!(Arc::ptr_eq(&old, &token));
+        }
+        wait_for_cached_token(&manager, "new-token").await?;
+        assert_eq!(request_count(&server).await, 2);
+
+        Ok(())
+    }
+
+    /// バックグラウンドでの取得に失敗しても、期限が切れていないアクセストークンを使い続けることを確認
+    #[tokio::test]
+    async fn test_access_token_keeps_cached_token_when_background_refresh_fails()
+    -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_first_n(&server, token_response_with("old-token", 3600), 1).await;
+        mount_always(&server, ResponseTemplate::new(500)).await;
+        let manager = create_manager(
+            &server,
+            Duration::from_secs(2),
+            short_retry(0)?,
+            Duration::from_secs(3600),
+        )?;
+        let old = manager.access_token().await?;
+
+        let cached = manager.access_token().await?;
+        wait_for_request_count(&server, 2).await?;
+        let after_failure = manager.access_token().await?;
+
+        assert!(Arc::ptr_eq(&old, &cached));
+        assert!(Arc::ptr_eq(&old, &after_failure));
+
+        Ok(())
+    }
+
+    /// キャッシュしたアクセストークンが期限切れの場合は、取得を待ってから新しいアクセストークンを返すことを確認
+    #[tokio::test]
+    async fn test_access_token_fetches_when_expired() -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        // 有効期間0秒のアクセストークンは、取得した時点で期限切れになる。
+        mount_first_n(&server, token_response_with("expired-token", 0), 1).await;
+        mount_always(&server, token_response_with("new-token", 3600)).await;
+        let manager = create_manager(
+            &server,
+            Duration::from_secs(2),
+            short_retry(0)?,
+            REFRESH_BEFORE_EXPIRY,
+        )?;
+        manager.access_token().await?;
+
+        let token = manager.access_token().await?;
+
+        assert_eq!(token.secret(), "new-token");
+        assert_eq!(request_count(&server).await, 2);
+
+        Ok(())
+    }
+
+    /// キャッシュしたアクセストークンが期限切れで、取得にも失敗した場合は、エラーを返すことを確認
+    #[tokio::test]
+    async fn test_access_token_fails_when_expired_and_fetch_fails() -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_first_n(&server, token_response_with("expired-token", 0), 1).await;
+        mount_always(&server, ResponseTemplate::new(500)).await;
+        let manager = create_manager(
+            &server,
+            Duration::from_secs(2),
+            short_retry(0)?,
+            REFRESH_BEFORE_EXPIRY,
+        )?;
+        manager.access_token().await?;
+
+        let result = manager.access_token().await;
+
+        assert!(
+            matches!(&result, Err(BoxClientError::Api(e)) if e.status == 500),
+            "result: {:?}",
+            result.err()
+        );
 
         Ok(())
     }
