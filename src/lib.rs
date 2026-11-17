@@ -1,4 +1,4 @@
-pub mod api;
+mod api;
 mod assertion_claims;
 mod auth;
 mod client;
@@ -6,11 +6,16 @@ mod config;
 mod errors;
 mod request;
 mod retry;
+
 #[cfg(test)]
 mod test_support;
 
 pub use api::files::{File, FileVersion};
-pub use api::folders::Folder;
+pub use api::folders::{
+    DeleteFolderOptions, Folder, ItemSort, ItemsPage, ListItemsOptions, MAX_ITEMS_LIMIT,
+    SortDirection,
+};
+pub use api::trash::{ListTrashedItemsOptions, RestoreItemOptions};
 pub use api::types::{
     BoxItem, FileId, FileItem, FolderId, FolderItem, ItemStatus, PathCollection, WebLinkId,
     WebLinkItem,

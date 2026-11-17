@@ -1,6 +1,6 @@
 mod common;
 
-use box_client::{BoxItem, FolderId, api::folders::ListItemsOptions};
+use box_client::{BoxItem, FolderId, ListItemsOptions};
 
 /// フォルダ内のすべての項目を表示する。
 #[tokio::main]

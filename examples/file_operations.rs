@@ -1,6 +1,6 @@
 mod common;
 
-use box_client::{FileId, api::trash::RestoreItemOptions};
+use box_client::{FileId, RestoreItemOptions};
 
 /// 使用方法
 const USAGE: &str =

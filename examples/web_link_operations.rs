@@ -1,6 +1,6 @@
 mod common;
 
-use box_client::{WebLinkId, api::trash::RestoreItemOptions};
+use box_client::{RestoreItemOptions, WebLinkId};
 
 /// 使用方法
 const USAGE: &str = "usage: RUST_LOG=info cargo run --example=web_link_operations -- <web-link-id> [--skip-to-restore]";

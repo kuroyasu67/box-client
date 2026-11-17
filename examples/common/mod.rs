@@ -1,8 +1,7 @@
 use std::time::Duration;
 
 use box_client::{
-    BoxClient, BoxClientTimeout, BoxConfig, BoxItem, RetryPolicy,
-    api::trash::ListTrashedItemsOptions,
+    BoxClient, BoxClientTimeout, BoxConfig, BoxItem, ListTrashedItemsOptions, RetryPolicy,
 };
 
 /// BOX設定ファイルのパス

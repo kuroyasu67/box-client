@@ -1,9 +1,6 @@
 mod common;
 
-use box_client::{
-    FolderId,
-    api::{folders::DeleteFolderOptions, trash::RestoreItemOptions},
-};
+use box_client::{DeleteFolderOptions, FolderId, RestoreItemOptions};
 
 /// 使用方法
 const USAGE: &str =
