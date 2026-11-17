@@ -43,6 +43,6 @@ pub use api::users::{User, UserMini};
 pub use api::web_links::WebLink;
 pub use client::{BoxClient, BoxClientBuilder, BoxClientTimeout, MAX_REFRESH_BEFORE_EXPIRY};
 pub use config::{BoxAppAuth, BoxAppSettings, BoxConfig};
-pub use errors::{ApiError, BoxClientError, BoxClientResult};
+pub use errors::{ApiError, BoxClientError, BoxClientResult, CryptoError};
 pub use request::ApiRequest;
 pub use retry::{Idempotency, RetryPolicy};

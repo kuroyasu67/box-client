@@ -18,7 +18,7 @@ use uuid::Uuid;
 use crate::{
     assertion_claims::AssertionClaims,
     config::BoxConfig,
-    errors::{ApiError, BoxClientError, BoxClientResult},
+    errors::{ApiError, BoxClientError, BoxClientResult, CryptoError},
     retry::{
         AttemptError, Idempotency, RetryPolicy, classify_api_error, classify_transport_error,
         read_error_response, read_json, run_with_retry,
@@ -110,10 +110,13 @@ impl AssertionSigner {
         let private_key_info = PrivateKeyInfoOwned::from_pkcs8_encrypted_pem(
             app_auth.private_key.expose_secret(),
             app_auth.passphrase.expose_secret(),
-        )?;
-        let private_key_pem = private_key_info.to_pkcs8_pem(LineEnding::LF)?;
+        )
+        .map_err(|e| BoxClientError::DecryptPrivateKey(CryptoError::new(e)))?;
+        let private_key_pem = private_key_info
+            .to_pkcs8_pem(LineEnding::LF)
+            .map_err(|e| BoxClientError::DecryptPrivateKey(CryptoError::new(e)))?;
         let encoding_key = EncodingKey::from_rsa_pem(private_key_pem.as_bytes())
-            .map_err(BoxClientError::CreateSigningKey)?;
+            .map_err(|e| BoxClientError::CreateSigningKey(CryptoError::new(e)))?;
 
         let mut header = Header::new(Algorithm::RS512);
         header.kid = Some(app_auth.public_key_id.clone());
@@ -154,11 +157,8 @@ impl AssertionSigner {
             exp: now + ASSERTION_LIFETIME_SECS,
         };
 
-        Ok(jsonwebtoken::encode(
-            &self.header,
-            &claims,
-            &self.encoding_key,
-        )?)
+        jsonwebtoken::encode(&self.header, &claims, &self.encoding_key)
+            .map_err(|e| BoxClientError::SignAssertion(CryptoError::new(e)))
     }
 }
 

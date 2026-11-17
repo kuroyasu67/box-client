@@ -76,15 +76,15 @@ pub enum BoxClientError {
     ///
     /// 復号した秘密鍵をPEM形式に変換できない場合も、このエラーを返す。
     #[error("Failed to decrypt private key")]
-    DecryptPrivateKey(#[from] pkcs8::Error),
+    DecryptPrivateKey(#[source] CryptoError),
 
     /// 復号した秘密鍵から署名鍵を作成できないエラー
     #[error("Failed to create signing key")]
-    CreateSigningKey(#[source] jsonwebtoken::errors::Error),
+    CreateSigningKey(#[source] CryptoError),
 
     /// JWTアサーションの署名エラー
     #[error("Failed to sign JWT assertion")]
-    SignAssertion(#[from] jsonwebtoken::errors::Error),
+    SignAssertion(#[source] CryptoError),
 
     /// システム時刻の取得エラー
     #[error("Failed to get system time")]
@@ -127,6 +127,34 @@ pub enum BoxClientError {
 
 /// BOXクライアントの結果型
 pub type BoxClientResult<T> = Result<T, BoxClientError>;
+
+/// 秘密鍵の復号、署名鍵の作成またはJWTアサーションの署名で発生したエラー
+///
+/// 原因となった外部クレート（`pkcs8`および`jsonwebtoken`）のエラーの型を公開すると、
+/// それらのクレートのメジャーバージョンを上げたときに、このクレートの破壊的変更となる。
+/// 利用者は原因の型を調べる必要がないため、型を隠して保持し、メッセージと原因の連鎖だけを公開する。
+/// メッセージと[`std::error::Error::source`]は、原因となったエラーのものをそのまま返す。
+#[derive(Debug)]
+pub struct CryptoError(Box<dyn std::error::Error + Send + Sync + 'static>);
+
+impl CryptoError {
+    /// 外部クレートのエラーを包む。
+    pub(crate) fn new(error: impl std::error::Error + Send + Sync + 'static) -> Self {
+        Self(Box::new(error))
+    }
+}
+
+impl fmt::Display for CryptoError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&self.0, f)
+    }
+}
+
+impl std::error::Error for CryptoError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.0.source()
+    }
+}
 
 /// BOXが返したエラーレスポンス
 ///
@@ -285,7 +313,7 @@ mod test_box_client_error {
     fn create_signing_key() -> anyhow::Result<BoxClientError> {
         match jsonwebtoken::EncodingKey::from_rsa_pem(b"invalid") {
             Ok(_) => anyhow::bail!("signing key must be invalid"),
-            Err(e) => Ok(BoxClientError::CreateSigningKey(e)),
+            Err(e) => Ok(BoxClientError::CreateSigningKey(CryptoError::new(e))),
         }
     }
 
@@ -359,5 +387,28 @@ mod test_box_client_error {
             error.to_string(),
             "BOX API request failed: status=404 Not Found, code=not_found, message=Not Found"
         );
+    }
+}
+
+#[cfg(test)]
+mod test_crypto_error {
+    use std::error::Error as _;
+
+    use super::*;
+
+    /// 原因となったエラーのメッセージと`source()`をそのまま返すことを確認
+    #[test]
+    fn test_delegates_message_and_source() {
+        let inner = BoxClientError::OpenConfigFile {
+            path: PathBuf::from("config.json"),
+            source: std::io::Error::from(std::io::ErrorKind::NotFound),
+        };
+        let expected_message = inner.to_string();
+        let expected_source = inner.source().map(ToString::to_string);
+
+        let error = CryptoError::new(inner);
+
+        assert_eq!(error.to_string(), expected_message);
+        assert_eq!(error.source().map(ToString::to_string), expected_source);
     }
 }
