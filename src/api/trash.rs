@@ -3,7 +3,8 @@
 use serde::Serialize;
 
 use crate::{
-    BoxClient, BoxClientError, BoxClientResult, BoxItem, FileId, Folder, FolderId,
+    BoxClient, BoxClientError, BoxClientResult, BoxItem, FileId, Folder, FolderId, WebLink,
+    WebLinkId,
     api::files::File,
     api::folders::{ItemsPage, MAX_ITEMS_LIMIT, SortDirection, collect_all_pages, validate_limit},
     request::ApiRequest,
@@ -24,13 +25,13 @@ pub struct ListTrashedItemsOptions {
     pub direction: Option<SortDirection>,
 }
 
-/// ゴミ箱内のフォルダまたはファイルを復元するときのオプション
+/// ゴミ箱内のフォルダ、ファイルまたはウェブリンクを復元するときのオプション
 ///
-/// BOXはフォルダの復元とファイルの復元で同じ形式のリクエストボディを受け付けるため、
-/// [`BoxClient::restore_folder`]および[`BoxClient::restore_file`]で共有する。
+/// BOXはフォルダ、ファイルおよびウェブリンクの復元で同じ形式のリクエストボディを受け付けるため、
+/// [`BoxClient::restore_folder`]、[`BoxClient::restore_file`]および[`BoxClient::restore_web_link`]で共有する。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RestoreItemOptions<'a> {
-    /// 復元後のフォルダ名またはファイル名
+    /// 復元後のフォルダ名、ファイル名またはウェブリンク名
     ///
     /// 復元先に同じ名前の項目がある場合に、別の名前で復元するために指定する。
     /// `None`の場合は、ゴミ箱に移動する前の名前で復元する。
@@ -43,10 +44,10 @@ pub struct RestoreItemOptions<'a> {
     pub parent_id: Option<&'a FolderId>,
 }
 
-/// フォルダまたはファイルを復元するリクエストのボディ
+/// フォルダ、ファイルまたはウェブリンクを復元するリクエストのボディ
 #[derive(Debug, Serialize)]
 struct RestoreItemBody<'a> {
-    /// 復元後のフォルダ名またはファイル名
+    /// 復元後のフォルダ名、ファイル名またはウェブリンク名
     #[serde(skip_serializing_if = "Option::is_none")]
     name: Option<&'a str>,
 
@@ -132,6 +133,31 @@ impl BoxClient {
     pub async fn trashed_file_information(&self, file_id: &FileId) -> BoxClientResult<File> {
         self.send_json(ApiRequest::get(["files", file_id.as_ref(), "trash"]))
             .await
+    }
+
+    /// ゴミ箱内のウェブリンクの情報を取得する。
+    ///
+    /// # Arguments
+    ///
+    /// - `web_link_id`: 情報を取得するゴミ箱内のウェブリンクのID
+    ///
+    /// # Errors
+    ///
+    /// BOXがエラーレスポンスを返した場合は、[`BoxClientError::Api`]を返す。主なステータスは次のとおり。
+    ///
+    /// - 404: ウェブリンクがゴミ箱にない。
+    ///
+    /// 再試行できないエラーが発生した場合、または再試行回数の上限に達した場合はエラーを返す。
+    pub async fn trashed_web_link_information(
+        &self,
+        web_link_id: &WebLinkId,
+    ) -> BoxClientResult<WebLink> {
+        self.send_json(ApiRequest::get([
+            "web_links",
+            web_link_id.as_ref(),
+            "trash",
+        ]))
+        .await
     }
 
     /// ゴミ箱内のフォルダを復元する。
@@ -243,6 +269,53 @@ impl BoxClient {
         );
 
         Ok(file)
+    }
+
+    /// ゴミ箱内のウェブリンクを復元する。
+    ///
+    /// BOXはウェブリンクを元の親フォルダに復元する。元の親フォルダが存在しない場合に限り、
+    /// `options.parent_id`で指定したフォルダに復元する。
+    ///
+    /// クライアントは、5xxを受け取った場合、またはタイムアウトした場合に、同じリクエストを再送して再試行する。
+    /// しかし、これらの場合は、BOXがウェブリンクの復元を完了している可能性がある。
+    /// 復元に成功したウェブリンクはゴミ箱からなくなるため、BOXが復元した後にリクエストを再送すると、BOXは404を返す。
+    /// その結果、復元に成功したにもかかわらず、復元に失敗したと誤って判断するおそれがある。
+    /// したがって、このリクエストを冪等でないリクエストとして送信し、BOXがリクエストを処理していないことが
+    /// 明らかな429、エラーコードが`operation_blocked_temporary`の409および接続エラーの後にのみ再試行する。
+    /// POSTリクエストは既定で冪等でないリクエストとして扱われるため、冪等性を上書きしていない。
+    ///
+    /// # Arguments
+    ///
+    /// - `web_link_id`: 復元するゴミ箱内のウェブリンクのID
+    /// - `options`: 復元後のウェブリンク名および復元先の親フォルダのオプション
+    ///
+    /// # Errors
+    ///
+    /// BOXがエラーレスポンスを返した場合は、[`BoxClientError::Api`]を返す。主なステータスは次のとおり。
+    ///
+    /// - 403: ゴミ箱からウェブリンクを復元する権限がない、または復元先のフォルダにアクセスする権限がない。
+    /// - 404: ウェブリンクがゴミ箱にない。
+    /// - 409: 復元先に同じ名前のウェブリンクがある。`options.name`に別の名前を指定して再度呼び出す。
+    ///
+    /// 再試行できないエラーが発生した場合、または再試行回数の上限に達した場合はエラーを返す。
+    /// 5xxまたはタイムアウトでエラーを返した場合は、BOXがウェブリンクを復元した可能性があるため、
+    /// [`BoxClient::web_link_information`]でウェブリンクの状態を確認する。
+    pub async fn restore_web_link(
+        &self,
+        web_link_id: &WebLinkId,
+        options: &RestoreItemOptions<'_>,
+    ) -> BoxClientResult<WebLink> {
+        let request = ApiRequest::post(["web_links", web_link_id.as_ref()])
+            .json(&RestoreItemBody::from(options))?;
+        let web_link: WebLink = self.send_json(request).await?;
+
+        tracing::info!(
+            web_link_id = web_link_id.as_ref(),
+            parent_id = web_link.parent.as_ref().map(|p| p.id.as_ref()),
+            "restored web link"
+        );
+
+        Ok(web_link)
     }
 
     /// ゴミ箱内の項目を1ページ分リストする。
@@ -506,6 +579,105 @@ mod test_trashed_file_information {
         let client = create_client(&server, short_retry(0)?).await?;
 
         let result = client.trashed_file_information(&FileId::new("999")).await;
+
+        assert!(
+            matches!(&result, Err(BoxClientError::Api(e)) if e.status == 404),
+            "result: {result:?}"
+        );
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod test_trashed_web_link_information {
+    use serde_json::json;
+    use time::macros::datetime;
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{method, path},
+    };
+
+    use super::*;
+    use crate::{
+        ItemStatus,
+        test_support::{create_client, mount_token, short_retry},
+    };
+
+    /// GET /web_links/{web_link_id}/trashを呼び出し、ゴミ箱に移動した日時と状態を含むウェブリンク情報をデシリアライズすることを確認
+    #[tokio::test]
+    async fn test_trashed_web_link_information() -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        Mock::given(method("GET"))
+            .and(path("/2.0/web_links/12345/trash"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "type": "web_link",
+                "id": "12345",
+                "etag": "1",
+                "sequence_id": "3",
+                "name": "Example",
+                "url": "https://www.example.com/",
+                "description": "Example web site",
+                // BOXはゴミ箱内のウェブリンクのパスを、ETagおよびシーケンスIDがnullのゴミ箱フォルダで返す
+                "path_collection": {
+                    "total_count": 1,
+                    "entries": [
+                        {"type": "folder", "id": "1", "sequence_id": null, "etag": null, "name": "Trash"},
+                    ],
+                },
+                "trashed_at": "2012-12-12T10:53:43-08:00",
+                "purged_at": "2013-01-11T10:53:43-08:00",
+                "shared_link": null,
+                "parent": {"type": "folder", "id": "111", "sequence_id": "0", "etag": "0", "name": "Links"},
+                "item_status": "trashed",
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = create_client(&server, short_retry(0)?).await?;
+
+        let web_link = client
+            .trashed_web_link_information(&WebLinkId::new("12345"))
+            .await?;
+
+        assert_eq!(web_link.id, WebLinkId::new("12345"));
+        assert_eq!(web_link.name, "Example");
+        assert_eq!(web_link.url.as_deref(), Some("https://www.example.com/"));
+        assert_eq!(
+            web_link.trashed_at,
+            Some(datetime!(2012-12-12 10:53:43 -08:00))
+        );
+        assert_eq!(
+            web_link.purged_at,
+            Some(datetime!(2013-01-11 10:53:43 -08:00))
+        );
+        assert_eq!(web_link.item_status, Some(ItemStatus::Trashed));
+        assert_eq!(web_link.parent.map(|p| p.id), Some(FolderId::new("111")));
+
+        Ok(())
+    }
+
+    /// ウェブリンクがゴミ箱にない場合は、BOXのエラーレスポンスを返すことを確認
+    #[tokio::test]
+    async fn test_trashed_web_link_information_not_found() -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        Mock::given(method("GET"))
+            .and(path("/2.0/web_links/999/trash"))
+            .respond_with(ResponseTemplate::new(404).set_body_json(json!({
+                "type": "error",
+                "status": 404,
+                "code": "not_found",
+                "message": "Not Found",
+            })))
+            .mount(&server)
+            .await;
+        let client = create_client(&server, short_retry(0)?).await?;
+
+        let result = client
+            .trashed_web_link_information(&WebLinkId::new("999"))
+            .await;
 
         assert!(
             matches!(&result, Err(BoxClientError::Api(e)) if e.status == 404),
@@ -917,6 +1089,159 @@ mod test_restore_file {
 
         client
             .restore_file(&FileId::new("123"), &RestoreItemOptions::default())
+            .await?;
+
+        assert_eq!(post_count(&server).await, 2);
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod test_restore_web_link {
+    use rstest::rstest;
+    use serde_json::json;
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{body_json, method, path},
+    };
+
+    use super::*;
+    use crate::{
+        ItemStatus,
+        test_support::{create_client, mount_token, short_retry},
+    };
+
+    /// ウェブリンクのAPIのパス
+    const WEB_LINK_PATH: &str = "/2.0/web_links/123";
+
+    /// 復元したウェブリンクのレスポンスを返す。
+    fn restored_response() -> ResponseTemplate {
+        ResponseTemplate::new(201).set_body_json(json!({
+            "type": "web_link",
+            "id": "123",
+            "etag": "2",
+            "name": "restored",
+            "url": "https://www.example.com/",
+            "trashed_at": null,
+            "purged_at": null,
+            "shared_link": null,
+            "parent": {"type": "folder", "id": "111", "etag": "0", "name": "Links"},
+            "item_status": "active",
+        }))
+    }
+
+    /// ウェブリンクのAPIへのPOSTリクエストの数を返す。
+    async fn post_count(server: &MockServer) -> usize {
+        server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .iter()
+            .filter(|r| r.method.as_str() == "POST" && r.url.path() == WEB_LINK_PATH)
+            .count()
+    }
+
+    /// POST /web_links/{web_link_id}にオプションをボディとして送信し、復元したウェブリンク情報を返すことを確認
+    #[tokio::test]
+    async fn test_restore_web_link() -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        Mock::given(method("POST"))
+            .and(path(WEB_LINK_PATH))
+            .and(body_json(
+                json!({"name": "restored", "parent": {"id": "111"}}),
+            ))
+            .respond_with(restored_response())
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = create_client(&server, short_retry(0)?).await?;
+        let parent_id = FolderId::new("111");
+        let options = RestoreItemOptions {
+            name: Some("restored"),
+            parent_id: Some(&parent_id),
+        };
+
+        let web_link = client
+            .restore_web_link(&WebLinkId::new("123"), &options)
+            .await?;
+
+        assert_eq!(web_link.id, WebLinkId::new("123"));
+        assert_eq!(web_link.name, "restored");
+        assert_eq!(web_link.url.as_deref(), Some("https://www.example.com/"));
+        assert_eq!(web_link.parent.map(|p| p.id), Some(parent_id));
+        assert_eq!(web_link.trashed_at, None);
+        assert_eq!(web_link.item_status, Some(ItemStatus::Active));
+
+        Ok(())
+    }
+
+    /// BOXのエラーレスポンスを、再試行せずにそのまま返すことを確認
+    ///
+    /// 5xxの後に再送すると、復元済みのウェブリンクに対して404を受け取るおそれがあるため、
+    /// 再試行の上限に余裕があっても再送しない。
+    #[rstest]
+    #[case::forbidden(403)]
+    #[case::not_found(404)]
+    #[case::name_conflict(409)]
+    #[case::internal_server_error(500)]
+    #[case::service_unavailable(503)]
+    #[tokio::test]
+    async fn test_restore_web_link_error_is_not_retried(#[case] status: u16) -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        Mock::given(method("POST"))
+            .and(path(WEB_LINK_PATH))
+            .respond_with(ResponseTemplate::new(status))
+            .mount(&server)
+            .await;
+        let client = create_client(&server, short_retry(2)?).await?;
+
+        let result = client
+            .restore_web_link(&WebLinkId::new("123"), &RestoreItemOptions::default())
+            .await;
+
+        assert!(
+            matches!(&result, Err(BoxClientError::Api(e)) if e.status == status),
+            "result: {result:?}"
+        );
+        assert_eq!(post_count(&server).await, 1);
+
+        Ok(())
+    }
+
+    /// 429または他の操作によるロックで409を受け取った場合は、冪等でないリクエストとして送信しても再試行することを確認
+    #[rstest]
+    #[case::too_many_requests(ResponseTemplate::new(429))]
+    #[case::operation_blocked_temporary(ResponseTemplate::new(409).set_body_json(json!({
+        "type": "error",
+        "status": 409,
+        "code": "operation_blocked_temporary",
+        "message": "The operation is blocked by another on-going operation",
+    })))]
+    #[tokio::test]
+    async fn test_restore_web_link_retries_request_not_processed(
+        #[case] first_response: ResponseTemplate,
+    ) -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        Mock::given(method("POST"))
+            .and(path(WEB_LINK_PATH))
+            .respond_with(first_response)
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(WEB_LINK_PATH))
+            .and(body_json(json!({})))
+            .respond_with(restored_response())
+            .mount(&server)
+            .await;
+        let client = create_client(&server, short_retry(1)?).await?;
+
+        client
+            .restore_web_link(&WebLinkId::new("123"), &RestoreItemOptions::default())
             .await?;
 
         assert_eq!(post_count(&server).await, 2);
