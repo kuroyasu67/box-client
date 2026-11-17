@@ -1,3 +1,5 @@
+//! フォルダ内のすべての項目を表示し、最初に見つかったフォルダ、ファイルおよびWebリンクの情報を取得するサンプル
+
 mod common;
 
 use box_client::{BoxItem, FolderId, ListItemsOptions};

@@ -1,11 +1,22 @@
 use serde::Deserialize;
 
+/// BOXの項目のIDを表す型を定義する。
+///
+/// `$item`には、ドキュメントに使用する項目の種類を指定する。
 macro_rules! box_item_struct {
-    ($name: ident ) => {
+    ($name: ident, $item: literal) => {
+        #[doc = concat!(
+            $item,
+            "のID\n\n",
+            "BOXはIDを数字の文字列で返すが、このクライアントは値を検証せずに保持する。\n",
+            "空文字列などの不正なIDは、APIを呼び出したときに",
+            "[`BoxClientError::InvalidPathSegment`](crate::BoxClientError::InvalidPathSegment)になる。",
+        )]
         #[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize)]
-        pub struct $name(pub String);
+        pub struct $name(#[doc = "IDの文字列"] pub String);
 
         impl $name {
+            #[doc = concat!("文字列から", $item, "のIDを作成する。")]
             pub fn new(id: impl Into<String>) -> Self {
                 Self(id.into())
             }
@@ -25,11 +36,14 @@ macro_rules! box_item_struct {
     };
 }
 
-box_item_struct!(FolderId);
-box_item_struct!(FileId);
-box_item_struct!(WebLinkId);
+box_item_struct!(FolderId, "フォルダ");
+box_item_struct!(FileId, "ファイル");
+box_item_struct!(WebLinkId, "Webリンク");
 
 impl FolderId {
+    /// ルートフォルダのIDを返す。
+    ///
+    /// BOXでは、ルートフォルダ（「すべてのファイル」）のIDは常に`0`である。
     #[must_use]
     pub fn root() -> Self {
         FolderId::new("0")

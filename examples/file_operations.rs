@@ -1,3 +1,5 @@
+//! ファイルの情報の取得、削除、ゴミ箱内のファイルの情報の取得および復元を順に実行するサンプル
+
 mod common;
 
 use box_client::{FileId, RestoreItemOptions};

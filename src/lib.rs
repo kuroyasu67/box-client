@@ -1,3 +1,22 @@
+//! BOXのREST APIを呼び出すクライアント
+//!
+//! [`BoxClient`]は、JWT認証でエンタープライズのサービスアカウントとして認証し、BOXのREST APIを呼び出す。
+//! アクセストークンの取得と更新、および失敗したリクエストの再試行は、[`BoxClient`]が自動で行う。
+//! 対応しているAPI、アクセストークンの管理および再試行の仕組みは、リポジトリのREADMEを参照する。
+//!
+//! ```no_run
+//! use box_client::{BoxClient, BoxConfig, FolderId};
+//!
+//! # async fn example() -> box_client::BoxClientResult<()> {
+//! let config = BoxConfig::from_file("config.json")?;
+//! let client = BoxClient::builder(config).build().await?;
+//!
+//! let folder = client.folder_information(&FolderId::root()).await?;
+//! println!("{}", folder.name);
+//! # Ok(())
+//! # }
+//! ```
+
 mod api;
 mod assertion_claims;
 mod auth;

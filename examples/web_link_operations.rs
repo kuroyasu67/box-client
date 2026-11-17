@@ -1,3 +1,5 @@
+//! Webリンクの情報の取得、削除、ゴミ箱内のWebリンクの情報の取得および復元を順に実行するサンプル
+
 mod common;
 
 use box_client::{RestoreItemOptions, WebLinkId};
