@@ -156,7 +156,11 @@ BOXが発行するアクセストークンの有効期間は60分である。
 複数のタスクが同時にAPIを呼び出しても、`BoxClient`はアクセストークンを取得するタスクを1つに限る。
 
 バックグラウンドでの取得に失敗した場合、`BoxClient`はWARNログを出力し、キャッシュしたアクセストークンを期限が切れるまで使用し続ける。
-次にAPIが呼び出されたとき、`BoxClient`は再びバックグラウンドでアクセストークンを取得し直す。
+失敗してから一定の間隔が経過した後にAPIが呼び出されると、`BoxClient`は再びバックグラウンドでアクセストークンを取得し直す。
+失敗した直後からAPIが呼び出されるたびに取得し直すと、アプリケーションの認可が取り消された場合など、再試行しても成功しない失敗で、トークンエンドポイントへのリクエストが期限切れまで続くためである。
+間隔は、10秒と`refresh_before_expiry`の4分の1の短いほうである。
+既定の`refresh_before_expiry`（60秒）では10秒になり、`refresh_before_expiry`を短く設定した場合も、期限が切れるまでに複数回取得し直す機会が残る。
+アクセストークンが期限切れになった場合は、間隔に関係なく、APIの呼び出しはアクセストークンの取得を待つ。
 
 ### `refresh_before_expiry`の決め方
 
@@ -327,7 +331,7 @@ let client = BoxClient::builder(config)
 | DEBUG | `succeeded` | リクエストが成功した。 |
 | WARN | `retrying` | 再試行する。待機時間`delay_ms`と、待機時間を決めた方法`delay_source`を含む。`delay_source`は`retry_after`または`backoff`である。 |
 | WARN | `access token was rejected; fetching a new one and resending` | 401を受け取り、アクセストークンを取得し直して再送する。 |
-| WARN | `failed to refresh access token in background; using the cached token until it expires` | `BoxClient`が、アクセストークンをバックグラウンドで取得できなかった。`BoxClient`は、キャッシュしたアクセストークンを期限が切れるまで使用する。このイベントは、原因のエラー`error`を含む。 |
+| WARN | `failed to refresh access token in background; using the cached token until it expires` | `BoxClient`が、アクセストークンをバックグラウンドで取得できなかった。`BoxClient`は、キャッシュしたアクセストークンを期限が切れるまで使用する。このイベントは、原因のエラー`error`と、次にバックグラウンドで取得し直すまでの間隔`retry_interval_ms`を含む。 |
 | DEBUG | `failed with non-retryable error` | 再試行できないエラーが発生した。 |
 | ERROR | `failed after reaching max retries` | 再試行回数が上限に達した。 |
 | ERROR | `gave up retrying` | `Retry-After`ヘッダーが示す待機時間が上限を超えたため、再試行を中止した。`Retry-After`ヘッダーが示す待機時間`retry_after_ms`と、待機時間の上限`max_delay_ms`を含む。 |

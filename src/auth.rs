@@ -36,6 +36,22 @@ const BOX_SUB_TYPE_ENTERPRISE: &str = "enterprise";
 /// JWTアサーションはアクセストークンとの交換にだけ使うため、この値はアクセストークンの有効期間に影響しない。
 const ASSERTION_LIFETIME_SECS: u64 = 45;
 
+/// バックグラウンドでの取得に失敗した後、次にバックグラウンドで取得し直すまでの間隔の上限
+///
+/// 失敗した直後から、APIが呼び出されるたびに取得し直すと、トークンエンドポイントへのリクエストが絶えず発生する。
+/// アプリケーションの認可が取り消された場合など、再試行しても成功しない失敗では、期限が切れるまでリクエストが続く。
+/// したがって、トークン管理者は、失敗した後は間隔をあけてからバックグラウンドで取得し直す。
+/// アクセストークンが期限切れの場合は、間隔に関係なく、呼び出し元を待たせて取得する。
+///
+/// 実際の間隔は[`refresh_interval_after_failure`]で決める。
+const MAX_REFRESH_INTERVAL_AFTER_FAILURE: Duration = Duration::from_secs(10);
+
+/// 取得し直す期間の中で、バックグラウンドで取得を試みる機会の最小数
+///
+/// 間隔を`refresh_before_expiry`のこの数分の1以下にし、`refresh_before_expiry`を短く設定した場合でも、
+/// 期限が切れるまでに複数回バックグラウンドで取得し直す機会を残す。
+const MIN_BACKGROUND_REFRESH_CHANCES: u32 = 4;
+
 /// トークンエンドポイントが発行したアクセストークン
 ///
 /// アクセストークンはJWTではなく、中身を解釈できない文字列である。
@@ -173,6 +189,8 @@ struct TokenResponse {
 /// - 有効期限までの残り時間が`refresh_before_expiry`以下で、アクセストークンがまだ期限切れでない場合、
 ///   トークン管理者はバックグラウンドのタスクでアクセストークンを取得し直し、呼び出し元にはキャッシュしたアクセストークンを返す。
 ///   キャッシュしたアクセストークンは期限が切れるまで使用できるため、トークン管理者は呼び出し元を取得の完了まで待たせない。
+///   バックグラウンドでの取得に失敗した場合、トークン管理者は[`refresh_interval_after_failure`]が返す間隔が経過するまで、
+///   バックグラウンドで取得し直さない。
 /// - アクセストークンが期限切れの場合、またはキャッシュがない場合、トークン管理者はアクセストークンを取得し終えるまで呼び出し元を待たせる。
 ///
 /// バックグラウンドのタスクはトークン管理者の`Arc`を保持するため、呼び出し元は[`TokenManager::access_token`]を`Arc<Self>`から呼び出す。
@@ -204,8 +222,15 @@ pub(crate) struct TokenManager {
 
     /// アクセストークンを取得するタスクを1つに限るためのロック
     ///
+    /// ロックは、バックグラウンドでの取得に最後に失敗した時刻を保持する。
+    /// バックグラウンドで取得に成功した場合は`None`に戻す。
     /// バックグラウンドのタスクにロックを渡せるように、`Arc`で保持する。
-    refresh_lock: Arc<Mutex<()>>,
+    refresh_lock: Arc<Mutex<Option<Instant>>>,
+
+    /// バックグラウンドでの取得に失敗した後、次にバックグラウンドで取得し直すまでの間隔
+    ///
+    /// `refresh_before_expiry`から決める。テストで変更できるように、フィールドで保持する。
+    refresh_interval_after_failure: Duration,
 }
 
 impl TokenManager {
@@ -241,8 +266,16 @@ impl TokenManager {
             retry,
             refresh_before_expiry,
             cache: RwLock::new(None),
-            refresh_lock: Arc::new(Mutex::new(())),
+            refresh_lock: Arc::new(Mutex::new(None)),
+            refresh_interval_after_failure: refresh_interval_after_failure(refresh_before_expiry),
         })
+    }
+
+    /// バックグラウンドでの取得に失敗した後、次にバックグラウンドで取得し直すまでの間隔を変更する。
+    #[cfg(test)]
+    fn with_refresh_interval_after_failure(mut self, interval: Duration) -> Self {
+        self.refresh_interval_after_failure = interval;
+        self
     }
 
     /// 有効なアクセストークンを返す。
@@ -289,10 +322,15 @@ impl TokenManager {
     /// アクセストークンを取得し直すバックグラウンドのタスクを起動する。
     ///
     /// 別のタスクがすでにアクセストークンを取得している場合、このメソッドは何もしない。
+    /// バックグラウンドでの取得に失敗してから`refresh_interval_after_failure`が経過していない場合も、何もしない。
     fn spawn_refresh(self: &Arc<Self>) {
         let Ok(guard) = Arc::clone(&self.refresh_lock).try_lock_owned() else {
             return;
         };
+        if guard.is_some_and(|failed_at| failed_at.elapsed() < self.refresh_interval_after_failure)
+        {
+            return;
+        }
         let manager = Arc::clone(self);
         // 取得のきっかけとなったリクエストとログを関連付けるため、バックグラウンドのタスクは呼び出し元のスパンを引き継ぐ。
         tokio::spawn(async move { manager.refresh(guard).await }.in_current_span());
@@ -300,22 +338,30 @@ impl TokenManager {
 
     /// アクセストークンを取得し直してキャッシュする。
     ///
-    /// `_guard`はアクセストークンを取得するタスクを1つに限るためのロックであり、このメソッドは取得を終えるとロックを解放する。
-    /// 取得に失敗した場合、このメソッドはログを出力するだけにする。
+    /// `guard`はアクセストークンを取得するタスクを1つに限るためのロックであり、このメソッドは取得を終えるとロックを解放する。
+    /// 取得に失敗した場合、このメソッドはログを出力し、失敗した時刻を`guard`に記録するだけにする。
     /// キャッシュしたアクセストークンは期限が切れるまで使用できるためである。
-    /// 次に呼び出し元が[`TokenManager::access_token`]を呼び出したとき、トークン管理者は再びアクセストークンを取得し直す。
-    async fn refresh(&self, _guard: OwnedMutexGuard<()>) {
+    /// `refresh_interval_after_failure`が経過した後に呼び出し元が[`TokenManager::access_token`]を呼び出すと、
+    /// トークン管理者は再びバックグラウンドでアクセストークンを取得し直す。
+    async fn refresh(&self, mut guard: OwnedMutexGuard<Option<Instant>>) {
         // ロックを得るまでの間に別のタスクが取得し直している場合、このタスクはアクセストークンを取得しない。
         if self.fresh_cached_token().await.is_some() {
             return;
         }
 
         match self.fetch().await {
-            Ok(token) => *self.cache.write().await = Some(Arc::new(token)),
-            Err(error) => tracing::warn!(
-                error = &error as &(dyn std::error::Error + 'static),
-                "failed to refresh access token in background; using the cached token until it expires"
-            ),
+            Ok(token) => {
+                *self.cache.write().await = Some(Arc::new(token));
+                *guard = None;
+            }
+            Err(error) => {
+                *guard = Some(Instant::now());
+                tracing::warn!(
+                    error = &error as &(dyn std::error::Error + 'static),
+                    retry_interval_ms = self.refresh_interval_after_failure.as_millis(),
+                    "failed to refresh access token in background; using the cached token until it expires"
+                );
+            }
         }
     }
 
@@ -404,6 +450,15 @@ impl TokenManager {
 /// アクセストークンを取得し直す。
 fn needs_refresh(expires_at: Instant, now: Instant, refresh_before_expiry: Duration) -> bool {
     expires_at.saturating_duration_since(now) <= refresh_before_expiry
+}
+
+/// バックグラウンドでの取得に失敗した後、次にバックグラウンドで取得し直すまでの間隔を返す。
+///
+/// 間隔は、[`MAX_REFRESH_INTERVAL_AFTER_FAILURE`]と、`refresh_before_expiry`の[`MIN_BACKGROUND_REFRESH_CHANCES`]分の1の
+/// 短いほうとする。既定の`refresh_before_expiry`（60秒）では10秒になる。
+/// `refresh_before_expiry`を短く設定した場合も、期限が切れるまでに複数回バックグラウンドで取得し直す機会を残す。
+fn refresh_interval_after_failure(refresh_before_expiry: Duration) -> Duration {
+    MAX_REFRESH_INTERVAL_AFTER_FAILURE.min(refresh_before_expiry / MIN_BACKGROUND_REFRESH_CHANCES)
 }
 
 /// アクセストークンが期限切れかどうかを返す。
@@ -541,6 +596,32 @@ mod test_is_expired {
 
         assert_eq!(
             is_expired(base + until_expiration, base + since_now),
+            expected
+        );
+    }
+}
+
+#[cfg(test)]
+mod test_refresh_interval_after_failure {
+    use rstest::rstest;
+
+    use super::*;
+
+    /// 上限の10秒と、`refresh_before_expiry`の4分の1の短いほうを間隔とすることを確認
+    #[rstest]
+    // 既定の`refresh_before_expiry`では、4分の1の15秒が上限を超えるため、上限の10秒になる
+    #[case::default(Duration::from_secs(60), Duration::from_secs(10))]
+    // 4分の1が上限とちょうど一致する
+    #[case::equals_max(Duration::from_secs(40), Duration::from_secs(10))]
+    // 4分の1が上限より短い
+    #[case::short(Duration::from_secs(20), Duration::from_secs(5))]
+    #[case::zero(Duration::ZERO, Duration::ZERO)]
+    fn test_refresh_interval_after_failure(
+        #[case] refresh_before_expiry: Duration,
+        #[case] expected: Duration,
+    ) {
+        assert_eq!(
+            refresh_interval_after_failure(refresh_before_expiry),
             expected
         );
     }
@@ -755,6 +836,50 @@ mod test_token_manager {
 
         assert!(Arc::ptr_eq(&old, &cached));
         assert!(Arc::ptr_eq(&old, &after_failure));
+
+        Ok(())
+    }
+
+    /// バックグラウンドでの取得に失敗した後は、間隔が経過するまでバックグラウンドで取得し直さないことを確認
+    #[tokio::test]
+    async fn test_access_token_waits_interval_after_background_refresh_failure()
+    -> anyhow::Result<()> {
+        const INTERVAL: Duration = Duration::from_millis(300);
+        let server = MockServer::start().await;
+        mount_first_n(&server, token_response_with("old-token", 3600), 1).await;
+        mount_always(&server, ResponseTemplate::new(500)).await;
+        let http_client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(2))
+            .build()?;
+        // `refresh_before_expiry`がトークンの有効期間3600秒と等しいため、取得した直後から取得し直す期間に入る。
+        let manager = Arc::new(
+            TokenManager::new(
+                http_client,
+                &test_config(),
+                format!("{}{TOKEN_PATH}", server.uri()),
+                short_retry(0)?,
+                Duration::from_secs(3600),
+            )?
+            .with_refresh_interval_after_failure(INTERVAL),
+        );
+        manager.access_token().await?;
+
+        // 1回目のバックグラウンドでの取得が失敗し、失敗した時刻を記録するまで待つ。
+        manager.access_token().await?;
+        wait_for_request_count(&server, 2).await?;
+        let _ = manager.refresh_lock.lock().await;
+
+        // 間隔が経過するまでは、何度呼び出してもバックグラウンドで取得し直さない。
+        for _ in 0..5 {
+            manager.access_token().await?;
+        }
+        tokio::time::sleep(INTERVAL / 3).await;
+        assert_eq!(request_count(&server).await, 2);
+
+        // 間隔が経過した後は、再びバックグラウンドで取得し直す。
+        tokio::time::sleep(INTERVAL).await;
+        manager.access_token().await?;
+        wait_for_request_count(&server, 3).await?;
 
         Ok(())
     }
