@@ -54,7 +54,8 @@ pub async fn list_trashed_items(client: &BoxClient) -> anyhow::Result<()> {
             BoxItem::WebLink(link) => {
                 tracing::info!("web_link: id={}, name={}", link.id, link.name)
             }
-            BoxItem::Unknown => tracing::info!("unknown item"),
+            // `BoxItem`は`#[non_exhaustive]`であるため、`BoxItem::Unknown`と将来追加される種類をまとめて扱う。
+            _ => tracing::info!("unknown item"),
         }
     }
 

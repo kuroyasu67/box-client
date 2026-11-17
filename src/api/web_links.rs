@@ -13,6 +13,7 @@ use crate::{
 /// フォルダ情報およびファイル情報と同様に、BOXがnullを返したり省略したりしても取得を失敗させないため、
 /// IDおよび名前以外の属性を`Option`で受け取る。
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[non_exhaustive]
 pub struct WebLink {
     /// ウェブリンクID
     pub id: WebLinkId,

@@ -43,6 +43,7 @@ impl FolderId {
 /// フォルダ内の項目
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum BoxItem {
     /// ファイル
     File(FileItem),
@@ -62,6 +63,7 @@ pub enum BoxItem {
 
 /// フォルダ内のファイル
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[non_exhaustive]
 pub struct FileItem {
     /// ファイルID
     pub id: FileId,
@@ -75,6 +77,7 @@ pub struct FileItem {
 
 /// フォルダ内のフォルダ
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[non_exhaustive]
 pub struct FolderItem {
     /// フォルダID
     pub id: FolderId,
@@ -88,6 +91,7 @@ pub struct FolderItem {
 
 /// フォルダ内のウェブリンク
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[non_exhaustive]
 pub struct WebLinkItem {
     /// ウェブリンクID
     pub id: WebLinkId,
@@ -101,6 +105,7 @@ pub struct WebLinkItem {
 
 /// ルートフォルダから項目の親フォルダまでのパス
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[non_exhaustive]
 pub struct PathCollection {
     /// パスに含まれるフォルダの数
     pub total_count: u64,
@@ -112,6 +117,7 @@ pub struct PathCollection {
 /// 項目の状態
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum ItemStatus {
     /// 有効
     Active,

@@ -5,6 +5,7 @@ use serde::Deserialize;
 
 /// BOXクライアントエラー型
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum BoxClientError {
     /// BOX設定ファイルのオープンエラー
     #[error("Failed to open config file: {0}")]
@@ -91,6 +92,7 @@ pub type BoxClientResult<T> = Result<T, BoxClientError>;
 /// REST APIは`code`、`message`および`request_id`を返し、トークンエンドポイントは`error`および
 /// `error_description`を返す。どちらの形式でも`code`と`message`で参照できるように正規化する。
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct ApiError {
     /// HTTPステータス
     pub status: StatusCode,

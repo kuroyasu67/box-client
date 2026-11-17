@@ -15,6 +15,7 @@ use crate::{
 /// フォルダ情報と同様に、BOXがnullを返したり省略したりしても取得を失敗させないため、
 /// IDおよび名前以外の属性を`Option`で受け取る。
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[non_exhaustive]
 pub struct File {
     /// ファイルID
     pub id: FileId,
@@ -89,6 +90,7 @@ pub struct File {
 
 /// ファイルのバージョン
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[non_exhaustive]
 pub struct FileVersion {
     /// ファイルバージョンID
     pub id: String,

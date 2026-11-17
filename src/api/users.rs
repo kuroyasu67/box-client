@@ -7,6 +7,7 @@ use crate::{BoxClient, BoxClientResult, request::ApiRequest};
 
 /// BOXのユーザー
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[non_exhaustive]
 pub struct User {
     /// ユーザーID
     pub id: String,
@@ -32,6 +33,7 @@ pub struct User {
 
 /// 最小限のユーザー情報
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[non_exhaustive]
 pub struct UserMini {
     /// ユーザーID
     pub id: String,

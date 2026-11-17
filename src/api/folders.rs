@@ -17,6 +17,7 @@ pub const MAX_ITEMS_LIMIT: u32 = 1000;
 /// ルートフォルダでは、ETag、作成日時、親フォルダなどの多くの属性をBOXがnullで返すため、
 /// IDおよび名前以外の属性を`Option`で受け取る。
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[non_exhaustive]
 pub struct Folder {
     /// フォルダID
     pub id: FolderId,
@@ -83,6 +84,7 @@ pub struct Folder {
 
 /// フォルダ内の項目の1ページ
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[non_exhaustive]
 pub struct ItemsPage {
     /// このページの項目
     pub entries: Vec<BoxItem>,
@@ -98,6 +100,7 @@ pub struct ItemsPage {
 
 /// 項目の並び替えに使用する属性
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ItemSort {
     /// ID
     Id,
