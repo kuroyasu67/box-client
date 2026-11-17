@@ -2,7 +2,9 @@ mod common;
 
 use box_client::{BoxItem, FolderId, ListItemsOptions};
 
-const USAGE: &str = "usage: RUST_LOG=info cargo run --example=folder_list_items -- <folder-id>";
+/// 使用方法
+const USAGE: &str =
+    "usage: RUST_LOG=info cargo run --quiet --example=folder_list_items -- <folder-id>";
 
 /// フォルダ内のすべての項目を表示する。
 ///

@@ -8,7 +8,7 @@ const USAGE: &str = "usage: RUST_LOG=info cargo run --quiet --example=file_opera
 /// ファイルを操作する。
 ///
 /// ```shell
-/// RUST_LOG=info cargo run --example=file_operations -- <file-id> [--skip-to-restore]
+/// RUST_LOG=info cargo run --quiet --example=file_operations -- <file-id> [--skip-to-restore]
 /// ```
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {

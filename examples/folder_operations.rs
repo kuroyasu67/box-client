@@ -3,13 +3,12 @@ mod common;
 use box_client::{DeleteFolderOptions, FolderId, RestoreItemOptions};
 
 /// 使用方法
-const USAGE: &str =
-    "usage: RUST_LOG=info cargo run --example=folder_operations -- <folder-id> [--skip-to-restore]";
+const USAGE: &str = "usage: RUST_LOG=info cargo run --quiet --example=folder_operations -- <folder-id> [--skip-to-restore]";
 
 /// フォルダを操作する。
 ///
 /// ```shell
-/// RUST_LOG=info cargo run --quiet --example=folder_operations -- <folder-id>
+/// RUST_LOG=info cargo run --quiet --example=folder_operations -- <folder-id> [--skip-to-restore]
 /// ```
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {

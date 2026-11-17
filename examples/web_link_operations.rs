@@ -3,12 +3,12 @@ mod common;
 use box_client::{RestoreItemOptions, WebLinkId};
 
 /// 使用方法
-const USAGE: &str = "usage: RUST_LOG=info cargo run --example=web_link_operations -- <web-link-id> [--skip-to-restore]";
+const USAGE: &str = "usage: RUST_LOG=info cargo run --quiet --example=web_link_operations -- <web-link-id> [--skip-to-restore]";
 
 /// Webリンクを操作する。
 ///
 /// ```shell
-/// RUST_LOG=info cargo run --quiet --example=web_link_operations -- <web-link-id>
+/// RUST_LOG=info cargo run --quiet --example=web_link_operations -- <web-link-id> [--skip-to-restore]
 /// ```
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
