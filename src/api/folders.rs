@@ -4,9 +4,10 @@ use serde::Deserialize;
 use time::OffsetDateTime;
 
 use crate::{
-    BoxClient, BoxClientError, BoxClientResult, BoxItem, FolderId, FolderItem, ItemStatus,
-    UserMini, api::types::PathCollection, request::ApiRequest,
+    BoxClient, BoxClientError, BoxClientResult, BoxItem, FolderId, FolderItem, Idempotency,
+    ItemStatus, UserMini, api::types::PathCollection, request::ApiRequest,
 };
+use reqwest::header::IF_MATCH;
 
 /// 1回のリクエストで取得できる項目数の上限
 pub const MAX_ITEMS_LIMIT: u32 = 1000;
@@ -135,7 +136,7 @@ pub enum SortDirection {
 
 impl SortDirection {
     /// クエリパラメーターに指定する文字列を返す。
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Asc => "ASC",
             Self::Desc => "DESC",
@@ -160,8 +161,23 @@ pub struct ListItemsOptions {
     pub direction: Option<SortDirection>,
 }
 
+/// フォルダを削除するときのオプション
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DeleteFolderOptions<'a> {
+    /// 空でないフォルダを、フォルダ内のすべての項目とともに削除することを指示するフラグ
+    ///
+    /// `false`の場合に空でないフォルダを削除しようとすると、BOXは400（`folder_not_empty`）を返す。
+    pub recursive: bool,
+
+    /// 最後に取得したフォルダのETag
+    ///
+    /// 指定した場合は、`If-Match`ヘッダーで送信する。フォルダがETagの取得後に変更されていると、
+    /// BOXはフォルダを削除せずに412を返す。
+    pub etag: Option<&'a str>,
+}
+
 /// 1ページで取得する項目数の上限が、BOXが受け付ける範囲内であることを検証する。
-fn validate_limit(limit: u32) -> BoxClientResult<u32> {
+pub(crate) fn validate_limit(limit: u32) -> BoxClientResult<u32> {
     if (1..=MAX_ITEMS_LIMIT).contains(&limit) {
         Ok(limit)
     } else {
@@ -169,6 +185,45 @@ fn validate_limit(limit: u32) -> BoxClientResult<u32> {
             "limit must be between 1 and 1000",
         ))
     }
+}
+
+/// マーカー方式のページ送りで、すべてのページの項目を取得する。
+///
+/// `fetch_page`には前のページの`next_marker`を渡す。最初のページでは`None`を渡す。
+/// 戻り値は、すべての項目と取得したページ数である。
+///
+/// # Errors
+///
+/// BOXが同じマーカーを返し続ける場合は、無限ループを避けるため[`BoxClientError::UnexpectedResponse`]を返す。
+/// `fetch_page`がエラーを返した場合は、取得済みの項目を破棄してそのエラーを返す。
+pub(crate) async fn collect_all_pages<F>(mut fetch_page: F) -> BoxClientResult<(Vec<BoxItem>, u32)>
+where
+    F: AsyncFnMut(Option<&str>) -> BoxClientResult<ItemsPage>,
+{
+    let mut items = Vec::new();
+    let mut marker: Option<String> = None;
+    let mut pages: u32 = 0;
+
+    loop {
+        let page = fetch_page(marker.as_deref()).await?;
+        pages += 1;
+        items.extend(page.entries);
+
+        // BOXは最終ページで`next_marker`をnullにするが、空文字列を返す場合もあるため、どちらも終端として扱う。
+        match page.next_marker {
+            Some(next) if !next.is_empty() => {
+                if marker.as_deref() == Some(next.as_str()) {
+                    return Err(BoxClientError::UnexpectedResponse(
+                        "next_marker did not advance",
+                    ));
+                }
+                marker = Some(next);
+            }
+            _ => break,
+        }
+    }
+
+    Ok((items, pages))
 }
 
 impl BoxClient {
@@ -186,6 +241,66 @@ impl BoxClient {
     pub async fn folder_information(&self, folder_id: &FolderId) -> BoxClientResult<Folder> {
         self.send_json(ApiRequest::get(["folders", folder_id.as_ref()]))
             .await
+    }
+
+    /// フォルダを削除する。
+    ///
+    /// BOXはフォルダをごみ箱に移動するか、完全に削除する。
+    /// BOXはデフォルトでゴミ箱が有効になっており、ゴミ箱が有効な場合、フォルダをゴミ箱に移動する。
+    /// ゴミ箱が無効な場合、ゴミ箱を経由せず、フォルダを完全かつ永久的に削除する。
+    ///
+    /// BOXは削除に600秒以上かかると503を返すが、削除処理はその後も継続する。
+    /// また、タイムアウトの後に再送すると、削除済みのフォルダに対して404を受け取る可能性がある。
+    /// したがって、HTTPメソッドがDELETEであっても冪等でないリクエストとして送信し、
+    /// 429および接続エラーの後にのみ再試行する。
+    ///
+    /// # Arguments
+    ///
+    /// - `folder_id`: 削除するフォルダのID
+    /// - `options`: 再帰的に削除するかどうか、およびETagのオプション
+    ///
+    /// # Errors
+    ///
+    /// ルートフォルダを指定した場合は、リクエストを送信せずに[`BoxClientError::InvalidArgument`]を返す。
+    /// `options.etag`に使用できない文字が含まれる場合は、リクエストを送信せずに
+    /// [`BoxClientError::InvalidHeaderValue`]を返す。
+    /// BOXがエラーレスポンスを返した場合は、[`BoxClientError::Api`]を返す。主なステータスは次のとおり。
+    ///
+    /// - 400: `options.recursive`が`false`で、フォルダが空でない。
+    /// - 403: フォルダを削除する権限がない、またはフォルダがロックされている。
+    /// - 404: フォルダが存在しない、またはフォルダにアクセスする権限がない。
+    /// - 409: 移動、コピーなど、他の操作がフォルダをロックしている。時間をおいて再度呼び出す。
+    /// - 412: `options.etag`がフォルダの現在のETagと一致しない。
+    /// - 503: 削除に600秒以上かかっている。削除処理は継続しているため、フォルダ情報を取得して結果を確認する。
+    pub async fn delete_folder(
+        &self,
+        folder_id: &FolderId,
+        options: &DeleteFolderOptions<'_>,
+    ) -> BoxClientResult<()> {
+        if folder_id.is_root() {
+            return Err(BoxClientError::InvalidArgument(
+                "the root folder cannot be deleted",
+            ));
+        }
+
+        let mut request = ApiRequest::delete(["folders", folder_id.as_ref()])
+            .idempotency(Idempotency::NonIdempotent);
+        if options.recursive {
+            request = request.query("recursive", "true");
+        }
+        if let Some(etag) = options.etag {
+            request = request.header(IF_MATCH, etag)?;
+        }
+
+        self.send_empty(request).await?;
+
+        tracing::info!(
+            folder_id = folder_id.as_ref(),
+            recursive = options.recursive,
+            "deleted folder"
+        );
+
+        Ok(())
     }
 
     /// フォルダ内の項目を1ページ分リストする。
@@ -254,30 +369,10 @@ impl BoxClient {
             limit: Some(options.limit.unwrap_or(MAX_ITEMS_LIMIT)),
             ..*options
         };
-        let mut items = Vec::new();
-        let mut marker: Option<String> = None;
-        let mut pages: u32 = 0;
-
-        loop {
-            let page = self
-                .list_items_in_folder(folder_id, marker.as_deref(), &options)
-                .await?;
-            pages += 1;
-            items.extend(page.entries);
-
-            // BOXは最終ページで`next_marker`をnullにするが、空文字列を返す場合もあるため、どちらも終端として扱う。
-            match page.next_marker {
-                Some(next) if !next.is_empty() => {
-                    if marker.as_deref() == Some(next.as_str()) {
-                        return Err(BoxClientError::UnexpectedResponse(
-                            "next_marker did not advance",
-                        ));
-                    }
-                    marker = Some(next);
-                }
-                _ => break,
-            }
-        }
+        let (items, pages) = collect_all_pages(async |marker| {
+            self.list_items_in_folder(folder_id, marker, &options).await
+        })
+        .await?;
 
         tracing::info!(
             folder_id = folder_id.as_ref(),
@@ -492,6 +587,171 @@ mod test_folder_information {
             matches!(&result, Err(BoxClientError::Api(e)) if e.status == 404),
             "result: {result:?}"
         );
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod test_delete_folder {
+    use rstest::rstest;
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{method, path},
+    };
+
+    use super::*;
+    use crate::test_support::{create_client, mount_token, request_count, short_retry};
+
+    /// フォルダのAPIのパス
+    const FOLDER_PATH: &str = "/2.0/folders/123";
+
+    /// フォルダのAPIへのリクエストのクエリ文字列とIf-Matchヘッダーを返す。
+    async fn delete_requests(server: &MockServer) -> Vec<(String, Option<String>)> {
+        server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|r| r.method.as_str() == "DELETE" && r.url.path() == FOLDER_PATH)
+            .map(|r| {
+                let query = r.url.query().unwrap_or_default().to_owned();
+                let if_match = r
+                    .headers
+                    .get("if-match")
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_owned);
+                (query, if_match)
+            })
+            .collect()
+    }
+
+    /// オプションに応じて、recursiveクエリパラメーターとIf-Matchヘッダーを送信することを確認
+    #[rstest]
+    #[case::default(DeleteFolderOptions::default(), "", None)]
+    #[case::recursive(
+        DeleteFolderOptions { recursive: true, etag: None },
+        "recursive=true",
+        None
+    )]
+    #[case::etag(
+        DeleteFolderOptions { recursive: false, etag: Some("1") },
+        "",
+        Some("1")
+    )]
+    #[case::recursive_and_etag(
+        DeleteFolderOptions { recursive: true, etag: Some("1") },
+        "recursive=true",
+        Some("1")
+    )]
+    #[tokio::test]
+    async fn test_delete_folder(
+        #[case] options: DeleteFolderOptions<'static>,
+        #[case] expected_query: &str,
+        #[case] expected_if_match: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        Mock::given(method("DELETE"))
+            .and(path(FOLDER_PATH))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+        let client = create_client(&server, short_retry(0)?).await?;
+
+        client
+            .delete_folder(&FolderId::new("123"), &options)
+            .await?;
+
+        assert_eq!(
+            delete_requests(&server).await,
+            vec![(
+                expected_query.to_owned(),
+                expected_if_match.map(str::to_owned)
+            )]
+        );
+
+        Ok(())
+    }
+
+    /// ルートフォルダを指定した場合は、リクエストを送信せずにエラーを返すことを確認
+    #[tokio::test]
+    async fn test_delete_folder_rejects_root() -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        let client = create_client(&server, short_retry(0)?).await?;
+        let requests_before = request_count(&server).await;
+
+        let result = client
+            .delete_folder(&FolderId::root(), &DeleteFolderOptions::default())
+            .await;
+
+        assert!(
+            matches!(result, Err(BoxClientError::InvalidArgument(_))),
+            "result: {result:?}"
+        );
+        assert_eq!(request_count(&server).await, requests_before);
+
+        Ok(())
+    }
+
+    /// BOXのエラーレスポンスを、再試行せずにそのまま返すことを確認
+    ///
+    /// 503は削除処理が継続していることを示すため、再試行の上限に余裕があっても再送しない。
+    #[rstest]
+    #[case::not_empty(400)]
+    #[case::not_found(404)]
+    #[case::locked(409)]
+    #[case::etag_mismatch(412)]
+    #[case::internal_server_error(500)]
+    #[case::still_deleting(503)]
+    #[tokio::test]
+    async fn test_delete_folder_error_is_not_retried(#[case] status: u16) -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        Mock::given(method("DELETE"))
+            .and(path(FOLDER_PATH))
+            .respond_with(ResponseTemplate::new(status))
+            .mount(&server)
+            .await;
+        let client = create_client(&server, short_retry(2)?).await?;
+
+        let result = client
+            .delete_folder(&FolderId::new("123"), &DeleteFolderOptions::default())
+            .await;
+
+        assert!(
+            matches!(&result, Err(BoxClientError::Api(e)) if e.status == status),
+            "result: {result:?}"
+        );
+        assert_eq!(delete_requests(&server).await.len(), 1);
+
+        Ok(())
+    }
+
+    /// 429の場合は、冪等でないリクエストとして送信しても再試行することを確認
+    #[tokio::test]
+    async fn test_delete_folder_retries_too_many_requests() -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        Mock::given(method("DELETE"))
+            .and(path(FOLDER_PATH))
+            .respond_with(ResponseTemplate::new(429))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path(FOLDER_PATH))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+        let client = create_client(&server, short_retry(1)?).await?;
+
+        client
+            .delete_folder(&FolderId::new("123"), &DeleteFolderOptions::default())
+            .await?;
+
+        assert_eq!(delete_requests(&server).await.len(), 2);
 
         Ok(())
     }

@@ -33,6 +33,11 @@ impl FolderId {
     pub fn root() -> Self {
         FolderId::new("0")
     }
+
+    /// ルートフォルダのIDであるかを返す。
+    pub fn is_root(&self) -> bool {
+        self.0 == "0"
+    }
 }
 
 /// フォルダ内の項目
@@ -122,6 +127,23 @@ pub enum ItemStatus {
     /// BOXが状態を追加しても、項目の情報の取得を失敗させないために受け入れる。
     #[serde(other)]
     Unknown,
+}
+
+#[cfg(test)]
+mod test_folder_id_is_root {
+    use rstest::rstest;
+
+    use super::*;
+
+    /// IDが0の場合だけルートフォルダと判定することを確認
+    #[rstest]
+    #[case::root("0", true)]
+    #[case::other("1", false)]
+    #[case::leading_zero("00", false)]
+    #[case::empty("", false)]
+    fn test_is_root(#[case] id: &str, #[case] expected: bool) {
+        assert_eq!(FolderId::new(id).is_root(), expected);
+    }
 }
 
 #[cfg(test)]

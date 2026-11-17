@@ -1,7 +1,10 @@
 use std::borrow::Cow;
 
 use bytes::Bytes;
-use reqwest::{Method, Url};
+use reqwest::{
+    Method, Url,
+    header::{AUTHORIZATION, HeaderName, HeaderValue},
+};
 use serde::Serialize;
 
 use crate::{
@@ -34,6 +37,9 @@ pub struct ApiRequest<'a> {
     /// クエリパラメーター
     query: Vec<(&'a str, Cow<'a, str>)>,
 
+    /// リクエストヘッダー
+    pub(crate) headers: Vec<(HeaderName, HeaderValue)>,
+
     /// JSONにシリアライズしたリクエストボディ
     ///
     /// 再試行のたびにシリアライズし直したり、ボディを複製したりしないように、参照カウントで共有する。
@@ -59,6 +65,7 @@ impl<'a> ApiRequest<'a> {
             method,
             path: path.into_iter().collect(),
             query: Vec::new(),
+            headers: Vec::new(),
             json_body: None,
             idempotency,
         }
@@ -88,6 +95,25 @@ impl<'a> ApiRequest<'a> {
     pub fn query(mut self, key: &'a str, value: impl Into<Cow<'a, str>>) -> Self {
         self.query.push((key, value.into()));
         self
+    }
+
+    /// リクエストヘッダーを追加する。
+    ///
+    /// # Errors
+    ///
+    /// `Authorization`ヘッダーを指定した場合は、[`BoxClientError::InvalidArgument`]を返す。
+    /// `Authorization`ヘッダーはクライアントがアクセストークンから設定するため、重複して送信しないように拒否する。
+    /// ヘッダーの値に制御文字など使用できない文字が含まれる場合は、
+    /// [`BoxClientError::InvalidHeaderValue`]を返す。
+    pub fn header(mut self, name: HeaderName, value: &str) -> BoxClientResult<Self> {
+        if name == AUTHORIZATION {
+            return Err(BoxClientError::InvalidArgument(
+                "authorization header is set by the client",
+            ));
+        }
+        let value = HeaderValue::from_str(value).map_err(BoxClientError::InvalidHeaderValue)?;
+        self.headers.push((name, value));
+        Ok(self)
     }
 
     /// リクエストボディをJSONにシリアライズして設定する。
@@ -240,6 +266,51 @@ mod test_api_request {
     )]
     fn test_idempotency(#[case] request: ApiRequest<'_>, #[case] expected: Idempotency) {
         assert_eq!(request.idempotency, expected);
+    }
+
+    /// リクエストヘッダーを追加した順に保持することを確認
+    #[test]
+    fn test_header() -> anyhow::Result<()> {
+        let request = ApiRequest::delete(["folders", "123"])
+            .header(reqwest::header::IF_MATCH, "1")?
+            .header(HeaderName::from_static("boxapi"), "shared_link=x")?;
+
+        assert_eq!(
+            request.headers,
+            vec![
+                (reqwest::header::IF_MATCH, HeaderValue::from_static("1")),
+                (
+                    HeaderName::from_static("boxapi"),
+                    HeaderValue::from_static("shared_link=x")
+                ),
+            ]
+        );
+
+        Ok(())
+    }
+
+    /// Authorizationヘッダーを指定した場合は、引数の不正エラーを返すことを確認
+    #[test]
+    fn test_header_rejects_authorization() {
+        let result = ApiRequest::get(["users"]).header(AUTHORIZATION, "Bearer other");
+
+        assert!(
+            matches!(result, Err(BoxClientError::InvalidArgument(_))),
+            "result: {result:?}"
+        );
+    }
+
+    /// ヘッダーの値に使用できない文字が含まれる場合は、ヘッダーの値の不正エラーを返すことを確認
+    #[rstest]
+    #[case::newline("1\r\nX-Injected: 1")]
+    #[case::null("1\0")]
+    fn test_header_invalid_value(#[case] value: &str) {
+        let result = ApiRequest::get(["users"]).header(reqwest::header::IF_MATCH, value);
+
+        assert!(
+            matches!(result, Err(BoxClientError::InvalidHeaderValue(_))),
+            "result: {result:?}"
+        );
     }
 
     /// リクエストボディをJSONにシリアライズして保持することを確認

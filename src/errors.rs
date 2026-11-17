@@ -36,6 +36,10 @@ pub enum BoxClientError {
     #[error("Invalid path segment: {0:?}")]
     InvalidPathSegment(String),
 
+    /// リクエストヘッダーの値の不正エラー
+    #[error("Invalid header value: {0}")]
+    InvalidHeaderValue(reqwest::header::InvalidHeaderValue),
+
     /// リクエストボディのシリアライズエラー
     #[error("Failed to serialize request body: {0}")]
     SerializeBody(serde_json::Error),

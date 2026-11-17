@@ -140,6 +140,9 @@ impl BoxClient {
                 .http_client
                 .request(request.method.clone(), url.clone())
                 .bearer_auth(token.secret());
+            for (name, value) in &request.headers {
+                builder = builder.header(name, value);
+            }
             if let Some(body) = &request.json_body {
                 builder = builder
                     .header(CONTENT_TYPE, HeaderValue::from_static("application/json"))
@@ -394,6 +397,27 @@ mod test_box_client {
         let value: serde_json::Value = client.send_json(request("GET")?).await?;
 
         assert_eq!(value, json!({"id": "1"}));
+
+        Ok(())
+    }
+
+    /// リクエストに追加したヘッダーを送信することを確認
+    #[tokio::test]
+    async fn test_send_with_header() -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        Mock::given(method("DELETE"))
+            .and(path(API_PATH))
+            .and(header("if-match", "1"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = create_client(&server, short_retry(0)?).await?;
+
+        client
+            .send_empty(request("DELETE")?.header(reqwest::header::IF_MATCH, "1")?)
+            .await?;
 
         Ok(())
     }

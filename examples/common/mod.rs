@@ -1,6 +1,9 @@
 use std::time::Duration;
 
-use box_client::{BoxClient, BoxClientTimeout, BoxConfig, RetryPolicy};
+use box_client::{
+    BoxClient, BoxClientTimeout, BoxConfig, BoxItem, RetryPolicy,
+    api::trash::ListTrashedItemsOptions,
+};
 
 /// Box設定ファイルのパス
 // cspell:disable-next-line
@@ -31,4 +34,29 @@ pub async fn setup() -> anyhow::Result<BoxClient> {
         .await?;
 
     Ok(client)
+}
+
+/// ゴミ箱内のすべての項目を表示する。
+#[allow(
+    dead_code,
+    reason = "サンプルごとに`common`モジュールをコンパイルするため、この関数を呼び出さないサンプルでは未使用になる"
+)]
+pub async fn list_trashed_items(client: &BoxClient) -> anyhow::Result<()> {
+    let items = client
+        .list_all_trashed_items(&ListTrashedItemsOptions::default())
+        .await?;
+    for item in &items {
+        match item {
+            BoxItem::File(file) => tracing::info!("file: id={}, name={}", file.id, file.name),
+            BoxItem::Folder(folder) => {
+                tracing::info!("folder: id={}, name={}", folder.id, folder.name)
+            }
+            BoxItem::WebLink(link) => {
+                tracing::info!("web_link: id={}, name={}", link.id, link.name)
+            }
+            BoxItem::Unknown => tracing::info!("unknown item"),
+        }
+    }
+
+    Ok(())
 }
