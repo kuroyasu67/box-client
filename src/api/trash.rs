@@ -3,7 +3,8 @@
 use serde::Serialize;
 
 use crate::{
-    BoxClient, BoxClientError, BoxClientResult, BoxItem, Folder, FolderId,
+    BoxClient, BoxClientError, BoxClientResult, BoxItem, FileId, Folder, FolderId,
+    api::files::File,
     api::folders::{ItemsPage, MAX_ITEMS_LIMIT, SortDirection, collect_all_pages, validate_limit},
     request::ApiRequest,
 };
@@ -102,6 +103,31 @@ impl BoxClient {
         }
 
         self.send_json(ApiRequest::get(["folders", folder_id.as_ref(), "trash"]))
+            .await
+    }
+
+    /// ゴミ箱内のファイルの情報を取得する。
+    ///
+    /// 取得できるのは、ゴミ箱に直接移動したファイルだけである。
+    /// フォルダをゴミ箱に移動すると、そのフォルダの子孫にあたるすべてのファイルもゴミ箱に入る。
+    /// ただし、子孫にあたるファイルはゴミ箱に直接移動したファイルではないため、そのファイルを指定するとBOXは404を返す。
+    /// 子孫にあたるファイルの状態を確認する場合は、そのファイルの祖先のうち、ゴミ箱に直接移動したフォルダの情報を
+    /// [`BoxClient::trashed_folder_information`]で取得する。
+    ///
+    /// # Arguments
+    ///
+    /// - `file_id`: 情報を取得するゴミ箱内のファイルのID
+    ///
+    /// # Errors
+    ///
+    /// BOXがエラーレスポンスを返した場合は、[`BoxClientError::Api`]を返す。主なステータスは次のとおり。
+    ///
+    /// - 404: ファイルがゴミ箱に直接移動されていない、ファイルが存在しない、
+    ///   またはファイルにアクセスする権限がない。
+    ///
+    /// 再試行できないエラーが発生した場合、または再試行回数の上限に達した場合はエラーを返す。
+    pub async fn trashed_file_information(&self, file_id: &FileId) -> BoxClientResult<File> {
+        self.send_json(ApiRequest::get(["files", file_id.as_ref(), "trash"]))
             .await
     }
 
@@ -334,6 +360,100 @@ mod test_trashed_folder_information {
         let result = client
             .trashed_folder_information(&FolderId::new("999"))
             .await;
+
+        assert!(
+            matches!(&result, Err(BoxClientError::Api(e)) if e.status == 404),
+            "result: {result:?}"
+        );
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod test_trashed_file_information {
+    use serde_json::json;
+    use time::macros::datetime;
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{method, path},
+    };
+
+    use super::*;
+    use crate::{
+        ItemStatus,
+        test_support::{create_client, mount_token, short_retry},
+    };
+
+    /// GET /files/{file_id}/trashを呼び出し、ゴミ箱に移動した日時と状態を含むファイル情報をデシリアライズすることを確認
+    #[tokio::test]
+    async fn test_trashed_file_information() -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        Mock::given(method("GET"))
+            .and(path("/2.0/files/12345/trash"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "type": "file",
+                "id": "12345",
+                "etag": "1",
+                "sequence_id": "3",
+                "name": "Contract.pdf",
+                "sha1": "85136c79cbf9fe36bb9d05d0639c70c265c18d37",
+                "size": 629_644,
+                // BOXはゴミ箱内のファイルのパスを、ETagおよびシーケンスIDがnullのゴミ箱フォルダで返す
+                "path_collection": {
+                    "total_count": 1,
+                    "entries": [
+                        {"type": "folder", "id": "1", "sequence_id": null, "etag": null, "name": "Trash"},
+                    ],
+                },
+                "trashed_at": "2012-12-12T10:53:43-08:00",
+                "purged_at": "2013-01-11T10:53:43-08:00",
+                "shared_link": null,
+                "parent": {"type": "folder", "id": "111", "sequence_id": "0", "etag": "0", "name": "Legal"},
+                "item_status": "trashed",
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = create_client(&server, short_retry(0)?).await?;
+
+        let file = client
+            .trashed_file_information(&FileId::new("12345"))
+            .await?;
+
+        assert_eq!(file.id, FileId::new("12345"));
+        assert_eq!(file.name, "Contract.pdf");
+        assert_eq!(file.trashed_at, Some(datetime!(2012-12-12 10:53:43 -08:00)));
+        assert_eq!(file.purged_at, Some(datetime!(2013-01-11 10:53:43 -08:00)));
+        assert_eq!(file.item_status, Some(ItemStatus::Trashed));
+        assert_eq!(
+            file.path_collection.map(|p| p.entries[0].etag.clone()),
+            Some(None)
+        );
+        assert_eq!(file.parent.map(|p| p.id), Some(FolderId::new("111")));
+
+        Ok(())
+    }
+
+    /// ファイルがゴミ箱に直接移動されていない場合は、BOXのエラーレスポンスを返すことを確認
+    #[tokio::test]
+    async fn test_trashed_file_information_not_found() -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        Mock::given(method("GET"))
+            .and(path("/2.0/files/999/trash"))
+            .respond_with(ResponseTemplate::new(404).set_body_json(json!({
+                "type": "error",
+                "status": 404,
+                "code": "not_found",
+                "message": "Not Found",
+            })))
+            .mount(&server)
+            .await;
+        let client = create_client(&server, short_retry(0)?).await?;
+
+        let result = client.trashed_file_information(&FileId::new("999")).await;
 
         assert!(
             matches!(&result, Err(BoxClientError::Api(e)) if e.status == 404),
