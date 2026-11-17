@@ -15,7 +15,18 @@ use crate::{
 /// BOXは、マーカー方式のページ送りで`sort`または`direction`クエリパラメーターを指定すると、
 /// 400（`invalid_parameter`）を返す。このクライアントは常にマーカー方式でページを送るため、
 /// 並び替えに使用する属性および並び替えの方向を指定できない。
+///
+/// 将来フィールドを追加しても利用者のコードが壊れないように、`#[non_exhaustive]`を付けている。
+/// そのため、クレートの外では構造体リテラルで作成できない。[`Default`]で作成し、`with_*`メソッドで値を設定する。
+///
+/// ```
+/// use box_client::ListTrashedItemsOptions;
+///
+/// let options = ListTrashedItemsOptions::default().with_limit(500);
+/// assert_eq!(options.limit, Some(500));
+/// ```
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ListTrashedItemsOptions {
     /// 1ページで取得する項目数の上限
     ///
@@ -27,7 +38,21 @@ pub struct ListTrashedItemsOptions {
 ///
 /// BOXはフォルダ、ファイルおよびWebリンクの復元で同じ形式のリクエストボディを受け付けるため、
 /// [`BoxClient::restore_folder`]、[`BoxClient::restore_file`]および[`BoxClient::restore_web_link`]で共有する。
+///
+/// 将来フィールドを追加しても利用者のコードが壊れないように、`#[non_exhaustive]`を付けている。
+/// そのため、クレートの外では構造体リテラルで作成できない。[`Default`]で作成し、`with_*`メソッドで値を設定する。
+///
+/// ```
+/// use box_client::{FolderId, RestoreItemOptions};
+///
+/// let parent_id = FolderId::new("123");
+/// let options = RestoreItemOptions::default()
+///     .with_name("restored.txt")
+///     .with_parent_id(&parent_id);
+/// assert_eq!(options.name, Some("restored.txt"));
+/// ```
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RestoreItemOptions<'a> {
     /// 復元後のフォルダ名、ファイル名またはWebリンク名
     ///
@@ -40,6 +65,33 @@ pub struct RestoreItemOptions<'a> {
     /// BOXは、元の親フォルダが存在しない場合にだけこのIDを使用する。
     /// 元の親フォルダが存在する場合は、このIDを指定しても元の親フォルダに復元する。
     pub parent_id: Option<&'a FolderId>,
+}
+
+impl ListTrashedItemsOptions {
+    /// 1ページで取得する項目数の上限を設定する。
+    ///
+    /// 1以上[`MAX_ITEMS_LIMIT`]以下を指定する。範囲外の値は、APIを呼び出したときにエラーになる。
+    #[must_use]
+    pub fn with_limit(mut self, limit: u32) -> Self {
+        self.limit = Some(limit);
+        self
+    }
+}
+
+impl<'a> RestoreItemOptions<'a> {
+    /// 復元後のフォルダ名、ファイル名またはWebリンク名を設定する。
+    #[must_use]
+    pub fn with_name(mut self, name: &'a str) -> Self {
+        self.name = Some(name);
+        self
+    }
+
+    /// 元の親フォルダが存在しない場合の復元先の親フォルダのIDを設定する。
+    #[must_use]
+    pub fn with_parent_id(mut self, parent_id: &'a FolderId) -> Self {
+        self.parent_id = Some(parent_id);
+        self
+    }
 }
 
 /// フォルダ、ファイルまたはWebリンクを復元するリクエストのボディ

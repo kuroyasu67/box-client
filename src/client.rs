@@ -305,7 +305,22 @@ impl BoxClientBuilder {
 }
 
 /// BOXクライアントのタイムアウト設定
+///
+/// 将来フィールドを追加しても利用者のコードが壊れないように、`#[non_exhaustive]`を付けている。
+/// そのため、クレートの外では構造体リテラルで作成できない。[`Default`]で作成し、`with_*`メソッドで値を設定する。
+///
+/// ```
+/// use std::time::Duration;
+///
+/// use box_client::BoxClientTimeout;
+///
+/// let timeout = BoxClientTimeout::default()
+///     .with_request_timeout(Duration::from_secs(60))
+///     .with_connect_timeout(Duration::from_secs(5));
+/// assert_eq!(timeout.request_timeout, Duration::from_secs(60));
+/// ```
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct BoxClientTimeout {
     /// 接続の開始からレスポンスボディの受信完了までのタイムアウト
     pub request_timeout: Duration,
@@ -321,6 +336,22 @@ impl Default for BoxClientTimeout {
             request_timeout: Duration::from_secs(30),
             connect_timeout: Duration::from_secs(10),
         }
+    }
+}
+
+impl BoxClientTimeout {
+    /// 接続の開始からレスポンスボディの受信完了までのタイムアウトを設定する。
+    #[must_use]
+    pub fn with_request_timeout(mut self, request_timeout: Duration) -> Self {
+        self.request_timeout = request_timeout;
+        self
+    }
+
+    /// 接続が確立するまでのタイムアウトを設定する。
+    #[must_use]
+    pub fn with_connect_timeout(mut self, connect_timeout: Duration) -> Self {
+        self.connect_timeout = connect_timeout;
+        self
     }
 }
 

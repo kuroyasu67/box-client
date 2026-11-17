@@ -150,7 +150,21 @@ impl SortDirection {
 }
 
 /// フォルダ内の項目をリストするときのオプション
+///
+/// 将来フィールドを追加しても利用者のコードが壊れないように、`#[non_exhaustive]`を付けている。
+/// そのため、クレートの外では構造体リテラルで作成できない。[`Default`]で作成し、`with_*`メソッドで値を設定する。
+///
+/// ```
+/// use box_client::{ItemSort, ListItemsOptions, SortDirection};
+///
+/// let options = ListItemsOptions::default()
+///     .with_limit(500)
+///     .with_sort(ItemSort::Name)
+///     .with_direction(SortDirection::Desc);
+/// assert_eq!(options.limit, Some(500));
+/// ```
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ListItemsOptions {
     /// 1ページで取得する項目数の上限
     ///
@@ -168,7 +182,20 @@ pub struct ListItemsOptions {
 }
 
 /// フォルダを削除するときのオプション
+///
+/// 将来フィールドを追加しても利用者のコードが壊れないように、`#[non_exhaustive]`を付けている。
+/// そのため、クレートの外では構造体リテラルで作成できない。[`Default`]で作成し、`with_*`メソッドで値を設定する。
+///
+/// ```
+/// use box_client::DeleteFolderOptions;
+///
+/// let options = DeleteFolderOptions::default()
+///     .with_recursive(true)
+///     .with_etag("1");
+/// assert!(options.recursive);
+/// ```
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct DeleteFolderOptions<'a> {
     /// 空でないフォルダを、フォルダ内のすべての項目とともに削除することを指示するフラグ
     ///
@@ -180,6 +207,49 @@ pub struct DeleteFolderOptions<'a> {
     /// 指定した場合は、`If-Match`ヘッダーで送信する。フォルダが`ETag`の取得後に変更されていると、
     /// BOXはフォルダを削除せずに412を返す。
     pub etag: Option<&'a str>,
+}
+
+impl ListItemsOptions {
+    /// 1ページで取得する項目数の上限を設定する。
+    ///
+    /// 1以上[`MAX_ITEMS_LIMIT`]以下を指定する。範囲外の値は、APIを呼び出したときにエラーになる。
+    #[must_use]
+    pub fn with_limit(mut self, limit: u32) -> Self {
+        self.limit = Some(limit);
+        self
+    }
+
+    /// 並び替えに使用する属性を設定する。
+    ///
+    /// ルートフォルダでは指定できない。指定した場合は、APIを呼び出したときにエラーになる。
+    #[must_use]
+    pub fn with_sort(mut self, sort: ItemSort) -> Self {
+        self.sort = Some(sort);
+        self
+    }
+
+    /// 並び替えの方向を設定する。
+    #[must_use]
+    pub fn with_direction(mut self, direction: SortDirection) -> Self {
+        self.direction = Some(direction);
+        self
+    }
+}
+
+impl<'a> DeleteFolderOptions<'a> {
+    /// 空でないフォルダを、フォルダ内のすべての項目とともに削除するかどうかを設定する。
+    #[must_use]
+    pub fn with_recursive(mut self, recursive: bool) -> Self {
+        self.recursive = recursive;
+        self
+    }
+
+    /// 最後に取得したフォルダの`ETag`を設定する。
+    #[must_use]
+    pub fn with_etag(mut self, etag: &'a str) -> Self {
+        self.etag = Some(etag);
+        self
+    }
 }
 
 /// 1ページで取得する項目数の上限が、BOXが受け付ける範囲内であることを検証する。

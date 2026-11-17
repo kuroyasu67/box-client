@@ -302,10 +302,11 @@ let client = BoxClient::builder(config)
         Duration::from_secs(10),
         Duration::from_millis(500),
     )?)
-    .timeout(BoxClientTimeout {
-        request_timeout: Duration::from_secs(30),
-        connect_timeout: Duration::from_secs(10),
-    })
+    .timeout(
+        BoxClientTimeout::default()
+            .with_request_timeout(Duration::from_secs(30))
+            .with_connect_timeout(Duration::from_secs(10)),
+    )
     .build()
     .await?;
 ```

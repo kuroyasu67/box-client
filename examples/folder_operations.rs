@@ -34,10 +34,7 @@ async fn main() -> anyhow::Result<()> {
         }
 
         // フォルダを削除
-        let delete_options = DeleteFolderOptions {
-            recursive: true,
-            etag: None,
-        };
+        let delete_options = DeleteFolderOptions::default().with_recursive(true);
         match client.delete_folder(&folder_id, &delete_options).await {
             Ok(()) => tracing::info!("folder was deleted successfully"),
             Err(e) => anyhow::bail!(e),
