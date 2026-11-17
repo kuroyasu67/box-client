@@ -294,7 +294,7 @@ where
         let attempts = number_of_retries + 1;
         let (error, retry_after) = match attempt().await {
             Ok(value) => {
-                tracing::info!(
+                tracing::debug!(
                     operation,
                     attempts,
                     elapsed_ms = started_at.elapsed().as_millis(),

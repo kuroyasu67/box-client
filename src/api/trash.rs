@@ -264,7 +264,7 @@ impl BoxClient {
             .json(&RestoreItemBody::from(options))?;
         let folder: Folder = self.send_json(request).await?;
 
-        tracing::info!(
+        tracing::debug!(
             folder_id = folder_id.as_ref(),
             parent_id = folder.parent.as_ref().map(|p| p.id.as_ref()),
             "restored folder"
@@ -312,7 +312,7 @@ impl BoxClient {
             ApiRequest::post(["files", file_id.as_ref()]).json(&RestoreItemBody::from(options))?;
         let file: File = self.send_json(request).await?;
 
-        tracing::info!(
+        tracing::debug!(
             file_id = file_id.as_ref(),
             parent_id = file.parent.as_ref().map(|p| p.id.as_ref()),
             "restored file"
@@ -359,7 +359,7 @@ impl BoxClient {
             .json(&RestoreItemBody::from(options))?;
         let web_link: WebLink = self.send_json(request).await?;
 
-        tracing::info!(
+        tracing::debug!(
             web_link_id = web_link_id.as_ref(),
             parent_id = web_link.parent.as_ref().map(|p| p.id.as_ref()),
             "restored web link"
@@ -429,7 +429,7 @@ impl BoxClient {
             collect_all_pages(async |marker| self.list_trashed_items(marker, &options).await)
                 .await?;
 
-        tracing::info!(pages, items = items.len(), "listed all trashed items");
+        tracing::debug!(pages, items = items.len(), "listed all trashed items");
 
         Ok(items)
     }

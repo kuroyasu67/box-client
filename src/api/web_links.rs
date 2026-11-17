@@ -113,7 +113,7 @@ impl BoxClient {
 
         self.send_empty(request).await?;
 
-        tracing::info!(web_link_id = web_link_id.as_ref(), "deleted web link");
+        tracing::debug!(web_link_id = web_link_id.as_ref(), "deleted web link");
 
         Ok(())
     }

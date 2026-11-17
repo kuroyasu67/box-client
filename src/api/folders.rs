@@ -389,7 +389,7 @@ impl BoxClient {
 
         self.send_empty(request).await?;
 
-        tracing::info!(
+        tracing::debug!(
             folder_id = folder_id.as_ref(),
             recursive = options.recursive,
             "deleted folder"
@@ -477,7 +477,7 @@ impl BoxClient {
         })
         .await?;
 
-        tracing::info!(
+        tracing::debug!(
             folder_id = folder_id.as_ref(),
             pages,
             items = items.len(),

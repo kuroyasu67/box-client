@@ -314,13 +314,15 @@ let client = BoxClient::builder(config)
 ### ログ
 
 再試行に関するイベントは、`tracing`で構造化ログとして出力する。
+ライブラリが利用者のアプリケーションのログを埋めないように、成功を知らせるイベントはDEBUGで出力し、利用者が対処を検討すべきイベントだけをWARNまたはERRORで出力する。
+フォルダの削除やゴミ箱からの復元など、各APIの処理が完了したことを知らせるイベントも、DEBUGで出力する。
 401を受け取ったとき、およびアクセストークンのバックグラウンドでの取得に失敗したときのイベントを除き、各イベントは処理名`operation`および試行回数`attempts`を含む。
 `operation`は、REST APIへのリクエストでは`box_api_request`、アクセストークンの取得では`fetch_access_token`である。
 `retrying`以外のイベントは、最初のリクエストからの経過時間`elapsed_ms`も含む。
 
 | レベル | メッセージ | 出力する場面 |
 | --- | --- | --- |
-| INFO | `succeeded` | リクエストが成功した。 |
+| DEBUG | `succeeded` | リクエストが成功した。 |
 | WARN | `retrying` | 再試行する。待機時間`delay_ms`と、待機時間を決めた方法`delay_source`を含む。`delay_source`は`retry_after`または`backoff`である。 |
 | WARN | `access token was rejected; fetching a new one and resending` | 401を受け取り、アクセストークンを取得し直して再送する。 |
 | WARN | `failed to refresh access token in background; using the cached token until it expires` | `BoxClient`が、アクセストークンをバックグラウンドで取得できなかった。`BoxClient`は、キャッシュしたアクセストークンを期限が切れるまで使用する。このイベントは、原因のエラー`error`を含む。 |

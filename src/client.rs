@@ -129,6 +129,8 @@ impl BoxClient {
         Fut: Future<Output = Result<T, AttemptError>>,
     {
         let url = request.url(&self.api_base_url)?;
+        // 成功のイベントはDEBUGで出力するが、スパンはINFOのままにする。
+        // スパンをDEBUGにすると、INFOで記録する利用者のWARNおよびERRORのイベントから、メソッドとパスが失われるためである。
         let span = tracing::info_span!(
             "box_api_request",
             method = %request.method,

@@ -155,7 +155,7 @@ impl BoxClient {
 
         self.send_empty(request).await?;
 
-        tracing::info!(file_id = file_id.as_ref(), "deleted file");
+        tracing::debug!(file_id = file_id.as_ref(), "deleted file");
 
         Ok(())
     }
