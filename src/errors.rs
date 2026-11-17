@@ -106,6 +106,9 @@ pub enum BoxClientError {
     Api(Box<ApiError>),
 
     /// `Retry-After`ヘッダーが示す待機時間が上限を超えたエラー
+    ///
+    /// 呼び出し元がステータス、エラーコードおよびリクエストIDを調べられるように、
+    /// `Retry-After`ヘッダーを返したリクエストのエラーを原因として保持する。
     #[error("Retry-After {retry_after:?} exceeds max delay {max_delay:?}")]
     RetryAfterTooLong {
         /// `Retry-After`ヘッダーが示す待機時間
@@ -113,6 +116,12 @@ pub enum BoxClientError {
 
         /// 待機時間の上限
         max_delay: Duration,
+
+        /// `Retry-After`ヘッダーを返したリクエストのエラー
+        ///
+        /// エラー型が自身を含むため、ヒープに確保する。
+        #[source]
+        source: Box<BoxClientError>,
     },
 }
 

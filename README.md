@@ -257,6 +257,7 @@ Webリンクの削除で5xxを受け取った場合、またはタイムアウ�
   - `Retry-After`ヘッダーが示す秒数にジッターを加算した時間だけ待機する。
     BOXが指定した時刻より早く再試行しないように、ジッターは加算だけを行う。
   - `Retry-After`ヘッダーが示す秒数が待機時間の上限より大きい場合は、再試行を中止して`BoxClientError::RetryAfterTooLong`を返す。
+    `BoxClientError::RetryAfterTooLong`は、`Retry-After`ヘッダーを返したリクエストのエラーを`source()`で返すため、利用者はステータスやリクエストIDを調べられる。
   - `Retry-After`ヘッダーを秒数として解釈できない場合は、ヘッダーがない場合と同じく指数バックオフで待機する。
 - レスポンスに`Retry-After`ヘッダーがない場合
   - 指数バックオフで算出した時間にジッターを加算した時間だけ待機する。
@@ -322,7 +323,7 @@ let client = BoxClient::builder(config)
 | WARN | `failed to refresh access token in background; using the cached token until it expires` | `BoxClient`が、アクセストークンをバックグラウンドで取得できなかった。`BoxClient`は、キャッシュしたアクセストークンを期限が切れるまで使用する。このイベントは、原因のエラー`error`を含む。 |
 | ERROR | `failed with non-retryable error` | 再試行できないエラーが発生した。 |
 | ERROR | `failed after reaching max retries` | 再試行回数が上限に達した。 |
-| ERROR | `gave up retrying` | `Retry-After`ヘッダーが示す待機時間が上限を超えたため、再試行を中止した。 |
+| ERROR | `gave up retrying` | `Retry-After`ヘッダーが示す待機時間が上限を超えたため、再試行を中止した。`Retry-After`ヘッダーが示す待機時間`retry_after_ms`と、待機時間の上限`max_delay_ms`を含む。 |
 
 ### キャンセル
 

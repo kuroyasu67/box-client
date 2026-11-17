@@ -178,21 +178,16 @@ impl RetryPolicy {
     ///
     /// # Errors
     ///
-    /// `Retry-After`ヘッダーが示す待機時間が上限を超える場合は、
-    /// [`BoxClientError::RetryAfterTooLong`]を返す。
+    /// `Retry-After`ヘッダーが示す待機時間が上限を超える場合は、その待機時間を返す。
+    /// 呼び出し元は、再試行の原因となったエラーを含めて[`BoxClientError::RetryAfterTooLong`]を作成する。
     pub(crate) fn retry_delay<R: Rng + ?Sized>(
         &self,
         number_of_retries: u32,
         retry_after: Option<Duration>,
         rng: &mut R,
-    ) -> BoxClientResult<Duration> {
+    ) -> Result<Duration, Duration> {
         match retry_after {
-            Some(retry_after) if self.max_delay < retry_after => {
-                Err(BoxClientError::RetryAfterTooLong {
-                    retry_after,
-                    max_delay: self.max_delay,
-                })
-            }
+            Some(retry_after) if self.max_delay < retry_after => Err(retry_after),
             Some(retry_after) => Ok(retry_after.saturating_add(self.jitter(rng))),
             None => Ok(self.jittered_delay_duration(number_of_retries, rng)),
         }
@@ -336,16 +331,21 @@ where
         // したがって、待機時間の計算と待機を別の文に分け、`ThreadRng`を待機の前に破棄する。
         let delay = match policy.retry_delay(number_of_retries, retry_after, &mut rand::rng()) {
             Ok(delay) => delay,
-            Err(delay_error) => {
+            Err(retry_after) => {
                 tracing::error!(
                     operation,
                     attempts,
                     elapsed_ms = started_at.elapsed().as_millis(),
+                    retry_after_ms = retry_after.as_millis(),
+                    max_delay_ms = policy.max_delay().as_millis(),
                     error = &error as &(dyn std::error::Error + 'static),
-                    delay_error = &delay_error as &(dyn std::error::Error + 'static),
                     "gave up retrying"
                 );
-                return Err(delay_error);
+                return Err(BoxClientError::RetryAfterTooLong {
+                    retry_after,
+                    max_delay: policy.max_delay(),
+                    source: Box::new(error),
+                });
             }
         };
         tracing::warn!(
@@ -684,21 +684,18 @@ mod test_retry_policy {
     /// Retry-Afterヘッダーが示す待機時間の有無と上限に応じて、再試行前の待機時間を決定することを確認
     #[rstest]
     // Retry-Afterヘッダーがない場合は指数バックオフで待機する
-    #[case::backoff(None, Some(Duration::from_millis(500)))]
-    #[case::zero_retry_after(Some(Duration::ZERO), Some(Duration::ZERO))]
+    #[case::backoff(None, Ok(Duration::from_millis(500)))]
+    #[case::zero_retry_after(Some(Duration::ZERO), Ok(Duration::ZERO))]
     // Retry-Afterヘッダーが示す待機時間が上限と一致する
-    #[case::retry_after_equals_max_delay(
-        Some(Duration::from_secs(3)),
-        Some(Duration::from_secs(3))
-    )]
-    // Retry-Afterヘッダーが示す待機時間が上限を1ナノ秒超える
+    #[case::retry_after_equals_max_delay(Some(Duration::from_secs(3)), Ok(Duration::from_secs(3)))]
+    // Retry-Afterヘッダーが示す待機時間が上限を1ナノ秒超える場合は、その待機時間をエラーとして返す
     #[case::retry_after_exceeds_max_delay(
         Some(Duration::from_secs(3) + Duration::from_nanos(1)),
-        None
+        Err(Duration::from_secs(3) + Duration::from_nanos(1))
     )]
     fn test_retry_delay(
         #[case] retry_after: Option<Duration>,
-        #[case] expected: Option<Duration>,
+        #[case] expected: Result<Duration, Duration>,
     ) -> anyhow::Result<()> {
         let policy = RetryPolicy::new(
             5,
@@ -710,13 +707,7 @@ mod test_retry_policy {
 
         let result = policy.retry_delay(1, retry_after, &mut rng);
 
-        match expected {
-            Some(expected) => assert_eq!(result?, expected),
-            None => assert!(
-                matches!(result, Err(BoxClientError::RetryAfterTooLong { .. })),
-                "result: {result:?}"
-            ),
-        }
+        assert_eq!(result, expected);
 
         Ok(())
     }
@@ -731,7 +722,8 @@ mod test_retry_policy {
 
         let delays = (0..TRIALS)
             .map(|_| policy.retry_delay(1, Some(retry_after), &mut rng))
-            .collect::<BoxClientResult<HashSet<Duration>>>()?;
+            .collect::<Result<HashSet<Duration>, Duration>>()
+            .map_err(|d| anyhow::anyhow!("retry_after was rejected: {d:?}"))?;
 
         assert_eq!(
             delays,
@@ -966,8 +958,14 @@ mod test_run_with_retry {
         })
         .await;
 
+        // 呼び出し元が原因を調べられるように、Retry-Afterヘッダーを返したリクエストのエラーを保持する。
         assert!(
-            matches!(result, Err(BoxClientError::RetryAfterTooLong { .. })),
+            matches!(
+                &result,
+                Err(BoxClientError::RetryAfterTooLong { retry_after, source, .. })
+                    if *retry_after == Duration::from_secs(1)
+                        && matches!(**source, BoxClientError::InvalidRetryPolicy("dummy"))
+            ),
             "result: {result:?}"
         );
         assert_eq!(attempts.load(Ordering::SeqCst), 1);
