@@ -124,7 +124,7 @@ impl RetryPolicy {
     /// # Arguments
     ///
     /// - `number_of_retries`: 今回の再試行を含む再試行回数。`0`は最初のリクエストを表す。
-    pub fn delay_duration(&self, number_of_retries: u32) -> Duration {
+    pub(crate) fn delay_duration(&self, number_of_retries: u32) -> Duration {
         // 再試行でない場合は待機しない
         if number_of_retries < 1 {
             return Duration::ZERO;
@@ -143,7 +143,10 @@ impl RetryPolicy {
     ///
     /// - `number_of_retries`: 今回の再試行を含む再試行回数。`0`は最初のリクエストを表す。
     /// - `rng`: 乱数生成器。通常は`rand::rng()`を渡し、テストではシードを固定した乱数生成器を渡す。
-    pub fn jittered_delay_duration<R: Rng + ?Sized>(
+    ///
+    /// 引数の型が`rand`クレートのトレイトに依存するため、`rand`のメジャーバージョンを上げると、このメソッドのシグネチャが変わる。
+    /// したがって、このクレートの破壊的変更とならないように、このメソッドをクレートの外に公開しない。
+    pub(crate) fn jittered_delay_duration<R: Rng + ?Sized>(
         &self,
         number_of_retries: u32,
         rng: &mut R,
