@@ -61,6 +61,16 @@ pub struct BoxClient {
     token_manager: TokenManager,
 }
 
+impl std::fmt::Debug for BoxClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BoxClient")
+            .field("http_client", &self.http_client)
+            .field("api_base_url", &self.api_base_url.as_str())
+            .field("retry", &self.retry)
+            .finish_non_exhaustive()
+    }
+}
+
 impl BoxClient {
     /// BOXクライアントのビルダーを返す。
     ///
@@ -180,6 +190,7 @@ impl BoxClient {
 }
 
 /// BOXクライアントのビルダー
+#[derive(Debug)]
 pub struct BoxClientBuilder {
     /// BOX設定
     config: BoxConfig,
@@ -757,6 +768,33 @@ mod test_box_client {
         assert_eq!(
             server.received_requests().await.unwrap_or_default().len(),
             1
+        );
+
+        Ok(())
+    }
+
+    /// Debug出力にクライアントシークレット、秘密鍵、パスフレーズおよびアクセストークンを含めないことを確認
+    #[tokio::test]
+    async fn test_debug_does_not_expose_secrets() -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        let builder = format!("{:?}", BoxClient::builder(test_config()));
+        let client = format!("{:?}", create_client(&server, short_retry(0)?).await?);
+
+        for secret in [
+            "client-secret",
+            "test-passphrase",
+            "PRIVATE KEY",
+            "access-token",
+        ] {
+            assert!(!builder.contains(secret), "builder: {builder}");
+            assert!(!client.contains(secret), "client: {client}");
+        }
+        // シークレット以外の設定は出力し、デバッグに使えることも確かめる。
+        assert!(builder.contains("client-id"), "builder: {builder}");
+        assert!(
+            client.contains(&format!("\"{}/2.0\"", server.uri())),
+            "client: {client}"
         );
 
         Ok(())
