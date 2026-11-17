@@ -191,6 +191,19 @@ let client = BoxClient::builder(config)
     .await?;
 ```
 
+### BOXとの時刻のずれ
+
+`BoxClient`は、アクセストークンを取得するときに、署名したJWTアサーションをトークンエンドポイントに送信する。
+BOXは、JWTアサーションの有効期限（`exp`クレーム）を発行から60秒以内とするよう求めるため、`BoxClient`は有効期限を45秒後とする。
+システム時刻がBOXの時刻とずれていると、BOXは有効期限を理由に、エラーコードが`invalid_grant`の400を返してJWTアサーションを拒否する。
+
+この場合、`BoxClient`は、レスポンスの`Date`ヘッダーが示すBOXの時刻とシステム時刻の差を求め、有効期限をBOXの時刻に合わせたJWTアサーションを作り直して、1回だけ再送する。
+BOXはリクエストを処理せずに拒否しているため、この再送は再試行回数に数えない。
+`BoxClient`は、求めた時刻の差を以後のJWTアサーションにも使用する。
+
+BOXの公式ドキュメントはエラーの説明の文言を記載していないため、`BoxClient`は、BOXの旧版のPython SDKと同じく、エラーの説明に`exp`が含まれるかどうかで有効期限による拒否と判定する。
+時刻の差は秒単位で求めるため、システム時刻はNTPなどでBOXの時刻と同期しておくことが望ましい。
+
 ## 再試行の仕組み
 
 `BoxClient`は、BOXのREST APIおよびトークンエンドポイントへのリクエストが失敗すると、失敗の種類とリクエストの冪等性から再試行するかどうかを判定する。
@@ -322,7 +335,7 @@ let client = BoxClient::builder(config)
 再試行できないエラーは、再試行せずにそのまま呼び出し元に返すため、DEBUGで出力する。
 404のように呼び出し元が想定しているエラーもあるため、エラーを異常とみなすかどうかは呼び出し元が判断する。
 フォルダの削除やゴミ箱からの復元など、各APIの処理が完了したことを知らせるイベントも、DEBUGで出力する。
-401を受け取ったとき、およびアクセストークンのバックグラウンドでの取得に失敗したときのイベントを除き、各イベントは処理名`operation`および試行回数`attempts`を含む。
+401を受け取ったとき、JWTアサーションの有効期限を理由に拒否されたとき、およびアクセストークンのバックグラウンドでの取得に失敗したときのイベントを除き、各イベントは処理名`operation`および試行回数`attempts`を含む。
 `operation`は、REST APIへのリクエストでは`box_api_request`、アクセストークンの取得では`fetch_access_token`である。
 `retrying`以外のイベントは、最初のリクエストからの経過時間`elapsed_ms`も含む。
 
@@ -331,6 +344,7 @@ let client = BoxClient::builder(config)
 | DEBUG | `succeeded` | リクエストが成功した。 |
 | WARN | `retrying` | 再試行する。待機時間`delay_ms`と、待機時間を決めた方法`delay_source`を含む。`delay_source`は`retry_after`または`backoff`である。 |
 | WARN | `access token was rejected; fetching a new one and resending` | 401を受け取り、アクセストークンを取得し直して再送する。 |
+| WARN | `jwt assertion was rejected because of its expiration; adjusting to the box server time and resending` | JWTアサーションが有効期限を理由に拒否されたため、有効期限をBOXの時刻に合わせて再送する。BOXの時刻からシステム時刻を引いた秒数`clock_offset_secs`を含む。 |
 | WARN | `failed to refresh access token in background; using the cached token until it expires` | `BoxClient`が、アクセストークンをバックグラウンドで取得できなかった。`BoxClient`は、キャッシュしたアクセストークンを期限が切れるまで使用する。このイベントは、原因のエラー`error`と、次にバックグラウンドで取得し直すまでの間隔`retry_interval_ms`を含む。 |
 | DEBUG | `failed with non-retryable error` | 再試行できないエラーが発生した。 |
 | ERROR | `failed after reaching max retries` | 再試行回数が上限に達した。 |

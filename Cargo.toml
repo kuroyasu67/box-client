@@ -6,6 +6,7 @@ version = "0.1.0"
 
 [dependencies]
 bytes = "1.12.1"
+httpdate = "1.0.3"
 jsonwebtoken = { version = "12.0.0", features = ["aws_lc_rs"] }
 pkcs8 = { version = "0.11.0", features = [
   "encryption",

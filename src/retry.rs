@@ -443,6 +443,12 @@ pub(crate) async fn classify_error_response(
     response: Response,
     idempotency: Idempotency,
 ) -> AttemptError {
+    let (api_error, retry_after) = read_error_response(response).await;
+    classify_api_error(api_error, retry_after, idempotency)
+}
+
+/// 成功以外のレスポンスのボディを読み込み、BOXのエラーレスポンスと`Retry-After`ヘッダーが示す待機時間を返す。
+pub(crate) async fn read_error_response(response: Response) -> (ApiError, Option<Duration>) {
     let status = response.status();
     let retry_after = parse_retry_after(response.headers());
     // ボディは原因を調べるための補助情報であるため、読み込めない場合は読み込めなかった理由をボディの代わりに記録する。
@@ -450,8 +456,18 @@ pub(crate) async fn classify_error_response(
         .text()
         .await
         .unwrap_or_else(|e| format!("<failed to read response body: {e}>"));
-    let api_error = ApiError::new(status, body);
-    let retryable = is_retryable_error_response(status, api_error.code.as_deref(), idempotency);
+
+    (ApiError::new(status, body), retry_after)
+}
+
+/// BOXのエラーレスポンスを、再試行できるエラーと再試行できないエラーに分類する。
+pub(crate) fn classify_api_error(
+    api_error: ApiError,
+    retry_after: Option<Duration>,
+    idempotency: Idempotency,
+) -> AttemptError {
+    let retryable =
+        is_retryable_error_response(api_error.status, api_error.code.as_deref(), idempotency);
     let error = BoxClientError::Api(Box::new(api_error));
     if retryable {
         AttemptError::Retryable { error, retry_after }

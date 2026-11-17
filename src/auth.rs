@@ -1,10 +1,14 @@
 use std::{
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicI64, Ordering},
+    },
     time::{Duration, Instant, SystemTime},
 };
 
 use jsonwebtoken::{Algorithm, EncodingKey, Header};
 use pkcs8::{DecodePrivateKey as _, EncodePrivateKey as _, LineEnding, PrivateKeyInfoOwned};
+use reqwest::{StatusCode, header::DATE};
 use secrecy::{ExposeSecret as _, SecretString};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, OwnedMutexGuard, RwLock};
@@ -14,10 +18,10 @@ use uuid::Uuid;
 use crate::{
     assertion_claims::AssertionClaims,
     config::BoxConfig,
-    errors::{BoxClientError, BoxClientResult},
+    errors::{ApiError, BoxClientError, BoxClientResult},
     retry::{
-        AttemptError, Idempotency, RetryPolicy, classify_error_response, classify_transport_error,
-        read_json, run_with_retry,
+        AttemptError, Idempotency, RetryPolicy, classify_api_error, classify_transport_error,
+        read_error_response, read_json, run_with_retry,
     },
 };
 
@@ -127,13 +131,18 @@ impl AssertionSigner {
     ///
     /// BOXは使用済みの`jti`を持つJWTアサーションを拒否するため、呼び出すたびに新しい`jti`と有効期限を設定する。
     ///
+    /// # Arguments
+    ///
+    /// - `clock_offset_secs`: BOXの時刻からシステム時刻を引いた秒数。有効期限をBOXの時刻に合わせるために使用する。
+    ///
     /// # Errors
     ///
     /// システム時刻を取得できない場合、または署名できない場合はエラーを返す。
-    fn sign(&self) -> BoxClientResult<String> {
+    fn sign(&self, clock_offset_secs: i64) -> BoxClientResult<String> {
         let now = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)?
-            .as_secs();
+            .as_secs()
+            .saturating_add_signed(clock_offset_secs);
         let mut jti_buffer = Uuid::encode_buffer();
         let jti = Uuid::new_v4().hyphenated().encode_lower(&mut jti_buffer);
         let claims = AssertionClaims {
@@ -231,6 +240,12 @@ pub(crate) struct TokenManager {
     ///
     /// `refresh_before_expiry`から決める。テストで変更できるように、フィールドで保持する。
     refresh_interval_after_failure: Duration,
+
+    /// BOXの時刻からシステム時刻を引いた秒数
+    ///
+    /// BOXがJWTアサーションの有効期限を理由に拒否したときに、レスポンスの`Date`ヘッダーから求める。
+    /// 一度求めた値は、以後に作成するJWTアサーションの有効期限にも使用する。
+    clock_offset_secs: AtomicI64,
 }
 
 impl TokenManager {
@@ -268,6 +283,7 @@ impl TokenManager {
             cache: RwLock::new(None),
             refresh_lock: Arc::new(Mutex::new(None)),
             refresh_interval_after_failure: refresh_interval_after_failure(refresh_before_expiry),
+            clock_offset_secs: AtomicI64::new(0),
         })
     }
 
@@ -409,26 +425,57 @@ impl TokenManager {
     }
 
     /// トークンエンドポイントにリクエストを1回送信して、アクセストークンを取得する。
+    ///
+    /// システム時刻がBOXの時刻とずれていると、BOXはJWTアサーションの有効期限を理由にリクエストを拒否する。
+    /// この場合は、レスポンスの`Date`ヘッダーが示すBOXの時刻に有効期限を合わせて、JWTアサーションを作り直して1回だけ再送する。
+    /// BOXはリクエストを処理せずに拒否しているため、この再送は再試行回数に数えない。
     async fn request_access_token(&self) -> Result<AccessToken, AttemptError> {
         // アクセストークンを二重に発行しても害はなく、JWTアサーションも試行ごとに作り直すため、冪等なリクエストとして再試行する。
         let idempotency = Idempotency::Idempotent;
-        let assertion = self.assertion_signer.sign().map_err(AttemptError::Fatal)?;
-        let request = TokenRequest {
-            grant_type: JWT_BEARER_GRANT_TYPE,
-            assertion: &assertion,
-            client_id: &self.assertion_signer.client_id,
-            client_secret: self.client_secret.expose_secret(),
+        let mut clock_adjusted = false;
+        let response = loop {
+            let assertion = self
+                .assertion_signer
+                .sign(self.clock_offset_secs.load(Ordering::Relaxed))
+                .map_err(AttemptError::Fatal)?;
+            let request = TokenRequest {
+                grant_type: JWT_BEARER_GRANT_TYPE,
+                assertion: &assertion,
+                client_id: &self.assertion_signer.client_id,
+                client_secret: self.client_secret.expose_secret(),
+            };
+            let response = self
+                .http_client
+                .post(&self.token_url)
+                .form(&request)
+                .send()
+                .await
+                .map_err(|e| classify_transport_error(e, idempotency))?;
+            if response.status().is_success() {
+                break response;
+            }
+
+            let box_time = response
+                .headers()
+                .get(DATE)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| httpdate::parse_http_date(value).ok());
+            let (api_error, retry_after) = read_error_response(response).await;
+            if !clock_adjusted
+                && is_assertion_expiration_rejected(&api_error)
+                && let Some(box_time) = box_time
+            {
+                let offset = clock_offset_secs(box_time, SystemTime::now());
+                self.clock_offset_secs.store(offset, Ordering::Relaxed);
+                clock_adjusted = true;
+                tracing::warn!(
+                    clock_offset_secs = offset,
+                    "jwt assertion was rejected because of its expiration; adjusting to the box server time and resending"
+                );
+                continue;
+            }
+            return Err(classify_api_error(api_error, retry_after, idempotency));
         };
-        let response = self
-            .http_client
-            .post(&self.token_url)
-            .form(&request)
-            .send()
-            .await
-            .map_err(|e| classify_transport_error(e, idempotency))?;
-        if !response.status().is_success() {
-            return Err(classify_error_response(response, idempotency).await);
-        }
 
         let body: TokenResponse = read_json(response, idempotency).await?;
         let now = Instant::now();
@@ -441,6 +488,30 @@ impl TokenManager {
             token: body.access_token,
             expires_at,
         })
+    }
+}
+
+/// BOXがJWTアサーションの有効期限（`exp`クレーム）を理由にトークンリクエストを拒否したかどうかを返す。
+///
+/// BOXは、エラーコード`invalid_grant`の400を返し、エラーの説明で`exp`クレームに言及する。
+/// 公式ドキュメントはエラーの説明の文言を記載していないため、BOXの旧版のPython SDKと同じく、
+/// エラーの説明に`exp`が含まれるかどうかで判定する。
+fn is_assertion_expiration_rejected(api_error: &ApiError) -> bool {
+    api_error.status == StatusCode::BAD_REQUEST
+        && api_error.code.as_deref() == Some("invalid_grant")
+        && api_error
+            .message
+            .as_deref()
+            .is_some_and(|message| message.contains("exp"))
+}
+
+/// BOXの時刻からシステム時刻を引いた秒数を返す。
+///
+/// `Date`ヘッダーの精度は1秒であるため、1秒未満は切り捨てる。
+fn clock_offset_secs(box_time: SystemTime, local_time: SystemTime) -> i64 {
+    match box_time.duration_since(local_time) {
+        Ok(ahead) => i64::try_from(ahead.as_secs()).unwrap_or(i64::MAX),
+        Err(behind) => i64::try_from(behind.duration().as_secs()).map_or(i64::MIN, |secs| -secs),
     }
 }
 
@@ -491,7 +562,7 @@ mod test_assertion_signer {
             .duration_since(SystemTime::UNIX_EPOCH)?
             .as_secs();
 
-        let assertion = assertion_signer.sign()?;
+        let assertion = assertion_signer.sign(0)?;
 
         let mut validation = Validation::new(Algorithm::RS512);
         validation.set_audience(&[AUDIENCE]);
@@ -514,6 +585,31 @@ mod test_assertion_signer {
         Ok(())
     }
 
+    /// BOXとの時刻差だけずらした有効期限を設定することを確認
+    #[rstest::rstest]
+    #[case::box_ahead(120)]
+    #[case::box_behind(-120)]
+    fn test_sign_applies_clock_offset(#[case] clock_offset_secs: i64) -> anyhow::Result<()> {
+        let assertion_signer = AssertionSigner::new(&test_config(), AUDIENCE)?;
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)?
+            .as_secs();
+
+        let assertion = assertion_signer.sign(clock_offset_secs)?;
+
+        let claims: serde_json::Value =
+            jsonwebtoken::dangerous::insecure_decode(&assertion)?.claims;
+        let exp = claims["exp"].as_u64().unwrap_or_default();
+        let expected = now.saturating_add_signed(clock_offset_secs) + ASSERTION_LIFETIME_SECS;
+        // 署名の前後で秒が変わる場合があるため、1秒の幅を許容する。
+        assert!(
+            (expected..=expected + 1).contains(&exp),
+            "exp: {exp}, expected: {expected}"
+        );
+
+        Ok(())
+    }
+
     /// 署名するたびに異なるjtiを設定することを確認
     #[test]
     fn test_sign_unique_jti() -> anyhow::Result<()> {
@@ -521,7 +617,7 @@ mod test_assertion_signer {
 
         let jtis = (0..3)
             .map(|_| {
-                let assertion = assertion_signer.sign()?;
+                let assertion = assertion_signer.sign(0)?;
                 let claims: serde_json::Value =
                     jsonwebtoken::dangerous::insecure_decode(&assertion)?.claims;
                 Ok(claims["jti"].as_str().unwrap_or_default().to_owned())
@@ -598,6 +694,50 @@ mod test_is_expired {
             is_expired(base + until_expiration, base + since_now),
             expected
         );
+    }
+}
+
+#[cfg(test)]
+mod test_assertion_expiration {
+    use rstest::rstest;
+    use serde_json::json;
+
+    use super::*;
+
+    /// エラーコードが`invalid_grant`の400で、エラーの説明に`exp`が含まれる場合だけ、有効期限による拒否と判定することを確認
+    #[rstest]
+    #[case::exp(400, json!({"error": "invalid_grant", "error_description": "Please check the 'exp' claim."}), true)]
+    #[case::other_description(400, json!({"error": "invalid_grant", "error_description": "Invalid client credentials"}), false)]
+    #[case::other_code(400, json!({"error": "invalid_request", "error_description": "Please check the 'exp' claim."}), false)]
+    #[case::other_status(401, json!({"error": "invalid_grant", "error_description": "Please check the 'exp' claim."}), false)]
+    #[case::no_description(400, json!({"error": "invalid_grant"}), false)]
+    fn test_is_assertion_expiration_rejected(
+        #[case] status: u16,
+        #[case] body: serde_json::Value,
+        #[case] expected: bool,
+    ) -> anyhow::Result<()> {
+        let api_error = ApiError::new(StatusCode::from_u16(status)?, body.to_string());
+
+        assert_eq!(is_assertion_expiration_rejected(&api_error), expected);
+
+        Ok(())
+    }
+
+    /// BOXの時刻からシステム時刻を引いた秒数を、1秒未満を切り捨てて返すことを確認
+    #[rstest]
+    #[case::same(Duration::from_secs(1000), Duration::from_secs(1000), 0)]
+    #[case::box_ahead(Duration::from_secs(1120), Duration::from_secs(1000), 120)]
+    #[case::box_behind(Duration::from_secs(880), Duration::from_secs(1000), -120)]
+    #[case::sub_second(Duration::from_secs(1000), Duration::from_millis(1_000_500), 0)]
+    fn test_clock_offset_secs(
+        #[case] box_since_epoch: Duration,
+        #[case] local_since_epoch: Duration,
+        #[case] expected: i64,
+    ) {
+        let box_time = SystemTime::UNIX_EPOCH + box_since_epoch;
+        let local_time = SystemTime::UNIX_EPOCH + local_since_epoch;
+
+        assert_eq!(clock_offset_secs(box_time, local_time), expected);
     }
 }
 
@@ -1140,6 +1280,125 @@ mod test_token_manager {
             result.err()
         );
         assert_eq!(request_count(&server).await, 2);
+
+        Ok(())
+    }
+
+    /// トークンリクエストの本文からJWTアサーションの有効期限を取り出す。
+    fn assertion_exp(request: &wiremock::Request) -> anyhow::Result<u64> {
+        let body = String::from_utf8_lossy(&request.body);
+        let assertion = body
+            .split('&')
+            .find_map(|pair| pair.strip_prefix("assertion="))
+            .ok_or_else(|| anyhow::anyhow!("assertion was not found: {body}"))?;
+        let claims: serde_json::Value = jsonwebtoken::dangerous::insecure_decode(assertion)?.claims;
+        claims["exp"]
+            .as_u64()
+            .ok_or_else(|| anyhow::anyhow!("exp was not found: {claims}"))
+    }
+
+    /// JWTアサーションの有効期限を理由に拒否するトークンエンドポイントのレスポンスを返す。
+    fn expiration_rejected_response(box_time: SystemTime) -> ResponseTemplate {
+        ResponseTemplate::new(400)
+            .insert_header("date", httpdate::fmt_http_date(box_time))
+            .set_body_json(serde_json::json!({
+                "error": "invalid_grant",
+                "error_description": "Please check the 'exp' claim.",
+            }))
+    }
+
+    /// JWTアサーションの有効期限を理由に拒否された場合は、BOXの時刻に合わせて1回だけ再送し、
+    /// 以後のJWTアサーションにもBOXとの時刻差を使うことを確認
+    #[tokio::test]
+    async fn test_access_token_adjusts_clock_when_expiration_rejected() -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        // BOXの時刻がシステム時刻より2分進んでいる。
+        let box_time = SystemTime::now() + Duration::from_secs(120);
+        mount_first_n(&server, expiration_rejected_response(box_time), 1).await;
+        mount_always(&server, token_response()).await;
+        // 再試行回数を0にし、再送が再試行回数に含まれないことも確かめる。
+        let manager = create_manager(
+            &server,
+            Duration::from_secs(2),
+            short_retry(0)?,
+            REFRESH_BEFORE_EXPIRY,
+        )?;
+
+        manager.access_token().await?;
+
+        let requests = server.received_requests().await.unwrap_or_default();
+        assert_eq!(requests.len(), 2);
+        let box_secs = box_time.duration_since(SystemTime::UNIX_EPOCH)?.as_secs();
+        let expected = box_secs + ASSERTION_LIFETIME_SECS;
+        let exp = assertion_exp(&requests[1])?;
+        // `Date`ヘッダーの精度と、署名の前後で秒が変わる場合を考慮し、前後1秒の幅を許容する。
+        assert!(
+            (expected - 1..=expected + 1).contains(&exp),
+            "exp: {exp}, expected: {expected}"
+        );
+        // `Date`ヘッダーは1秒未満を切り捨て、時刻差も1秒未満を切り捨てるため、2分より最大2秒短くなりうる。
+        let offset = manager.clock_offset_secs.load(Ordering::Relaxed);
+        assert!((118..=120).contains(&offset), "offset: {offset}");
+
+        Ok(())
+    }
+
+    /// 時刻を合わせて再送しても有効期限を理由に拒否された場合は、それ以上再送せずにエラーを返すことを確認
+    #[tokio::test]
+    async fn test_access_token_adjusts_clock_only_once() -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_always(
+            &server,
+            expiration_rejected_response(SystemTime::now() + Duration::from_secs(120)),
+        )
+        .await;
+        let manager = create_manager(
+            &server,
+            Duration::from_secs(2),
+            short_retry(0)?,
+            REFRESH_BEFORE_EXPIRY,
+        )?;
+
+        let result = manager.access_token().await;
+
+        assert!(
+            matches!(&result, Err(BoxClientError::Api(e)) if e.status == StatusCode::BAD_REQUEST),
+            "result: {:?}",
+            result.err()
+        );
+        assert_eq!(request_count(&server).await, 2);
+
+        Ok(())
+    }
+
+    /// 有効期限以外の理由でJWTアサーションを拒否された場合は、再送せずにエラーを返すことを確認
+    #[tokio::test]
+    async fn test_access_token_does_not_resend_other_invalid_grant() -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_always(
+            &server,
+            ResponseTemplate::new(400).set_body_json(serde_json::json!({
+                "error": "invalid_grant",
+                "error_description": "Invalid client credentials",
+            })),
+        )
+        .await;
+        let manager = create_manager(
+            &server,
+            Duration::from_secs(2),
+            short_retry(2)?,
+            REFRESH_BEFORE_EXPIRY,
+        )?;
+
+        let result = manager.access_token().await;
+
+        assert!(
+            matches!(&result, Err(BoxClientError::Api(e)) if e.status == StatusCode::BAD_REQUEST),
+            "result: {:?}",
+            result.err()
+        );
+        assert_eq!(request_count(&server).await, 1);
+        assert_eq!(manager.clock_offset_secs.load(Ordering::Relaxed), 0);
 
         Ok(())
     }
