@@ -8,15 +8,15 @@ use garde::Validate;
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
-// ドキュメントのリンクとテストだけが参照する。
-#[cfg(any(doc, test))]
-use crate::BoxClientError;
 use crate::{
-    BoxClient, BoxClientResult, FolderId, FolderItem, Idempotency, ItemStatus,
+    BoxClient, BoxClientError, BoxClientResult, FolderId, FolderItem, Idempotency, ItemStatus,
     MAX_DESCRIPTION_CHARS, MoveDestination, PathCollection, UserMini, WebLinkId,
     api::types::{
-        MAX_NAME_CHARS, MoveBody, ParentFolder, RenameBody, SetDescriptionBody, UpdateItemOptions,
-        update_item_request, validate_optional_item_name, validated,
+        MAX_NAME_CHARS, MoveBody, MoveParent, ParentFolder, RenameBody, SetDescriptionBody,
+        UpdateItemOptions, update_item_request, validate_optional_item_name, validated,
+    },
+    api::updates::{
+        Nullable, NullableBody, SharedLinkBody, SharedLinkSettings, validate_common_attributes,
     },
     request::ApiRequest,
 };
@@ -197,6 +197,154 @@ impl<'a> UpdateWebLinkUrlBody<'a> {
     }
 }
 
+/// Webリンクの更新で変更する属性
+///
+/// `None`の属性は送信せず、BOXは変更しない。
+///
+/// 将来フィールドを追加しても利用者のコードが壊れないように、`#[non_exhaustive]`を付けている。
+/// そのため、クレートの外では構造体リテラルで作成できない。[`Default`]で作成し、`with_*`メソッドで値を設定する。
+///
+/// # Examples
+///
+/// ```
+/// use box_client::WebLinkUpdate;
+///
+/// let update = WebLinkUpdate::default()
+///     .with_url("https://example.com/new")
+///     .with_name("Example");
+/// assert_eq!(update.url, Some("https://example.com/new"));
+/// ```
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct WebLinkUpdate<'a> {
+    /// 新しいURL
+    ///
+    /// `http://`または`https://`で始まるURLを指定する。
+    pub url: Option<&'a str>,
+
+    /// 新しいWebリンク名
+    pub name: Option<&'a str>,
+
+    /// Webリンクの説明
+    ///
+    /// [`MAX_DESCRIPTION_CHARS`]文字以下で指定する。空文字列を指定すると、説明を削除する。
+    pub description: Option<&'a str>,
+
+    /// 移動先
+    pub parent: Option<&'a MoveDestination>,
+
+    /// 共有リンク
+    ///
+    /// [`Nullable::Value`]を指定すると、共有リンクを作成または更新する。
+    /// Webリンクの共有リンクでは、[`SharedLinkSettings::can_download`]を指定できない。
+    /// BOXのドキュメントは、Webリンクの更新で共有リンクにnullを指定した場合の動作を記載していないが、
+    /// ファイルおよびフォルダと同じく、[`Nullable::Null`]を指定するとnullを送信する。
+    pub shared_link: Option<Nullable<SharedLinkSettings<'a>>>,
+}
+
+impl<'a> WebLinkUpdate<'a> {
+    /// 新しいURLを設定する。
+    #[must_use]
+    pub fn with_url(mut self, url: &'a str) -> Self {
+        self.url = Some(url);
+        self
+    }
+
+    /// 新しいWebリンク名を設定する。
+    #[must_use]
+    pub fn with_name(mut self, name: &'a str) -> Self {
+        self.name = Some(name);
+        self
+    }
+
+    /// Webリンクの説明を設定する。
+    #[must_use]
+    pub fn with_description(mut self, description: &'a str) -> Self {
+        self.description = Some(description);
+        self
+    }
+
+    /// 移動先を設定する。
+    #[must_use]
+    pub fn with_parent(mut self, parent: &'a MoveDestination) -> Self {
+        self.parent = Some(parent);
+        self
+    }
+
+    /// 共有リンクを作成または更新する。
+    #[must_use]
+    pub fn with_shared_link(mut self, shared_link: SharedLinkSettings<'a>) -> Self {
+        self.shared_link = Some(Nullable::Value(shared_link));
+        self
+    }
+
+    /// 共有リンクを削除する。
+    #[must_use]
+    pub fn with_shared_link_removed(mut self) -> Self {
+        self.shared_link = Some(Nullable::Null);
+        self
+    }
+}
+
+/// Webリンクの更新リクエストのボディ
+///
+/// 共有リンクのパスワードを含みうるため、`Debug`を実装しない。
+#[derive(Serialize)]
+struct UpdateWebLinkBody<'a> {
+    /// 新しいURL
+    #[serde(skip_serializing_if = "Option::is_none")]
+    url: Option<&'a str>,
+
+    /// 新しいWebリンク名
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<&'a str>,
+
+    /// Webリンクの説明
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<&'a str>,
+
+    /// 移動先の親フォルダ
+    #[serde(skip_serializing_if = "Option::is_none")]
+    parent: Option<MoveParent<'a>>,
+
+    /// 共有リンク
+    #[serde(skip_serializing_if = "Option::is_none")]
+    shared_link: Option<NullableBody<SharedLinkBody<'a>>>,
+}
+
+impl<'a> UpdateWebLinkBody<'a> {
+    /// 変更する属性からボディを作成して検証する。
+    ///
+    /// # Errors
+    ///
+    /// 移動先のユーザーIDが空文字列の場合、または共有リンクで`can_download`を指定した場合は、
+    /// [`BoxClientError::InvalidArgument`]を返す。
+    /// URLまたはWebリンク名をBOXが拒否する場合、または説明が長すぎる場合は、[`BoxClientError::InvalidRequestBody`]を返す。
+    fn new(update: &WebLinkUpdate<'a>) -> BoxClientResult<Self> {
+        validate_common_attributes(update.name, update.description, None)?;
+        if let Some(url) = update.url {
+            UpdateWebLinkUrlBody::new(url)?;
+        }
+        if let Some(Nullable::Value(shared_link)) = update.shared_link
+            && shared_link.can_download.is_some()
+        {
+            return Err(BoxClientError::InvalidArgument(
+                "can_download cannot be set on the shared link of a web link",
+            ));
+        }
+
+        Ok(Self {
+            url: update.url,
+            name: update.name,
+            description: update.description,
+            parent: update.parent.map(MoveParent::new).transpose()?,
+            shared_link: update
+                .shared_link
+                .map(|shared_link| shared_link.to_body(SharedLinkBody::new)),
+        })
+    }
+}
+
 impl BoxClient {
     /// Webリンク情報を取得する。
     ///
@@ -252,6 +400,53 @@ impl BoxClient {
             parent_id = parent_id.as_ref(),
             "created web link"
         );
+
+        Ok(web_link)
+    }
+
+    /// Webリンクの情報を更新する。
+    ///
+    /// BOXのWebリンクの更新API（`PUT /web_links/{web_link_id}`）が受け付けるすべての属性を、`update`で指定できる。
+    /// `update`で指定した属性だけを送信し、BOXは指定しない属性を変更しない。
+    /// 名前の変更、説明の設定、移動またはURLの変更だけを行う場合は、[`BoxClient::rename_web_link`]、
+    /// [`BoxClient::set_web_link_description`]、[`BoxClient::move_web_link`]または
+    /// [`BoxClient::update_web_link_url`]も使用できる。
+    ///
+    /// [`BoxClient::rename_web_link`]と同様に、HTTPメソッドがPUTであっても冪等でないリクエストとして送信する。
+    ///
+    /// # Arguments
+    ///
+    /// - `web_link_id`: 更新するWebリンクのID
+    /// - `update`: 変更する属性
+    /// - `options`: `ETag`のオプション
+    ///
+    /// # Errors
+    ///
+    /// `update.parent`のユーザーIDが空文字列の場合、または共有リンクで[`SharedLinkSettings::can_download`]を指定した場合は、
+    /// リクエストを送信せずに[`BoxClientError::InvalidArgument`]を返す。
+    /// URLを解釈できない場合、URLが`http://`もしくは`https://`で始まらない場合、Webリンク名をBOXが拒否する場合、
+    /// または説明が[`MAX_DESCRIPTION_CHARS`]文字より長い場合は、
+    /// リクエストを送信せずに[`BoxClientError::InvalidRequestBody`]を返す。
+    /// `options.etag`に使用できない文字が含まれる場合は、リクエストを送信せずに
+    /// [`BoxClientError::InvalidHeaderValue`]を返す。
+    /// BOXがエラーレスポンスを返した場合は、[`BoxClientError::Api`]を返す。
+    /// 公式ドキュメントは、このAPIが返すエラーのステータスを個別に記載していない。
+    ///
+    /// 再試行できないエラーが発生した場合、または再試行回数の上限に達した場合はエラーを返す。
+    /// 5xxまたはタイムアウトでエラーを返した場合は、BOXがWebリンクを更新した可能性がある。
+    /// したがって、[`BoxClient::web_link_information`]でWebリンクの状態を確認する。
+    pub async fn update_web_link(
+        &self,
+        web_link_id: &WebLinkId,
+        update: &WebLinkUpdate<'_>,
+        options: &UpdateItemOptions<'_>,
+    ) -> BoxClientResult<WebLink> {
+        let body = UpdateWebLinkBody::new(update)?;
+        let request = update_item_request("web_links", web_link_id.as_ref(), &body, options.etag)?;
+
+        let web_link = self.send_json(request).await?;
+
+        tracing::debug!(web_link_id = web_link_id.as_ref(), "updated web link");
 
         Ok(web_link)
     }
@@ -992,5 +1187,130 @@ mod test_delete_web_link {
         .await?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod test_update_web_link_attributes {
+    use serde_json::json;
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{body_json, method, path},
+    };
+
+    use super::*;
+    use crate::{
+        SharedLinkAccess,
+        test_support::{
+            assert_not_retried, create_client, is_invalid_argument, is_invalid_request_body,
+            mount_token, request_count, short_retry,
+        },
+    };
+
+    /// WebリンクのAPIのパス
+    const WEB_LINK_PATH: &str = "/2.0/web_links/123";
+
+    /// 期待するエラーであるかを判定する関数
+    type IsExpectedError = fn(&BoxClientError) -> bool;
+
+    /// 指定したすべての属性を送信することを確認
+    #[tokio::test]
+    async fn test_sends_all_attributes() -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        Mock::given(method("PUT"))
+            .and(path(WEB_LINK_PATH))
+            .and(body_json(json!({
+                "url": "https://example.com/new",
+                "name": "Example",
+                "description": "Example site",
+                "parent": {"id": "456"},
+                "shared_link": {"access": "open", "password": "Secret-Passw0rd", "vanity_name": "example-vanity"},
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "type": "web_link",
+                "id": "123",
+                "name": "Example",
+                "url": "https://example.com/new",
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = create_client(&server, short_retry(0)?).await?;
+        let destination = MoveDestination::Folder(FolderId::new("456"));
+        let update = WebLinkUpdate::default()
+            .with_url("https://example.com/new")
+            .with_name("Example")
+            .with_description("Example site")
+            .with_parent(&destination)
+            .with_shared_link(
+                SharedLinkSettings::default()
+                    .with_access(SharedLinkAccess::Open)
+                    .with_password("Secret-Passw0rd")
+                    .with_vanity_name("example-vanity"),
+            );
+
+        let web_link = client
+            .update_web_link(
+                &WebLinkId::new("123"),
+                &update,
+                &UpdateItemOptions::default(),
+            )
+            .await?;
+
+        assert_eq!(web_link.url.as_deref(), Some("https://example.com/new"));
+
+        Ok(())
+    }
+
+    /// BOXが拒否する更新は、リクエストを送信せずにエラーを返すことを確認
+    #[tokio::test]
+    async fn test_rejects_invalid_update() -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        let client = create_client(&server, short_retry(0)?).await?;
+        let requests_before = request_count(&server).await;
+        let web_link_id = WebLinkId::new("123");
+        let options = UpdateItemOptions::default();
+
+        let cases: [(WebLinkUpdate<'_>, IsExpectedError); 2] = [
+            (
+                WebLinkUpdate::default()
+                    .with_shared_link(SharedLinkSettings::default().with_can_download(true)),
+                is_invalid_argument,
+            ),
+            (
+                WebLinkUpdate::default().with_url("ftp://example.com"),
+                is_invalid_request_body,
+            ),
+        ];
+        for (update, is_expected) in cases {
+            let result = client
+                .update_web_link(&web_link_id, &update, &options)
+                .await;
+
+            assert!(
+                result.as_ref().is_err_and(is_expected),
+                "update: {update:?}, result: {result:?}"
+            );
+        }
+        assert_eq!(request_count(&server).await, requests_before);
+
+        Ok(())
+    }
+
+    /// 5xxを受け取った場合は、再試行せずにエラーを返すことを確認
+    #[tokio::test]
+    async fn test_server_error_is_not_retried() -> anyhow::Result<()> {
+        assert_not_retried("PUT", WEB_LINK_PATH, 500, async |client: &BoxClient| {
+            client
+                .update_web_link(
+                    &WebLinkId::new("123"),
+                    &WebLinkUpdate::default().with_shared_link_removed(),
+                    &UpdateItemOptions::default(),
+                )
+                .await
+        })
+        .await
     }
 }

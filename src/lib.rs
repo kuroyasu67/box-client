@@ -30,8 +30,11 @@ mod retry;
 mod test_support;
 
 pub use api::downloads::DownloadFileOptions;
-pub use api::files::{CopyFileOptions, File};
-pub use api::folders::{CopyFolderOptions, DeleteFolderOptions, Folder, ListItemsOptions};
+pub use api::files::{CopyFileOptions, File, FileDownloadPermission, FileLock, FileUpdate};
+pub use api::folders::{
+    CopyFolderOptions, DeleteFolderOptions, Folder, FolderUpdate, FolderUploadEmailAccess,
+    ListItemsOptions, SyncState,
+};
 pub use api::pagination::{ItemSort, ItemsPage, MAX_ITEMS_LIMIT, SortDirection};
 pub use api::trash::{ListTrashedItemsOptions, RestoreItemOptions};
 pub use api::types::{
@@ -39,12 +42,15 @@ pub use api::types::{
     MAX_DESCRIPTION_CHARS, MAX_NAME_CHARS, MoveDestination, PathCollection, UpdateItemOptions,
     UserId, WebLinkId, WebLinkItem,
 };
+pub use api::updates::{
+    MAX_TAGS, Nullable, OneTimePasscode, OtpAllowlistEntry, SharedLinkAccess, SharedLinkSettings,
+};
 pub use api::uploads::{UpdateFileContentOptions, UploadFileOptions, UploadUrl};
 pub use api::users::{User, UserMini};
 pub use api::versions::{
     FileVersion, FileVersionsPage, ListFileVersionsOptions, MAX_FILE_VERSIONS_OFFSET,
 };
-pub use api::web_links::{CreateWebLinkOptions, WebLink};
+pub use api::web_links::{CreateWebLinkOptions, WebLink, WebLinkUpdate};
 pub use client::{
     BoxClient, BoxClientBuilder, BoxClientTimeout, DEFAULT_CHUNKED_UPLOAD_THRESHOLD,
     DEFAULT_MAX_COMMIT_POLLS, DEFAULT_MAX_DOWNLOAD_POLLS, DEFAULT_REFRESH_BEFORE_EXPIRY,

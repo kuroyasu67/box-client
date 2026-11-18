@@ -4,13 +4,14 @@
 //!
 //! 1. ファイルをアップロードし、情報を取得してから、ダウンロードする。
 //! 2. ファイル名を変更し、説明を設定する。
-//! 3. ファイルをコピーする。
-//! 4. 移動先の親フォルダを指定した場合は、ファイルを移動する。
-//! 5. ファイルを削除し、ゴミ箱内のファイルの情報を取得してから、ファイルを復元する。
-//! 6. ファイルの内容を更新し、過去のバージョンの取得、昇格、削除および復元を実行する。
+//! 3. タグ、共有リンクおよびロックをまとめて更新してから、共有リンクとロックを削除する。
+//! 4. ファイルをコピーする。
+//! 5. 移動先の親フォルダを指定した場合は、ファイルを移動する。
+//! 6. ファイルを削除し、ゴミ箱内のファイルの情報を取得してから、ファイルを復元する。
+//! 7. ファイルの内容を更新し、過去のバージョンの取得、昇格、削除および復元を実行する。
 //!
 //! BOXは、プレミアムアカウントのユーザーのファイルだけにバージョンを記録する。
-//! したがって、プレミアムアカウントでない場合は、手順6のバージョンの操作でエラーが発生する。
+//! したがって、プレミアムアカウントでない場合は、手順7のバージョンの操作でエラーが発生する。
 //! サンプルがアップロードおよびコピーしたファイルは、サンプルの終了後もBOXに残る。
 mod common;
 
@@ -19,9 +20,9 @@ use std::path::Path;
 use tokio::io::{AsyncBufReadExt as _, BufReader};
 
 use box_client::{
-    BoxClient, CopyFileOptions, DeleteItemOptions, DownloadFileOptions, File, FolderId,
-    ListFileVersionsOptions, MoveDestination, RestoreItemOptions, UpdateFileContentOptions,
-    UploadFileOptions,
+    BoxClient, CopyFileOptions, DeleteItemOptions, DownloadFileOptions, File, FileId, FileLock,
+    FileUpdate, FolderId, ListFileVersionsOptions, MoveDestination, RestoreItemOptions,
+    SharedLinkAccess, SharedLinkSettings, UpdateFileContentOptions, UploadFileOptions,
 };
 
 /// 使用方法
@@ -112,6 +113,8 @@ async fn main() -> anyhow::Result<()> {
         )
         .await?;
     tracing::info!("set file description: {:?}", file.description);
+
+    update_file_attributes(&client, &file_id, file.etag.as_deref()).await?;
 
     // 同じ親フォルダにファイルをコピー
     // 名前を指定しない場合、BOXはコピー元のファイルと同じ名前を付ける。
@@ -264,4 +267,41 @@ async fn first_difference(left: &Path, right: &Path) -> std::io::Result<Option<u
         right.consume(len);
         offset += len as u64;
     }
+}
+
+/// ファイルの複数の属性を1回のリクエストでまとめて更新してから、共有リンクなどを削除する。
+async fn update_file_attributes(
+    client: &BoxClient,
+    file_id: &FileId,
+    etag: Option<&str>,
+) -> anyhow::Result<File> {
+    // ファイルの複数の属性を1回のリクエストで更新
+    // タグと共有リンクを設定し、ファイルをロックする。指定しない属性は送信せず、BOXは変更しない。
+    let tags = ["box-client", "example"];
+    let update = FileUpdate::default()
+        .with_tags(&tags)
+        .with_shared_link(
+            SharedLinkSettings::default().with_access(SharedLinkAccess::Collaborators),
+        )
+        .with_lock(FileLock::default().with_is_download_prevented(false));
+    let file = client
+        .update_file(file_id, &update, &common::update_options(etag))
+        .await?;
+    tracing::info!("updated file: etag={:?}", file.etag);
+
+    // 共有リンクを削除し、ロックを解除
+    // 削除する属性には、BOXにnullを送信する。
+    let update = FileUpdate::default()
+        .with_shared_link_removed()
+        .with_lock_removed();
+    let file = client
+        .update_file(
+            file_id,
+            &update,
+            &common::update_options(file.etag.as_deref()),
+        )
+        .await?;
+    tracing::info!("removed file shared link and lock: etag={:?}", file.etag);
+
+    Ok(file)
 }

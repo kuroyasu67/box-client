@@ -11,11 +11,326 @@ use crate::{
     BoxClient, BoxClientResult, FileId, FileVersion, FileVersionId, FolderId, FolderItem,
     Idempotency, ItemStatus, MoveDestination, PathCollection, UserMini,
     api::types::{
-        DeleteItemOptions, MAX_NAME_CHARS, MoveBody, ParentFolder, RenameBody, SetDescriptionBody,
-        UpdateItemOptions, update_item_request, validate_optional_item_name, validated,
+        DeleteItemOptions, MAX_NAME_CHARS, MoveBody, MoveParent, ParentFolder, RenameBody,
+        SetDescriptionBody, UpdateItemOptions, update_item_request, validate_optional_item_name,
+        validated,
+    },
+    api::updates::{
+        CollectionBody, Nullable, NullableBody, SharedLinkBody, SharedLinkSettings,
+        collections_body, validate_common_attributes,
     },
     request::ApiRequest,
 };
+
+/// ファイルのロック
+///
+/// ロックしたファイルは、ロックしたユーザー以外が移動、名前の変更などの変更をできない。
+///
+/// # Examples
+///
+/// ```
+/// use box_client::FileLock;
+///
+/// let lock = FileLock::default().with_is_download_prevented(true);
+/// assert_eq!(lock.is_download_prevented, Some(true));
+/// ```
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct FileLock {
+    /// ロックを解除する日時
+    ///
+    /// `None`の場合、ロックは自動で解除されない。
+    pub expires_at: Option<OffsetDateTime>,
+
+    /// ロックの間、ファイルのダウンロードを禁止するかどうか
+    pub is_download_prevented: Option<bool>,
+}
+
+impl FileLock {
+    /// ロックを解除する日時を設定する。
+    #[must_use]
+    pub fn with_expires_at(mut self, expires_at: OffsetDateTime) -> Self {
+        self.expires_at = Some(expires_at);
+        self
+    }
+
+    /// ロックの間、ファイルのダウンロードを禁止するかどうかを設定する。
+    #[must_use]
+    pub fn with_is_download_prevented(mut self, is_download_prevented: bool) -> Self {
+        self.is_download_prevented = Some(is_download_prevented);
+        self
+    }
+}
+
+/// ファイルをダウンロードできるユーザーの範囲
+///
+/// コラボレーションの役割によるダウンロードの権限より優先される。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum FileDownloadPermission {
+    /// すべてのユーザー
+    Open,
+
+    /// エンタープライズのユーザー
+    ///
+    /// 外部のビューアーおよび編集者は、ファイルをダウンロードできなくなる。
+    Company,
+}
+
+impl FileDownloadPermission {
+    /// リクエストボディに指定する文字列を返す。
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Open => "open",
+            Self::Company => "company",
+        }
+    }
+}
+
+/// ファイルの更新で変更する属性
+///
+/// `None`の属性は送信せず、BOXは変更しない。
+///
+/// 将来フィールドを追加しても利用者のコードが壊れないように、`#[non_exhaustive]`を付けている。
+/// そのため、クレートの外では構造体リテラルで作成できない。[`Default`]で作成し、`with_*`メソッドで値を設定する。
+///
+/// # Examples
+///
+/// ```
+/// use box_client::{FileLock, FileUpdate};
+///
+/// let update = FileUpdate::default()
+///     .with_name("report-final.pdf")
+///     .with_lock(FileLock::default().with_is_download_prevented(true));
+/// assert_eq!(update.name, Some("report-final.pdf"));
+/// ```
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct FileUpdate<'a> {
+    /// 新しいファイル名
+    pub name: Option<&'a str>,
+
+    /// ファイルの説明
+    ///
+    /// [`MAX_DESCRIPTION_CHARS`](crate::MAX_DESCRIPTION_CHARS)文字以下で指定する。空文字列を指定すると、説明を削除する。
+    pub description: Option<&'a str>,
+
+    /// 移動先
+    pub parent: Option<&'a MoveDestination>,
+
+    /// 共有リンク
+    ///
+    /// [`Nullable::Value`]を指定すると、共有リンクを作成または更新する。[`Nullable::Null`]を指定すると、共有リンクを削除する。
+    pub shared_link: Option<Nullable<SharedLinkSettings<'a>>>,
+
+    /// ロック
+    ///
+    /// [`Nullable::Value`]を指定すると、ファイルをロックする。[`Nullable::Null`]を指定すると、ロックを解除する。
+    pub lock: Option<Nullable<FileLock>>,
+
+    /// リテンションポリシーによる保持の期限
+    ///
+    /// BOXは、保持の期限を一度設定すると、短くすることを受け付けない。
+    pub disposition_at: Option<OffsetDateTime>,
+
+    /// ファイルをダウンロードできるユーザーの範囲
+    pub can_download: Option<FileDownloadPermission>,
+
+    /// タグ
+    ///
+    /// 指定したタグで、既存のタグ全体を置き換える。1個以上[`MAX_TAGS`](crate::MAX_TAGS)個以下で指定する。
+    /// タグを追加または削除する場合は、現在のタグを取得してから、変更後のすべてのタグを指定する。
+    pub tags: Option<&'a [&'a str]>,
+
+    /// ファイルを追加するコレクションのID
+    ///
+    /// BOXは、お気に入り（`favorites`）のコレクションだけを受け付ける。
+    /// 空のスライスを指定すると、ファイルをすべてのコレクションから外す。
+    pub collections: Option<&'a [&'a str]>,
+}
+
+impl<'a> FileUpdate<'a> {
+    /// 新しいファイル名を設定する。
+    #[must_use]
+    pub fn with_name(mut self, name: &'a str) -> Self {
+        self.name = Some(name);
+        self
+    }
+
+    /// ファイルの説明を設定する。
+    #[must_use]
+    pub fn with_description(mut self, description: &'a str) -> Self {
+        self.description = Some(description);
+        self
+    }
+
+    /// 移動先を設定する。
+    #[must_use]
+    pub fn with_parent(mut self, parent: &'a MoveDestination) -> Self {
+        self.parent = Some(parent);
+        self
+    }
+
+    /// 共有リンクを作成または更新する。
+    #[must_use]
+    pub fn with_shared_link(mut self, shared_link: SharedLinkSettings<'a>) -> Self {
+        self.shared_link = Some(Nullable::Value(shared_link));
+        self
+    }
+
+    /// 共有リンクを削除する。
+    #[must_use]
+    pub fn with_shared_link_removed(mut self) -> Self {
+        self.shared_link = Some(Nullable::Null);
+        self
+    }
+
+    /// ファイルをロックする。
+    #[must_use]
+    pub fn with_lock(mut self, lock: FileLock) -> Self {
+        self.lock = Some(Nullable::Value(lock));
+        self
+    }
+
+    /// ファイルのロックを解除する。
+    #[must_use]
+    pub fn with_lock_removed(mut self) -> Self {
+        self.lock = Some(Nullable::Null);
+        self
+    }
+
+    /// リテンションポリシーによる保持の期限を設定する。
+    #[must_use]
+    pub fn with_disposition_at(mut self, disposition_at: OffsetDateTime) -> Self {
+        self.disposition_at = Some(disposition_at);
+        self
+    }
+
+    /// ファイルをダウンロードできるユーザーの範囲を設定する。
+    #[must_use]
+    pub fn with_can_download(mut self, can_download: FileDownloadPermission) -> Self {
+        self.can_download = Some(can_download);
+        self
+    }
+
+    /// タグを設定する。
+    #[must_use]
+    pub fn with_tags(mut self, tags: &'a [&'a str]) -> Self {
+        self.tags = Some(tags);
+        self
+    }
+
+    /// ファイルを追加するコレクションのIDを設定する。
+    #[must_use]
+    pub fn with_collections(mut self, collections: &'a [&'a str]) -> Self {
+        self.collections = Some(collections);
+        self
+    }
+}
+
+/// ファイルの更新リクエストのボディ
+///
+/// 共有リンクのパスワードを含みうるため、`Debug`を実装しない。
+#[derive(Serialize)]
+struct UpdateFileBody<'a> {
+    /// 新しいファイル名
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<&'a str>,
+
+    /// ファイルの説明
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<&'a str>,
+
+    /// 移動先の親フォルダ
+    #[serde(skip_serializing_if = "Option::is_none")]
+    parent: Option<MoveParent<'a>>,
+
+    /// 共有リンク
+    #[serde(skip_serializing_if = "Option::is_none")]
+    shared_link: Option<NullableBody<SharedLinkBody<'a>>>,
+
+    /// ロック
+    #[serde(skip_serializing_if = "Option::is_none")]
+    lock: Option<NullableBody<FileLockBody>>,
+
+    /// リテンションポリシーによる保持の期限
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        with = "time::serde::rfc3339::option"
+    )]
+    disposition_at: Option<OffsetDateTime>,
+
+    /// ファイルの権限
+    #[serde(skip_serializing_if = "Option::is_none")]
+    permissions: Option<FilePermissionsBody>,
+
+    /// タグ
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tags: Option<&'a [&'a str]>,
+
+    /// コレクション
+    #[serde(skip_serializing_if = "Option::is_none")]
+    collections: Option<Vec<CollectionBody<'a>>>,
+}
+
+/// ファイルのロックのリクエストボディ
+#[derive(Debug, Serialize)]
+struct FileLockBody {
+    /// ロックの種類。BOXは`lock`だけを受け付ける。
+    access: &'static str,
+
+    /// ロックを解除する日時
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        with = "time::serde::rfc3339::option"
+    )]
+    expires_at: Option<OffsetDateTime>,
+
+    /// ロックの間、ファイルのダウンロードを禁止するかどうか
+    #[serde(skip_serializing_if = "Option::is_none")]
+    is_download_prevented: Option<bool>,
+}
+
+/// ファイルの権限のリクエストボディ
+#[derive(Debug, Serialize)]
+struct FilePermissionsBody {
+    /// ファイルをダウンロードできるユーザーの範囲
+    can_download: &'static str,
+}
+
+impl<'a> UpdateFileBody<'a> {
+    /// 変更する属性からボディを作成して検証する。
+    ///
+    /// # Errors
+    ///
+    /// 移動先のユーザーIDが空文字列の場合、またはタグの数が範囲外の場合は、[`BoxClientError::InvalidArgument`]を返す。
+    /// ファイル名をBOXが拒否する場合、または説明が長すぎる場合は、[`BoxClientError::InvalidRequestBody`]を返す。
+    fn new(update: &FileUpdate<'a>) -> BoxClientResult<Self> {
+        validate_common_attributes(update.name, update.description, update.tags)?;
+
+        Ok(Self {
+            name: update.name,
+            description: update.description,
+            parent: update.parent.map(MoveParent::new).transpose()?,
+            shared_link: update
+                .shared_link
+                .map(|shared_link| shared_link.to_body(SharedLinkBody::new)),
+            lock: update.lock.map(|lock| {
+                lock.to_body(|lock| FileLockBody {
+                    access: "lock",
+                    expires_at: lock.expires_at,
+                    is_download_prevented: lock.is_download_prevented,
+                })
+            }),
+            disposition_at: update.disposition_at,
+            permissions: update.can_download.map(|can_download| FilePermissionsBody {
+                can_download: can_download.as_str(),
+            }),
+            tags: update.tags,
+            collections: collections_body(update.collections),
+        })
+    }
+}
 
 /// ファイル情報
 ///
@@ -240,6 +555,61 @@ impl BoxClient {
             copied_file_id = file.id.as_ref(),
             "copied file"
         );
+
+        Ok(file)
+    }
+
+    /// ファイルの情報を更新する。
+    ///
+    /// BOXのファイルの更新API（`PUT /files/{file_id}`）が受け付けるすべての属性を、`update`で指定できる。
+    /// `update`で指定した属性だけを送信し、BOXは指定しない属性を変更しない。
+    /// 名前の変更、説明の設定または移動だけを行う場合は、[`BoxClient::rename_file`]、
+    /// [`BoxClient::set_file_description`]または[`BoxClient::move_file`]も使用できる。
+    ///
+    /// [`BoxClient::rename_file`]と同様に、HTTPメソッドがPUTであっても冪等でないリクエストとして送信し、
+    /// 429、エラーコードが`operation_blocked_temporary`の409および接続エラーの後にのみ再試行する。
+    ///
+    /// # Arguments
+    ///
+    /// - `file_id`: 更新するファイルのID
+    /// - `update`: 変更する属性
+    /// - `options`: `ETag`のオプション
+    ///
+    /// # Errors
+    ///
+    /// `update.parent`のユーザーIDが空文字列の場合、またはタグの数が1以上[`MAX_TAGS`](crate::MAX_TAGS)以下でない場合は、
+    /// リクエストを送信せずに[`BoxClientError::InvalidArgument`]を返す。
+    /// ファイル名をBOXが拒否する場合、または説明が[`MAX_DESCRIPTION_CHARS`](crate::MAX_DESCRIPTION_CHARS)文字より長い場合は、
+    /// リクエストを送信せずに[`BoxClientError::InvalidRequestBody`]を返す。
+    /// `options.etag`に使用できない文字が含まれる場合は、リクエストを送信せずに
+    /// [`BoxClientError::InvalidHeaderValue`]を返す。
+    /// BOXがエラーレスポンスを返した場合は、[`BoxClientError::Api`]を返す。主なステータスは次のとおり。
+    ///
+    /// - 400: 保持の期限が、リテンションポリシーの最大の保持期間を超える。
+    /// - 403: 移動先のフォルダにアクセスする権限がない、保持の期限を短くしようとした、
+    ///   または情報バリアが操作を禁止している。
+    /// - 404: ファイルが存在しない、またはファイルにアクセスする権限がない。
+    /// - 409: 同じ名前の項目が親フォルダに存在する（`item_name_in_use`）。
+    ///   または、他の操作がファイルをロックしている（`operation_blocked_temporary`）。
+    ///   後者の場合、クライアントは再試行設定に従って再試行し、再試行回数の上限に達してもロックが解除されない場合に
+    ///   このエラーを返す。
+    /// - 412: `options.etag`がファイルの現在の`ETag`と一致しない。
+    ///
+    /// 再試行できないエラーが発生した場合、または再試行回数の上限に達した場合はエラーを返す。
+    /// 5xxまたはタイムアウトでエラーを返した場合は、BOXがファイルを更新した可能性がある。
+    /// したがって、[`BoxClient::file_information`]でファイルの状態を確認する。
+    pub async fn update_file(
+        &self,
+        file_id: &FileId,
+        update: &FileUpdate<'_>,
+        options: &UpdateItemOptions<'_>,
+    ) -> BoxClientResult<File> {
+        let body = UpdateFileBody::new(update)?;
+        let request = update_item_request("files", file_id.as_ref(), &body, options.etag)?;
+
+        let file = self.send_json(request).await?;
+
+        tracing::debug!(file_id = file_id.as_ref(), "updated file");
 
         Ok(file)
     }
@@ -1129,5 +1499,166 @@ mod test_delete_file {
         .await?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod test_update_file_attributes {
+    use serde_json::json;
+    use time::macros::datetime;
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{body_json, header, method, path},
+    };
+
+    use super::*;
+    use crate::{
+        OneTimePasscode, SharedLinkAccess,
+        test_support::{
+            assert_not_retried, create_client, is_invalid_argument, mount_token, request_count,
+            short_retry,
+        },
+    };
+
+    /// ファイルのAPIのパス
+    const FILE_PATH: &str = "/2.0/files/123";
+
+    /// 更新後のファイルのレスポンス
+    fn file_response() -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_json(json!({
+            "type": "file",
+            "id": "123",
+            "etag": "2",
+            "name": "report.pdf",
+        }))
+    }
+
+    /// 指定したすべての属性と`If-Match`ヘッダーを送信することを確認
+    #[tokio::test]
+    async fn test_sends_all_attributes() -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        Mock::given(method("PUT"))
+            .and(path(FILE_PATH))
+            .and(header("if-match", "1"))
+            .and(body_json(json!({
+                "name": "report.pdf",
+                "description": "Final report",
+                "parent": {"id": "456"},
+                "shared_link": {
+                    "access": "open",
+                    "one_time_passcode": {"mode": "open"},
+                },
+                "lock": {
+                    "access": "lock",
+                    "expires_at": "2026-12-31T00:00:00Z",
+                    "is_download_prevented": true,
+                },
+                "disposition_at": "2030-01-01T00:00:00Z",
+                "permissions": {"can_download": "company"},
+                "tags": ["report"],
+                "collections": [],
+            })))
+            .respond_with(file_response())
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = create_client(&server, short_retry(0)?).await?;
+        let destination = MoveDestination::Folder(FolderId::new("456"));
+        let tags = ["report"];
+        let update = FileUpdate::default()
+            .with_name("report.pdf")
+            .with_description("Final report")
+            .with_parent(&destination)
+            .with_shared_link(
+                SharedLinkSettings::default()
+                    .with_access(SharedLinkAccess::Open)
+                    .with_one_time_passcode(OneTimePasscode::Open),
+            )
+            .with_lock(
+                FileLock::default()
+                    .with_expires_at(datetime!(2026-12-31 00:00:00 UTC))
+                    .with_is_download_prevented(true),
+            )
+            .with_disposition_at(datetime!(2030-01-01 00:00:00 UTC))
+            .with_can_download(FileDownloadPermission::Company)
+            .with_tags(&tags)
+            .with_collections(&[]);
+
+        let file = client
+            .update_file(
+                &FileId::new("123"),
+                &update,
+                &UpdateItemOptions::default().with_etag("1"),
+            )
+            .await?;
+
+        assert_eq!(file.etag.as_deref(), Some("2"));
+
+        Ok(())
+    }
+
+    /// 共有リンクとロックの削除をnullで送信することを確認
+    #[tokio::test]
+    async fn test_sends_null_to_remove() -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        Mock::given(method("PUT"))
+            .and(path(FILE_PATH))
+            .and(body_json(json!({"shared_link": null, "lock": null})))
+            .respond_with(file_response())
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = create_client(&server, short_retry(0)?).await?;
+        let update = FileUpdate::default()
+            .with_shared_link_removed()
+            .with_lock_removed();
+
+        client
+            .update_file(&FileId::new("123"), &update, &UpdateItemOptions::default())
+            .await?;
+
+        Ok(())
+    }
+
+    /// タグの数が範囲外の場合は、リクエストを送信せずにエラーを返すことを確認
+    #[tokio::test]
+    async fn test_rejects_empty_tags() -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        let client = create_client(&server, short_retry(0)?).await?;
+        let requests_before = request_count(&server).await;
+
+        let result = client
+            .update_file(
+                &FileId::new("123"),
+                &FileUpdate::default().with_tags(&[]),
+                &UpdateItemOptions::default(),
+            )
+            .await;
+
+        assert!(
+            result.as_ref().is_err_and(is_invalid_argument),
+            "result: {result:?}"
+        );
+        assert_eq!(request_count(&server).await, requests_before);
+
+        Ok(())
+    }
+
+    /// 5xxを受け取った場合は、再試行せずにエラーを返すことを確認
+    #[tokio::test]
+    async fn test_server_error_is_not_retried() -> anyhow::Result<()> {
+        assert_not_retried("PUT", FILE_PATH, 500, async |client: &BoxClient| {
+            client
+                .update_file(
+                    &FileId::new("123"),
+                    &FileUpdate::default().with_lock_removed(),
+                    &UpdateItemOptions::default(),
+                )
+                .await
+        })
+        .await
     }
 }

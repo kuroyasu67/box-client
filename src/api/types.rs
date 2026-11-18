@@ -24,7 +24,7 @@ pub(crate) fn validated<T: Validate<Context = ()>>(body: T) -> BoxClientResult<T
 
 /// ファイル、フォルダまたはWebリンクの属性を更新するリクエスト（`PUT /{collection}/{id}`）を作成する。
 ///
-/// 名前の変更、説明の設定、移動およびWebリンクのURLの変更で共有する。
+/// 情報の更新、名前の変更、説明の設定、移動およびWebリンクのURLの変更で共有する。
 /// `etag`を指定した場合は、`If-Match`ヘッダーで送信する。
 ///
 /// `ETag`を指定した場合は、BOXが更新した後に再送すると、`ETag`が変わっているためBOXは412を返す。
@@ -431,8 +431,10 @@ pub(crate) struct MoveBody<'a> {
 }
 
 /// 移動リクエストのボディの、移動先の親フォルダ
+///
+/// 移動だけを行うリクエストと、情報の更新のリクエストで共有する。
 #[derive(Debug, Clone, Serialize)]
-struct MoveParent<'a> {
+pub(crate) struct MoveParent<'a> {
     /// 移動先の親フォルダのID
     ///
     /// ユーザーのルートフォルダへ移動する場合は、ルートフォルダのIDを指定する。
@@ -451,24 +453,36 @@ impl<'a> MoveBody<'a> {
     ///
     /// ユーザーIDが空文字列の場合は、[`BoxClientError::InvalidArgument`]を返す。
     pub(crate) fn new(destination: &'a MoveDestination) -> BoxClientResult<Self> {
-        let parent = match destination {
-            MoveDestination::Folder(folder_id) => MoveParent {
+        Ok(Self {
+            parent: MoveParent::new(destination)?,
+        })
+    }
+}
+
+impl<'a> MoveParent<'a> {
+    /// 移動先から作成する。
+    ///
+    /// # Errors
+    ///
+    /// ユーザーIDが空文字列の場合は、[`BoxClientError::InvalidArgument`]を返す。
+    pub(crate) fn new(destination: &'a MoveDestination) -> BoxClientResult<Self> {
+        match destination {
+            MoveDestination::Folder(folder_id) => Ok(Self {
                 id: folder_id.as_ref(),
                 user_id: None,
-            },
+            }),
             MoveDestination::User(user_id) => {
                 // フォルダIDと異なり、ユーザーIDはパスに含めないため、空文字列をクライアントが検出しないとBOXへ送信してしまう。
                 // BOXが空のユーザーIDをどう扱うかは不明であり、認証中のユーザーのルートフォルダへ移動するおそれもあるため、送信しない。
                 if user_id.as_ref().is_empty() {
                     return Err(BoxClientError::InvalidArgument("user_id must not be empty"));
                 }
-                MoveParent {
+                Ok(Self {
                     id: ROOT_FOLDER_ID,
                     user_id: Some(user_id),
-                }
+                })
             }
-        };
-        Ok(Self { parent })
+        }
     }
 }
 

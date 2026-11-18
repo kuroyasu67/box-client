@@ -8,6 +8,7 @@ pub mod folders;
 pub mod pagination;
 pub mod trash;
 pub mod types;
+pub mod updates;
 pub mod uploads;
 pub mod users;
 pub mod versions;

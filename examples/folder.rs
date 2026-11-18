@@ -5,16 +5,17 @@
 //! 1. フォルダを作成し、情報を取得する。
 //! 2. 親フォルダ内のすべての項目を表示する。
 //! 3. フォルダ名を変更し、説明を設定する。
-//! 4. フォルダをコピーする。
-//! 5. 移動先の親フォルダを指定した場合は、フォルダを移動する。
-//! 6. フォルダを削除し、ゴミ箱内のフォルダの情報を取得してから、フォルダを復元する。
+//! 4. タグ、共有リンクなどの複数の属性をまとめて更新してから、共有リンクを削除する。
+//! 5. フォルダをコピーする。
+//! 6. 移動先の親フォルダを指定した場合は、フォルダを移動する。
+//! 7. フォルダを削除し、ゴミ箱内のフォルダの情報を取得してから、フォルダを復元する。
 //!
 //! サンプルが作成およびコピーしたフォルダは、サンプルの終了後もBOXに残る。
 mod common;
 
 use box_client::{
-    CopyFolderOptions, DeleteFolderOptions, FolderId, ListItemsOptions, MoveDestination,
-    RestoreItemOptions,
+    BoxClient, CopyFolderOptions, DeleteFolderOptions, Folder, FolderId, FolderUpdate,
+    ListItemsOptions, MoveDestination, RestoreItemOptions, SharedLinkAccess, SharedLinkSettings,
 };
 
 /// 使用方法
@@ -82,6 +83,8 @@ async fn main() -> anyhow::Result<()> {
         .await?;
     tracing::info!("set folder description: {:?}", folder.description);
 
+    let folder = update_folder_attributes(&client, &folder_id, folder.etag.as_deref()).await?;
+
     // 同じ親フォルダにフォルダをコピー
     // 名前を指定しない場合、BOXはコピー元のフォルダと同じ名前を付ける。
     let name = format!("{prefix}-copied");
@@ -137,4 +140,39 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("restored folder: {folder:?}");
 
     Ok(())
+}
+
+/// フォルダの複数の属性を1回のリクエストでまとめて更新してから、共有リンクなどを削除する。
+async fn update_folder_attributes(
+    client: &BoxClient,
+    folder_id: &FolderId,
+    etag: Option<&str>,
+) -> anyhow::Result<Folder> {
+    // フォルダの複数の属性を1回のリクエストで更新
+    // タグと共有リンクを設定し、所有者以外のユーザーによるコラボレーターの招待を禁止する。
+    // 指定しない属性は送信せず、BOXは変更しない。
+    let tags = ["box-client", "example"];
+    let update = FolderUpdate::default()
+        .with_tags(&tags)
+        .with_shared_link(
+            SharedLinkSettings::default().with_access(SharedLinkAccess::Collaborators),
+        )
+        .with_can_non_owners_invite(false);
+    let folder = client
+        .update_folder(folder_id, &update, &common::update_options(etag))
+        .await?;
+    tracing::info!("updated folder: etag={:?}", folder.etag);
+
+    // 共有リンクを削除
+    // 削除する属性には、BOXにnullを送信する。
+    let folder = client
+        .update_folder(
+            folder_id,
+            &FolderUpdate::default().with_shared_link_removed(),
+            &common::update_options(folder.etag.as_deref()),
+        )
+        .await?;
+    tracing::info!("removed folder shared link: etag={:?}", folder.etag);
+
+    Ok(folder)
 }

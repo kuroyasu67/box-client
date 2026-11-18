@@ -25,6 +25,9 @@
 - フォルダの削除
   - メソッド: `BoxClient::delete_folder`
   - BOX API: `DELETE /folders/{folder_id}`
+- フォルダの更新
+  - メソッド: `BoxClient::update_folder`
+  - BOX API: `PUT /folders/{folder_id}`
 - フォルダの移動
   - メソッド: `BoxClient::move_folder`
   - BOX API: `PUT /folders/{folder_id}`
@@ -58,6 +61,9 @@
 - 削除したファイルのバージョンの復元
   - メソッド: `BoxClient::restore_file_version`
   - BOX API: `PUT /files/{file_id}/versions/{file_version_id}`
+- ファイルの更新
+  - メソッド: `BoxClient::update_file`
+  - BOX API: `PUT /files/{file_id}`
 - ファイル名の変更
   - メソッド: `BoxClient::rename_file`
   - BOX API: `PUT /files/{file_id}`
@@ -107,6 +113,9 @@
 - Webリンクの作成
   - メソッド: `BoxClient::create_web_link`
   - BOX API: `POST /web_links`
+- Webリンクの更新
+  - メソッド: `BoxClient::update_web_link`
+  - BOX API: `PUT /web_links/{web_link_id}`
 - Webリンク名の変更
   - メソッド: `BoxClient::rename_web_link`
   - BOX API: `PUT /web_links/{web_link_id}`
@@ -298,6 +307,10 @@ BOXがアクセストークンを拒否して401を返した場合、`BoxClient`
   - HTTPメソッド: DELETE
   - 冪等性: 冪等でない
   - 理由: BOXは削除に600秒以上かかると503を返すが、削除処理はその後も継続する。再送すると409や404を受け取り、削除の結果を誤って判断するおそれがある。
+- フォルダの更新（`BoxClient::update_folder`）
+  - HTTPメソッド: PUT
+  - 冪等性: 冪等でない
+  - 理由: ETagを指定した場合、BOXが更新した後に再送すると、ETagが変わっているため412を受け取る。その結果、更新の結果を誤って判断するおそれがある。
 - フォルダの移動（`BoxClient::move_folder`）
   - HTTPメソッド: PUT
   - 冪等性: 冪等でない
@@ -314,6 +327,10 @@ BOXがアクセストークンを拒否して401を返した場合、`BoxClient`
   - HTTPメソッド: DELETE
   - 冪等性: 冪等でない
   - 理由: BOXが削除した後に再送すると、削除済みのバージョンに対する削除となり、エラーを受け取りうる。その結果、削除の結果を誤って判断するおそれがある。
+- ファイルの更新（`BoxClient::update_file`）
+  - HTTPメソッド: PUT
+  - 冪等性: 冪等でない
+  - 理由: ETagを指定した場合、BOXが更新した後に再送すると、ETagが変わっているため412を受け取る。その結果、更新の結果を誤って判断するおそれがある。
 - ファイル名の変更（`BoxClient::rename_file`）
   - HTTPメソッド: PUT
   - 冪等性: 冪等でない
@@ -330,7 +347,7 @@ BOXがアクセストークンを拒否して401を返した場合、`BoxClient`
   - HTTPメソッド: DELETE
   - 冪等性: 冪等でない
   - 理由: BOXは削除済みのファイルに対して404を返す。BOXが削除した後に再送すると404を受け取り、削除の結果を誤って判断するおそれがある。
-- Webリンクの更新（`BoxClient::rename_web_link`など）
+- Webリンクの更新（`BoxClient::update_web_link`、`BoxClient::rename_web_link`など）
   - HTTPメソッド: PUT
   - 冪等性: 冪等でない
   - 理由: ETagを指定した場合、BOXが更新した後に再送すると、ETagが変わっているため412を受け取る。その結果、更新の結果を誤って判断するおそれがある。

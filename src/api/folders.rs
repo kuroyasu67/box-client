@@ -11,9 +11,13 @@ use crate::{
         ItemSort, ItemsPage, MAX_ITEMS_LIMIT, SortDirection, collect_all_pages, marker_page_request,
     },
     api::types::{
-        MAX_NAME_CHARS, MoveBody, ParentFolder, PathCollection, RenameBody, SetDescriptionBody,
-        UpdateItemOptions, ensure_not_root, update_item_request, validate_item_name,
-        validate_optional_item_name, validated,
+        MAX_NAME_CHARS, MoveBody, MoveParent, ParentFolder, PathCollection, RenameBody,
+        SetDescriptionBody, UpdateItemOptions, ensure_not_root, update_item_request,
+        validate_item_name, validate_optional_item_name, validated,
+    },
+    api::updates::{
+        CollectionBody, Nullable, NullableBody, SharedLinkBody, SharedLinkSettings,
+        collections_body, validate_common_attributes,
     },
     request::ApiRequest,
 };
@@ -280,6 +284,348 @@ impl<'a> DeleteFolderOptions<'a> {
     }
 }
 
+/// フォルダのアップロード用メールアドレスに送信できるユーザーの範囲
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum FolderUploadEmailAccess {
+    /// すべての送信者
+    Open,
+
+    /// フォルダのコラボレーターとして登録されたメールアドレス（エイリアスを含む）
+    Collaborators,
+}
+
+impl FolderUploadEmailAccess {
+    /// リクエストボディに指定する文字列を返す。
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Open => "open",
+            Self::Collaborators => "collaborators",
+        }
+    }
+}
+
+/// Box Syncでのフォルダの同期の状態
+///
+/// Box Syncは提供を終了しており、Box Driveはこの状態を使用しない。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SyncState {
+    /// 同期する。
+    Synced,
+
+    /// 同期しない。
+    NotSynced,
+
+    /// 一部を同期する。
+    PartiallySynced,
+}
+
+impl SyncState {
+    /// リクエストボディに指定する文字列を返す。
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Synced => "synced",
+            Self::NotSynced => "not_synced",
+            Self::PartiallySynced => "partially_synced",
+        }
+    }
+}
+
+/// フォルダの更新で変更する属性
+///
+/// `None`の属性は送信せず、BOXは変更しない。
+///
+/// BOXは、移動先の親フォルダ（`parent`）と他の属性を同時に指定すると、403（`operation_limit_exceeded`）を返す。
+/// したがって、BOXクライアントは、`parent`と他の属性を同時に指定した場合にリクエストを送信せずにエラーを返す。
+/// 移動と他の属性の更新は、別々に呼び出す。
+///
+/// 将来フィールドを追加しても利用者のコードが壊れないように、`#[non_exhaustive]`を付けている。
+/// そのため、クレートの外では構造体リテラルで作成できない。[`Default`]で作成し、`with_*`メソッドで値を設定する。
+///
+/// # Examples
+///
+/// ```
+/// use box_client::{FolderUpdate, SharedLinkAccess, SharedLinkSettings};
+///
+/// let tags = ["contract", "2026"];
+/// let update = FolderUpdate::default()
+///     .with_name("Contracts")
+///     .with_description("Signed contracts")
+///     .with_tags(&tags)
+///     .with_shared_link(SharedLinkSettings::default().with_access(SharedLinkAccess::Company));
+/// assert_eq!(update.name, Some("Contracts"));
+/// ```
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct FolderUpdate<'a> {
+    /// 新しいフォルダ名
+    pub name: Option<&'a str>,
+
+    /// フォルダの説明
+    ///
+    /// [`MAX_DESCRIPTION_CHARS`](crate::MAX_DESCRIPTION_CHARS)文字以下で指定する。空文字列を指定すると、説明を削除する。
+    pub description: Option<&'a str>,
+
+    /// 移動先
+    ///
+    /// 他の属性と同時に指定できない。
+    pub parent: Option<&'a MoveDestination>,
+
+    /// 共有リンク
+    ///
+    /// [`Nullable::Value`]を指定すると、共有リンクを作成または更新する。[`Nullable::Null`]を指定すると、共有リンクを削除する。
+    pub shared_link: Option<Nullable<SharedLinkSettings<'a>>>,
+
+    /// フォルダのアップロード用メールアドレス
+    ///
+    /// [`Nullable::Value`]を指定すると、アップロード用メールアドレスを作成し、送信できるユーザーの範囲を設定する。
+    /// [`Nullable::Null`]を指定すると、アップロード用メールアドレスを無効にする。
+    pub folder_upload_email: Option<Nullable<FolderUploadEmailAccess>>,
+
+    /// Box Syncでの同期の状態
+    pub sync_state: Option<SyncState>,
+
+    /// タグ
+    ///
+    /// 指定したタグで、既存のタグ全体を置き換える。1個以上[`MAX_TAGS`](crate::MAX_TAGS)個以下で指定する。
+    /// タグを追加または削除する場合は、現在のタグを取得してから、変更後のすべてのタグを指定する。
+    pub tags: Option<&'a [&'a str]>,
+
+    /// フォルダを追加するコレクションのID
+    ///
+    /// BOXは、お気に入り（`favorites`）のコレクションだけを受け付ける。
+    /// 空のスライスを指定すると、フォルダをすべてのコレクションから外す。
+    pub collections: Option<&'a [&'a str]>,
+
+    /// 所有者以外のユーザーが、新しいコラボレーターを招待できるかどうか
+    pub can_non_owners_invite: Option<bool>,
+
+    /// 所有者以外のユーザーが、他のコラボレーターを閲覧できるかどうか
+    ///
+    /// `false`の場合、所有者以外のユーザーは、他のコラボレーターの閲覧と新しいコラボレーターの招待ができない。
+    pub can_non_owners_view_collaborators: Option<bool>,
+
+    /// 新しいコラボレーターの招待を、エンタープライズのユーザーに制限するかどうか
+    ///
+    /// 既存のコラボレーションには影響しない。
+    pub is_collaboration_restricted_to_enterprise: Option<bool>,
+}
+
+impl<'a> FolderUpdate<'a> {
+    /// 新しいフォルダ名を設定する。
+    #[must_use]
+    pub fn with_name(mut self, name: &'a str) -> Self {
+        self.name = Some(name);
+        self
+    }
+
+    /// フォルダの説明を設定する。
+    #[must_use]
+    pub fn with_description(mut self, description: &'a str) -> Self {
+        self.description = Some(description);
+        self
+    }
+
+    /// 移動先を設定する。
+    #[must_use]
+    pub fn with_parent(mut self, parent: &'a MoveDestination) -> Self {
+        self.parent = Some(parent);
+        self
+    }
+
+    /// 共有リンクを作成または更新する。
+    #[must_use]
+    pub fn with_shared_link(mut self, shared_link: SharedLinkSettings<'a>) -> Self {
+        self.shared_link = Some(Nullable::Value(shared_link));
+        self
+    }
+
+    /// 共有リンクを削除する。
+    #[must_use]
+    pub fn with_shared_link_removed(mut self) -> Self {
+        self.shared_link = Some(Nullable::Null);
+        self
+    }
+
+    /// アップロード用メールアドレスを作成し、送信できるユーザーの範囲を設定する。
+    #[must_use]
+    pub fn with_folder_upload_email(mut self, access: FolderUploadEmailAccess) -> Self {
+        self.folder_upload_email = Some(Nullable::Value(access));
+        self
+    }
+
+    /// アップロード用メールアドレスを無効にする。
+    #[must_use]
+    pub fn with_folder_upload_email_disabled(mut self) -> Self {
+        self.folder_upload_email = Some(Nullable::Null);
+        self
+    }
+
+    /// Box Syncでの同期の状態を設定する。
+    #[must_use]
+    pub fn with_sync_state(mut self, sync_state: SyncState) -> Self {
+        self.sync_state = Some(sync_state);
+        self
+    }
+
+    /// タグを設定する。
+    #[must_use]
+    pub fn with_tags(mut self, tags: &'a [&'a str]) -> Self {
+        self.tags = Some(tags);
+        self
+    }
+
+    /// フォルダを追加するコレクションのIDを設定する。
+    #[must_use]
+    pub fn with_collections(mut self, collections: &'a [&'a str]) -> Self {
+        self.collections = Some(collections);
+        self
+    }
+
+    /// 所有者以外のユーザーが、新しいコラボレーターを招待できるかどうかを設定する。
+    #[must_use]
+    pub fn with_can_non_owners_invite(mut self, can_non_owners_invite: bool) -> Self {
+        self.can_non_owners_invite = Some(can_non_owners_invite);
+        self
+    }
+
+    /// 所有者以外のユーザーが、他のコラボレーターを閲覧できるかどうかを設定する。
+    #[must_use]
+    pub fn with_can_non_owners_view_collaborators(
+        mut self,
+        can_non_owners_view_collaborators: bool,
+    ) -> Self {
+        self.can_non_owners_view_collaborators = Some(can_non_owners_view_collaborators);
+        self
+    }
+
+    /// 新しいコラボレーターの招待を、エンタープライズのユーザーに制限するかどうかを設定する。
+    #[must_use]
+    pub fn with_is_collaboration_restricted_to_enterprise(mut self, restricted: bool) -> Self {
+        self.is_collaboration_restricted_to_enterprise = Some(restricted);
+        self
+    }
+}
+
+/// フォルダの更新リクエストのボディ
+///
+/// 共有リンクのパスワードを含みうるため、`Debug`を実装しない。
+#[derive(Serialize)]
+struct UpdateFolderBody<'a> {
+    /// 新しいフォルダ名
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<&'a str>,
+
+    /// フォルダの説明
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<&'a str>,
+
+    /// 移動先の親フォルダ
+    #[serde(skip_serializing_if = "Option::is_none")]
+    parent: Option<MoveParent<'a>>,
+
+    /// 共有リンク
+    #[serde(skip_serializing_if = "Option::is_none")]
+    shared_link: Option<NullableBody<SharedLinkBody<'a>>>,
+
+    /// アップロード用メールアドレス
+    #[serde(skip_serializing_if = "Option::is_none")]
+    folder_upload_email: Option<NullableBody<FolderUploadEmailBody>>,
+
+    /// 同期の状態
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sync_state: Option<&'static str>,
+
+    /// タグ
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tags: Option<&'a [&'a str]>,
+
+    /// コレクション
+    #[serde(skip_serializing_if = "Option::is_none")]
+    collections: Option<Vec<CollectionBody<'a>>>,
+
+    /// 所有者以外のユーザーが、新しいコラボレーターを招待できるかどうか
+    #[serde(skip_serializing_if = "Option::is_none")]
+    can_non_owners_invite: Option<bool>,
+
+    /// 所有者以外のユーザーが、他のコラボレーターを閲覧できるかどうか
+    #[serde(skip_serializing_if = "Option::is_none")]
+    can_non_owners_view_collaborators: Option<bool>,
+
+    /// 新しいコラボレーターの招待を、エンタープライズのユーザーに制限するかどうか
+    #[serde(skip_serializing_if = "Option::is_none")]
+    is_collaboration_restricted_to_enterprise: Option<bool>,
+}
+
+/// アップロード用メールアドレスのリクエストボディ
+#[derive(Debug, Serialize)]
+struct FolderUploadEmailBody {
+    /// 送信できるユーザーの範囲
+    access: &'static str,
+}
+
+impl<'a> UpdateFolderBody<'a> {
+    /// 変更する属性からボディを作成して検証する。
+    ///
+    /// # Errors
+    ///
+    /// 移動先と他の属性を同時に指定した場合、移動先のユーザーIDが空文字列の場合、
+    /// またはタグの数が範囲外の場合は、[`BoxClientError::InvalidArgument`]を返す。
+    /// フォルダ名をBOXが拒否する場合、または説明が長すぎる場合は、[`BoxClientError::InvalidRequestBody`]を返す。
+    fn new(update: &FolderUpdate<'a>) -> BoxClientResult<Self> {
+        validate_common_attributes(update.name, update.description, update.tags)?;
+
+        let body = Self {
+            name: update.name,
+            description: update.description,
+            parent: None,
+            shared_link: update
+                .shared_link
+                .map(|shared_link| shared_link.to_body(SharedLinkBody::new)),
+            folder_upload_email: update.folder_upload_email.map(|email| {
+                email.to_body(|access| FolderUploadEmailBody {
+                    access: access.as_str(),
+                })
+            }),
+            sync_state: update.sync_state.map(SyncState::as_str),
+            tags: update.tags,
+            collections: collections_body(update.collections),
+            can_non_owners_invite: update.can_non_owners_invite,
+            can_non_owners_view_collaborators: update.can_non_owners_view_collaborators,
+            is_collaboration_restricted_to_enterprise: update
+                .is_collaboration_restricted_to_enterprise,
+        };
+
+        let Some(destination) = update.parent else {
+            return Ok(body);
+        };
+        if body.has_attributes() {
+            return Err(BoxClientError::InvalidArgument(
+                "parent cannot be updated together with other attributes of a folder",
+            ));
+        }
+        Ok(Self {
+            parent: Some(MoveParent::new(destination)?),
+            ..body
+        })
+    }
+
+    /// 移動先以外の属性を1つ以上含むかどうかを返す。
+    fn has_attributes(&self) -> bool {
+        self.name.is_some()
+            || self.description.is_some()
+            || self.shared_link.is_some()
+            || self.folder_upload_email.is_some()
+            || self.sync_state.is_some()
+            || self.tags.is_some()
+            || self.collections.is_some()
+            || self.can_non_owners_invite.is_some()
+            || self.can_non_owners_view_collaborators.is_some()
+            || self.is_collaboration_restricted_to_enterprise.is_some()
+    }
+}
+
 impl BoxClient {
     /// フォルダ情報を取得する。
     ///
@@ -465,6 +811,67 @@ impl BoxClient {
             copied_folder_id = folder.id.as_ref(),
             "copied folder"
         );
+
+        Ok(folder)
+    }
+
+    /// フォルダの情報を更新する。
+    ///
+    /// BOXのフォルダの更新API（`PUT /folders/{folder_id}`）が受け付けるすべての属性を、`update`で指定できる。
+    /// `update`で指定した属性だけを送信し、BOXは指定しない属性を変更しない。
+    /// 名前の変更、説明の設定または移動だけを行う場合は、[`BoxClient::rename_folder`]、
+    /// [`BoxClient::set_folder_description`]または[`BoxClient::move_folder`]も使用できる。
+    ///
+    /// BOXは移動先の親フォルダと他の属性を同時に指定すると403を返すため、`update.parent`と他の属性を同時に指定した場合は、
+    /// リクエストを送信せずにエラーを返す。
+    ///
+    /// [`BoxClient::rename_folder`]と同様に、HTTPメソッドがPUTであっても冪等でないリクエストとして送信し、
+    /// 429、エラーコードが`operation_blocked_temporary`の409および接続エラーの後にのみ再試行する。
+    ///
+    /// # Arguments
+    ///
+    /// - `folder_id`: 更新するフォルダのID
+    /// - `update`: 変更する属性
+    /// - `options`: `ETag`のオプション
+    ///
+    /// # Errors
+    ///
+    /// `folder_id`にルートフォルダを指定した場合、`update.parent`と他の属性を同時に指定した場合、
+    /// `update.parent`のユーザーIDが空文字列の場合、またはタグの数が1以上[`MAX_TAGS`](crate::MAX_TAGS)以下でない場合は、
+    /// リクエストを送信せずに[`BoxClientError::InvalidArgument`]を返す。
+    /// フォルダ名をBOXが拒否する場合、または説明が[`MAX_DESCRIPTION_CHARS`](crate::MAX_DESCRIPTION_CHARS)文字より長い場合は、
+    /// リクエストを送信せずに[`BoxClientError::InvalidRequestBody`]を返す。
+    /// `options.etag`に使用できない文字が含まれる場合は、リクエストを送信せずに
+    /// [`BoxClientError::InvalidHeaderValue`]を返す。
+    /// BOXがエラーレスポンスを返した場合は、[`BoxClientError::Api`]を返す。主なステータスは次のとおり。
+    ///
+    /// - 400: パラメーターが不正である、またはフォルダ名が不正である。
+    /// - 403: フォルダを操作する権限がない。または、無料のアカウントで`company`の共有リンクを指定した。
+    /// - 404: フォルダまたは移動先の親フォルダが存在しない、またはアクセスする権限がない。
+    /// - 409: 同じ名前の項目が親フォルダに存在する（`item_name_in_use`）。
+    ///   または、移動、コピーなど、他の操作がフォルダをロックしている（`operation_blocked_temporary`）。
+    ///   後者の場合、クライアントは再試行設定に従って再試行し、再試行回数の上限に達してもロックが解除されない場合に
+    ///   このエラーを返す。
+    /// - 412: `options.etag`がフォルダの現在の`ETag`と一致しない。
+    /// - 503: 移動に600秒以上かかっている。移動処理は継続している。
+    ///
+    /// 再試行できないエラーが発生した場合、または再試行回数の上限に達した場合はエラーを返す。
+    /// 5xxまたはタイムアウトでエラーを返した場合は、BOXがフォルダを更新した可能性がある。
+    /// したがって、[`BoxClient::folder_information`]でフォルダの状態を確認する。
+    pub async fn update_folder(
+        &self,
+        folder_id: &FolderId,
+        update: &FolderUpdate<'_>,
+        options: &UpdateItemOptions<'_>,
+    ) -> BoxClientResult<Folder> {
+        ensure_not_root(folder_id, "the root folder cannot be updated")?;
+
+        let body = UpdateFolderBody::new(update)?;
+        let request = update_item_request("folders", folder_id.as_ref(), &body, options.etag)?;
+
+        let folder = self.send_json(request).await?;
+
+        tracing::debug!(folder_id = folder_id.as_ref(), "updated folder");
 
         Ok(folder)
     }
@@ -1856,5 +2263,221 @@ mod test_delete_folder {
         .await?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod test_update_folder_attributes {
+    use serde_json::json;
+    use time::macros::datetime;
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{body_json, header, method, path},
+    };
+
+    use super::*;
+    use crate::{
+        SharedLinkAccess, UserId,
+        test_support::{
+            assert_not_retried, create_client, is_invalid_argument, is_invalid_request_body,
+            mount_token, request_count, short_retry,
+        },
+    };
+
+    /// フォルダのAPIのパス
+    const FOLDER_PATH: &str = "/2.0/folders/123";
+
+    /// 期待するエラーであるかを判定する関数
+    type IsExpectedError = fn(&BoxClientError) -> bool;
+
+    /// 更新後のフォルダのレスポンス
+    fn folder_response() -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_json(json!({
+            "type": "folder",
+            "id": "123",
+            "etag": "2",
+            "name": "Contracts",
+        }))
+    }
+
+    /// 指定したすべての属性と`If-Match`ヘッダーを送信することを確認
+    #[tokio::test]
+    async fn test_sends_all_attributes() -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        Mock::given(method("PUT"))
+            .and(path(FOLDER_PATH))
+            .and(header("if-match", "1"))
+            .and(body_json(json!({
+                "name": "Contracts",
+                "description": "Signed contracts",
+                "shared_link": {
+                    "access": "open",
+                    "unshared_at": "2026-12-31T00:00:00Z",
+                    "permissions": {"can_download": true},
+                },
+                "folder_upload_email": {"access": "collaborators"},
+                "sync_state": "not_synced",
+                "tags": ["contract", "2026"],
+                "collections": [{"id": "999"}],
+                "can_non_owners_invite": false,
+                "can_non_owners_view_collaborators": false,
+                "is_collaboration_restricted_to_enterprise": true,
+            })))
+            .respond_with(folder_response())
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = create_client(&server, short_retry(0)?).await?;
+        let tags = ["contract", "2026"];
+        let collections = ["999"];
+        let update = FolderUpdate::default()
+            .with_name("Contracts")
+            .with_description("Signed contracts")
+            .with_shared_link(
+                SharedLinkSettings::default()
+                    .with_access(SharedLinkAccess::Open)
+                    .with_unshared_at(datetime!(2026-12-31 00:00:00 UTC))
+                    .with_can_download(true),
+            )
+            .with_folder_upload_email(FolderUploadEmailAccess::Collaborators)
+            .with_sync_state(SyncState::NotSynced)
+            .with_tags(&tags)
+            .with_collections(&collections)
+            .with_can_non_owners_invite(false)
+            .with_can_non_owners_view_collaborators(false)
+            .with_is_collaboration_restricted_to_enterprise(true);
+
+        let folder = client
+            .update_folder(
+                &FolderId::new("123"),
+                &update,
+                &UpdateItemOptions::default().with_etag("1"),
+            )
+            .await?;
+
+        assert_eq!(folder.etag.as_deref(), Some("2"));
+
+        Ok(())
+    }
+
+    /// 共有リンクとアップロード用メールアドレスの削除をnullで送信することを確認
+    #[tokio::test]
+    async fn test_sends_null_to_remove() -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        Mock::given(method("PUT"))
+            .and(path(FOLDER_PATH))
+            .and(body_json(
+                json!({"shared_link": null, "folder_upload_email": null}),
+            ))
+            .respond_with(folder_response())
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = create_client(&server, short_retry(0)?).await?;
+        let update = FolderUpdate::default()
+            .with_shared_link_removed()
+            .with_folder_upload_email_disabled();
+
+        client
+            .update_folder(
+                &FolderId::new("123"),
+                &update,
+                &UpdateItemOptions::default(),
+            )
+            .await?;
+
+        Ok(())
+    }
+
+    /// 移動先だけを指定した場合は、移動先の親フォルダを送信することを確認
+    #[tokio::test]
+    async fn test_sends_parent_only() -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        Mock::given(method("PUT"))
+            .and(path(FOLDER_PATH))
+            .and(body_json(json!({"parent": {"id": "0", "user_id": "789"}})))
+            .respond_with(folder_response())
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = create_client(&server, short_retry(0)?).await?;
+        let destination = MoveDestination::User(UserId::new("789"));
+
+        client
+            .update_folder(
+                &FolderId::new("123"),
+                &FolderUpdate::default().with_parent(&destination),
+                &UpdateItemOptions::default(),
+            )
+            .await?;
+
+        Ok(())
+    }
+
+    /// BOXが拒否する更新は、リクエストを送信せずにエラーを返すことを確認
+    #[tokio::test]
+    async fn test_rejects_invalid_update() -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        let client = create_client(&server, short_retry(0)?).await?;
+        let requests_before = request_count(&server).await;
+        let folder_id = FolderId::new("123");
+        let options = UpdateItemOptions::default();
+        let destination = MoveDestination::Folder(FolderId::new("456"));
+        let no_tags: [&str; 0] = [];
+
+        let cases: [(FolderId, FolderUpdate<'_>, IsExpectedError); 4] = [
+            (
+                FolderId::root(),
+                FolderUpdate::default().with_name("Root"),
+                is_invalid_argument,
+            ),
+            (
+                folder_id.clone(),
+                FolderUpdate::default()
+                    .with_parent(&destination)
+                    .with_name("Contracts"),
+                is_invalid_argument,
+            ),
+            (
+                folder_id.clone(),
+                FolderUpdate::default().with_tags(&no_tags),
+                is_invalid_argument,
+            ),
+            (
+                folder_id,
+                FolderUpdate::default().with_name("a/b"),
+                is_invalid_request_body,
+            ),
+        ];
+        for (folder_id, update, is_expected) in cases {
+            let result = client.update_folder(&folder_id, &update, &options).await;
+
+            assert!(
+                result.as_ref().is_err_and(is_expected),
+                "update: {update:?}, result: {result:?}"
+            );
+        }
+        assert_eq!(request_count(&server).await, requests_before);
+
+        Ok(())
+    }
+
+    /// 5xxを受け取った場合は、再試行せずにエラーを返すことを確認
+    #[tokio::test]
+    async fn test_server_error_is_not_retried() -> anyhow::Result<()> {
+        assert_not_retried("PUT", FOLDER_PATH, 500, async |client: &BoxClient| {
+            client
+                .update_folder(
+                    &FolderId::new("123"),
+                    &FolderUpdate::default().with_name("Contracts"),
+                    &UpdateItemOptions::default(),
+                )
+                .await
+        })
+        .await
     }
 }

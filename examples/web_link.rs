@@ -4,13 +4,17 @@
 //!
 //! 1. Webリンクを作成し、情報を取得する。
 //! 2. Webリンクの名前、説明およびURLを更新する。
-//! 3. 移動先の親フォルダを指定した場合は、Webリンクを移動する。
-//! 4. Webリンクを削除し、ゴミ箱内のWebリンクの情報を取得してから、Webリンクを復元する。
+//! 3. 名前、説明および共有リンクをまとめて更新してから、共有リンクを削除する。
+//! 4. 移動先の親フォルダを指定した場合は、Webリンクを移動する。
+//! 5. Webリンクを削除し、ゴミ箱内のWebリンクの情報を取得してから、Webリンクを復元する。
 //!
 //! サンプルが作成したWebリンクは、サンプルの終了後もBOXに残る。
 mod common;
 
-use box_client::{CreateWebLinkOptions, FolderId, MoveDestination, RestoreItemOptions};
+use box_client::{
+    BoxClient, CreateWebLinkOptions, FolderId, MoveDestination, RestoreItemOptions,
+    SharedLinkAccess, SharedLinkSettings, WebLink, WebLinkId, WebLinkUpdate,
+};
 
 /// 使用方法
 const USAGE: &str = "usage: RUST_LOG=info cargo run --quiet --example=web_link -- <url> <new-url> <parent-folder-id> [<destination-folder-id>]";
@@ -90,6 +94,10 @@ async fn main() -> anyhow::Result<()> {
         .await?;
     tracing::info!("updated web link url: {:?}", web_link.url);
 
+    let web_link =
+        update_web_link_attributes(&client, &web_link_id, web_link.etag.as_deref(), &prefix)
+            .await?;
+
     // Webリンクを移動
     // `MoveDestination::User`を指定した場合は、ユーザーのルートフォルダへ移動する。
     if let Some(destination_id) = destination_id {
@@ -124,4 +132,43 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("restored web link: {web_link:?}");
 
     Ok(())
+}
+
+/// Webリンクの複数の属性を1回のリクエストでまとめて更新してから、共有リンクなどを削除する。
+async fn update_web_link_attributes(
+    client: &BoxClient,
+    web_link_id: &WebLinkId,
+    etag: Option<&str>,
+    prefix: &str,
+) -> anyhow::Result<WebLink> {
+    // Webリンクの複数の属性を1回のリクエストで更新
+    // 名前、説明および共有リンクを設定する。指定しない属性は送信せず、BOXは変更しない。
+    let name = format!("{prefix}-updated");
+    let update = WebLinkUpdate::default()
+        .with_name(&name)
+        .with_description("box-clientのサンプルがまとめて更新した説明")
+        .with_shared_link(
+            SharedLinkSettings::default().with_access(SharedLinkAccess::Collaborators),
+        );
+    let web_link = client
+        .update_web_link(web_link_id, &update, &common::update_options(etag))
+        .await?;
+    tracing::info!(
+        "updated web link: name={}, description={:?}",
+        web_link.name,
+        web_link.description
+    );
+
+    // 共有リンクを削除
+    // 削除する属性には、BOXにnullを送信する。
+    let web_link = client
+        .update_web_link(
+            web_link_id,
+            &WebLinkUpdate::default().with_shared_link_removed(),
+            &common::update_options(web_link.etag.as_deref()),
+        )
+        .await?;
+    tracing::info!("removed web link shared link: etag={:?}", web_link.etag);
+
+    Ok(web_link)
 }
