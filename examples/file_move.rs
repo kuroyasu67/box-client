@@ -1,7 +1,7 @@
 //! ファイルを移動するサンプル
 mod common;
 
-use box_client::{FileId, FolderId, MoveDestination, UpdateFileOptions, UserId};
+use box_client::{FileId, FolderId, MoveDestination, UpdateItemOptions, UserId};
 
 /// 使用方法
 const USAGE: &str = "usage: RUST_LOG=info cargo run --quiet --example=file_move -- <file-id> (<parent-folder-id> | --user <user-id>)";
@@ -29,7 +29,7 @@ async fn main() -> anyhow::Result<()> {
 
     // ファイルの最新のETagを取得し、取得後にファイルが変更されていた場合は移動しない。
     let file = client.file_information(&file_id).await?;
-    let mut options = UpdateFileOptions::default();
+    let mut options = UpdateItemOptions::default();
     if let Some(etag) = file.etag.as_deref() {
         options = options.with_etag(etag);
     }

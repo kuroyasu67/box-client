@@ -191,6 +191,62 @@ pub(crate) fn validate_item_name(name: &str, _context: &()) -> garde::Result {
     Ok(())
 }
 
+/// ファイル、フォルダまたはWebリンクの情報を更新するAPIのオプション
+///
+/// BOXは、ファイル、フォルダおよびWebリンクの情報の更新で、同じ形式の`If-Match`ヘッダーを受け付けるため、
+/// 名前の変更、説明の設定および移動などのメソッドで共有する。
+///
+/// # Examples
+///
+/// ```
+/// use box_client::UpdateItemOptions;
+///
+/// let options = UpdateItemOptions::default().with_etag("1");
+/// assert_eq!(options.etag, Some("1"));
+/// ```
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct UpdateItemOptions<'a> {
+    /// 最後に取得した項目の`ETag`
+    ///
+    /// 指定した場合は、`If-Match`ヘッダーで送信する。項目が`ETag`の取得後に変更されていると、
+    /// BOXは項目を更新せずに412を返す。
+    pub etag: Option<&'a str>,
+}
+
+impl<'a> UpdateItemOptions<'a> {
+    /// 最後に取得した項目の`ETag`を設定する。
+    #[must_use]
+    pub fn with_etag(mut self, etag: &'a str) -> Self {
+        self.etag = Some(etag);
+        self
+    }
+}
+
+/// ファイル、フォルダまたはWebリンクの名前変更リクエストのボディ
+#[derive(Debug, Clone, Serialize, Validate)]
+pub(crate) struct RenameBody<'a> {
+    /// 新しい名前
+    ///
+    /// BOXは、名前の長さを文字数で数える。
+    #[garde(length(chars, min = 1, max = 255), custom(validate_item_name))]
+    name: &'a str,
+}
+
+impl<'a> RenameBody<'a> {
+    /// ボディを作成して検証する。
+    ///
+    /// # Errors
+    ///
+    /// 名前をBOXが拒否する場合は、[`BoxClientError::InvalidRequestBody`]を返す。
+    pub(crate) fn new(name: &'a str) -> BoxClientResult<Self> {
+        let body = Self { name };
+        body.validate()
+            .map_err(|report| BoxClientError::InvalidRequestBody(ValidationError::new(report)))?;
+        Ok(body)
+    }
+}
+
 /// ファイルまたはフォルダの説明の最大文字数
 ///
 /// BOXは、ファイルとフォルダのどちらの説明も、256文字以下に制限する。

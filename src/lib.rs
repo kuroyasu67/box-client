@@ -29,16 +29,16 @@ mod retry;
 #[cfg(test)]
 mod test_support;
 
-pub use api::files::{CopyFileOptions, File, UpdateFileOptions};
+pub use api::files::{CopyFileOptions, File};
 pub use api::folders::{
     CopyFolderOptions, DeleteFolderOptions, Folder, ItemSort, ItemsPage, ListItemsOptions,
-    MAX_ITEMS_LIMIT, SortDirection, UpdateFolderOptions,
+    MAX_ITEMS_LIMIT, SortDirection,
 };
 pub use api::trash::{ListTrashedItemsOptions, RestoreItemOptions};
 pub use api::types::{
     BoxItem, FileId, FileItem, FileVersionId, FolderId, FolderItem, ItemStatus,
-    MAX_DESCRIPTION_CHARS, MoveDestination, ParentFolder, PathCollection, UserId, WebLinkId,
-    WebLinkItem,
+    MAX_DESCRIPTION_CHARS, MoveDestination, ParentFolder, PathCollection, UpdateItemOptions,
+    UserId, WebLinkId, WebLinkItem,
 };
 pub use api::uploads::{
     CHUNKED_UPLOAD_THRESHOLD, UpdateFileContentOptions, UploadFileOptions, UploadUrl,
@@ -47,7 +47,7 @@ pub use api::users::{User, UserMini};
 pub use api::versions::{
     FileVersion, FileVersionsPage, ListFileVersionsOptions, MAX_FILE_VERSIONS_OFFSET,
 };
-pub use api::web_links::WebLink;
+pub use api::web_links::{CreateWebLinkOptions, WebLink};
 pub use client::{
     BoxClient, BoxClientBuilder, BoxClientTimeout, DEFAULT_UPLOAD_CONCURRENCY,
     MAX_REFRESH_BEFORE_EXPIRY, MAX_UPLOAD_CONCURRENCY, MIN_UPLOAD_CONCURRENCY,

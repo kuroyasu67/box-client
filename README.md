@@ -53,7 +53,7 @@
   - `MoveDestination::User`: ユーザーIDで指定したユーザーのルートフォルダへ移動する。
     BOXはユーザーIDを指定した場合にルートフォルダ以外への移動を受け付けないため、ルートフォルダのIDとユーザーIDを送信する。
     ユーザーIDが空文字列の場合は、リクエストを送信せずにエラーを返す。
-- ETagを`UpdateFolderOptions`で指定した場合は、`If-Match`ヘッダーで送信する。
+- ETagを`UpdateItemOptions`で指定した場合は、`If-Match`ヘッダーで送信する。
 - BOXは移動先の親フォルダと他の属性を同時に指定すると拒否するため、ボディでは移動先の親フォルダだけを送信する。
 - ルートフォルダを移動しようとした場合は、リクエストを送信せずにエラーを返す。
 - 冪等でないリクエストとして送信する。理由は「[冪等性の決定](#冪等性の決定)」を参照する。
@@ -63,7 +63,7 @@
 - メソッド: `BoxClient::rename_folder`
 - BOX API: `PUT /folders/{folder_id}`
 - フォルダ名を変更する。
-- ETagを`UpdateFolderOptions`で指定した場合は、`If-Match`ヘッダーで送信する。
+- ETagを`UpdateItemOptions`で指定した場合は、`If-Match`ヘッダーで送信する。
 - ルートフォルダを指定した場合、またはBOXが拒否するフォルダ名を指定した場合は、リクエストを送信せずにエラーを返す。
 - 冪等でないリクエストとして送信する。理由は「[冪等性の決定](#冪等性の決定)」を参照する。
 
@@ -73,7 +73,7 @@
 - BOX API: `PUT /folders/{folder_id}`
 - フォルダの説明を設定する。
   説明を削除する場合は、空文字列を指定する。
-- ETagを`UpdateFolderOptions`で指定した場合は、`If-Match`ヘッダーで送信する。
+- ETagを`UpdateItemOptions`で指定した場合は、`If-Match`ヘッダーで送信する。
 - ルートフォルダを指定した場合、または説明が256文字（`MAX_DESCRIPTION_CHARS`）より長い場合は、リクエストを送信せずにエラーを返す。
 - 冪等でないリクエストとして送信する。理由は「[冪等性の決定](#冪等性の決定)」を参照する。
 
@@ -155,7 +155,7 @@
 - メソッド: `BoxClient::rename_file`
 - BOX API: `PUT /files/{file_id}`
 - ファイル名を変更する。
-- ETagを`UpdateFileOptions`で指定した場合は、`If-Match`ヘッダーで送信する。
+- ETagを`UpdateItemOptions`で指定した場合は、`If-Match`ヘッダーで送信する。
 - BOXが拒否するファイル名を指定した場合は、リクエストを送信せずにエラーを返す。
 - 冪等でないリクエストとして送信する。理由は「[冪等性の決定](#冪等性の決定)」を参照する。
 
@@ -168,7 +168,7 @@
   - `MoveDestination::Folder`: フォルダIDで指定したフォルダへ移動する。
   - `MoveDestination::User`: ユーザーIDで指定したユーザーのルートフォルダへ移動する。
     ユーザーIDが空文字列の場合は、リクエストを送信せずにエラーを返す。
-- ETagを`UpdateFileOptions`で指定した場合は、`If-Match`ヘッダーで送信する。
+- ETagを`UpdateItemOptions`で指定した場合は、`If-Match`ヘッダーで送信する。
 - 冪等でないリクエストとして送信する。理由は「[冪等性の決定](#冪等性の決定)」を参照する。
 
 #### ファイルのコピー
@@ -189,7 +189,7 @@
 - BOX API: `PUT /files/{file_id}`
 - ファイルの説明を設定する。
   説明を削除する場合は、空文字列を指定する。
-- ETagを`UpdateFileOptions`で指定した場合は、`If-Match`ヘッダーで送信する。
+- ETagを`UpdateItemOptions`で指定した場合は、`If-Match`ヘッダーで送信する。
 - 説明が256文字（`MAX_DESCRIPTION_CHARS`）より長い場合は、リクエストを送信せずにエラーを返す。
 - 冪等でないリクエストとして送信する。理由は「[冪等性の決定](#冪等性の決定)」を参照する。
 
@@ -289,6 +289,31 @@
 - メソッド: `BoxClient::web_link_information`
 - BOX API: `GET /web_links/{web_link_id}`
 - Webリンク情報を取得する。
+
+#### Webリンクの作成
+
+- メソッド: `BoxClient::create_web_link`
+- BOX API: `POST /web_links`
+- 指定したURLを指すWebリンクを、指定したフォルダに作成する。
+- Webリンク名と説明を`CreateWebLinkOptions`で指定できる。
+  Webリンク名を指定しない場合、BOXはURLをWebリンク名にする。
+- URLが`http://`または`https://`で始まらない場合、Webリンク名をBOXが拒否する場合、または説明が256文字（`MAX_DESCRIPTION_CHARS`）より長い場合は、リクエストを送信せずにエラーを返す。
+  Webリンク名の制限は、ファイル名およびフォルダ名と同じ検証を共有する。
+- HTTPメソッドがPOSTであるため、冪等でないリクエストとして送信する。
+
+#### Webリンクの更新
+
+- メソッド
+  - `BoxClient::rename_web_link`: Webリンク名を変更する。
+  - `BoxClient::set_web_link_description`: Webリンクの説明を設定する。説明を削除する場合は、空文字列を指定する。
+  - `BoxClient::move_web_link`: Webリンクを別のフォルダへ移動する。移動先は、ファイルおよびフォルダの移動と同じく`MoveDestination`で指定する。
+  - `BoxClient::update_web_link_url`: WebリンクのURLを変更する。
+- BOX API: `PUT /web_links/{web_link_id}`
+- 名前、説明および移動先の検証とリクエストのボディは、ファイルおよびフォルダの同じ操作と共有する。
+  URLは、`http://`または`https://`で始まることを検証する。
+- ETagを`UpdateItemOptions`で指定した場合は、`If-Match`ヘッダーで送信する。
+  BOXのドキュメントは、このAPIが`If-Match`ヘッダーを受け付けることを明記していないが、WebリンクのETagを`If-Match`ヘッダーで使用すると記載している。
+- 冪等でないリクエストとして送信する。理由は「[冪等性の決定](#冪等性の決定)」を参照する。
 
 #### Webリンクの削除
 
@@ -489,6 +514,7 @@ BOXがアクセストークンを拒否して401を返した場合は、キャ�
 | ファイルの移動（`BoxClient::move_file`） | PUT | 冪等でない | ETagを指定した場合、BOXがファイルを移動した後に再送すると、ETagが変わっているため412を受け取る。その結果、移動の結果を誤って判断するおそれがある。 |
 | ファイル名の変更（`BoxClient::rename_file`） | PUT | 冪等でない | ETagを指定した場合、BOXが名前を変更した後に再送すると、ETagが変わっているため412を受け取る。その結果、変更の結果を誤って判断するおそれがある。 |
 | ファイルの説明の設定（`BoxClient::set_file_description`） | PUT | 冪等でない | ETagを指定した場合、BOXが説明を設定した後に再送すると、ETagが変わっているため412を受け取る。その結果、設定の結果を誤って判断するおそれがある。 |
+| Webリンクの更新（`BoxClient::rename_web_link`など） | PUT | 冪等でない | ETagを指定した場合、BOXが更新した後に再送すると、ETagが変わっているため412を受け取る。その結果、更新の結果を誤って判断するおそれがある。 |
 | フォルダの説明の設定（`BoxClient::set_folder_description`） | PUT | 冪等でない | ETagを指定した場合、BOXが説明を設定した後に再送すると、ETagが変わっているため412を受け取る。その結果、設定の結果を誤って判断するおそれがある。 |
 | ファイルの削除（`BoxClient::delete_file`） | DELETE | 冪等でない | BOXは削除済みのファイルに対して404を返す。BOXが削除した後に再送すると404を受け取り、削除の結果を誤って判断するおそれがある。 |
 | ファイルのバージョンの削除（`BoxClient::delete_file_version`） | DELETE | 冪等でない | BOXが削除した後に再送すると、削除済みのバージョンに対する削除となり、エラーを受け取りうる。その結果、削除の結果を誤って判断するおそれがある。 |

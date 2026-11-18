@@ -1,7 +1,7 @@
 //! ファイルの説明を設定するサンプル
 mod common;
 
-use box_client::{FileId, UpdateFileOptions};
+use box_client::{FileId, UpdateItemOptions};
 
 /// 使用方法
 const USAGE: &str = "usage: RUST_LOG=info cargo run --quiet --example=file_set_description -- <file-id> <description>";
@@ -22,7 +22,7 @@ async fn main() -> anyhow::Result<()> {
 
     // ファイルの最新のETagを取得し、取得後にファイルが変更されていた場合は説明を設定しない。
     let file = client.file_information(&file_id).await?;
-    let mut options = UpdateFileOptions::default();
+    let mut options = UpdateItemOptions::default();
     if let Some(etag) = file.etag.as_deref() {
         options = options.with_etag(etag);
     }

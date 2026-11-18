@@ -1,11 +1,18 @@
 //! Webリンクに関するAPI
 
-use serde::Deserialize;
+use garde::Validate;
+use reqwest::header::IF_MATCH;
+use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
 use crate::{
-    BoxClient, BoxClientResult, FolderItem, Idempotency, ItemStatus, PathCollection, UserMini,
-    WebLinkId, request::ApiRequest,
+    BoxClient, BoxClientError, BoxClientResult, FolderId, FolderItem, Idempotency, ItemStatus,
+    MAX_DESCRIPTION_CHARS, MoveDestination, ParentFolder, PathCollection, UserMini,
+    ValidationError, WebLinkId,
+    api::types::{
+        MoveBody, RenameBody, SetDescriptionBody, UpdateItemOptions, validate_optional_item_name,
+    },
+    request::ApiRequest,
 };
 
 /// Webリンク情報
@@ -68,6 +75,162 @@ pub struct WebLink {
     pub item_status: Option<ItemStatus>,
 }
 
+/// Webリンクの作成のオプション
+///
+/// # Examples
+///
+/// ```
+/// use box_client::CreateWebLinkOptions;
+///
+/// let options = CreateWebLinkOptions::default()
+///     .with_name("Example")
+///     .with_description("Example site");
+/// assert_eq!(options.name, Some("Example"));
+/// assert_eq!(options.description, Some("Example site"));
+/// ```
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct CreateWebLinkOptions<'a> {
+    /// Webリンク名
+    ///
+    /// `None`の場合、BOXはURLをWebリンク名にする。
+    pub name: Option<&'a str>,
+
+    /// Webリンクの説明
+    ///
+    /// [`MAX_DESCRIPTION_CHARS`]文字以下で指定する。
+    pub description: Option<&'a str>,
+}
+
+impl<'a> CreateWebLinkOptions<'a> {
+    /// Webリンク名を設定する。
+    #[must_use]
+    pub fn with_name(mut self, name: &'a str) -> Self {
+        self.name = Some(name);
+        self
+    }
+
+    /// Webリンクの説明を設定する。
+    #[must_use]
+    pub fn with_description(mut self, description: &'a str) -> Self {
+        self.description = Some(description);
+        self
+    }
+}
+
+/// WebリンクのURLが`http://`または`https://`で始まるか検証する。
+///
+/// BOXは、それ以外で始まるURLを受け付けない。
+/// `garde`の`custom`バリデーターとして、`#[garde(custom(validate_web_link_url))]`のように使用する。
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "gardeのcustomバリデーターは、コンテキストを参照で受け取るシグネチャを要求するため"
+)]
+fn validate_web_link_url(url: &str, _context: &()) -> garde::Result {
+    if url.starts_with("http://") || url.starts_with("https://") {
+        Ok(())
+    } else {
+        Err(garde::Error::new("must start with `http://` or `https://`"))
+    }
+}
+
+/// Webリンク作成リクエストのボディ
+#[derive(Debug, Clone, Serialize, Validate)]
+struct CreateWebLinkBody<'a> {
+    /// WebリンクのURL
+    #[garde(custom(validate_web_link_url))]
+    url: &'a str,
+
+    /// Webリンクを作成する親フォルダ
+    #[garde(skip)]
+    parent: ParentFolder,
+
+    /// Webリンク名
+    ///
+    /// `None`の場合は送信せず、BOXはURLをWebリンク名にする。
+    /// `garde`は`None`の場合に`length`を検証しない。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[garde(length(chars, min = 1, max = 255), custom(validate_optional_item_name))]
+    name: Option<&'a str>,
+
+    /// Webリンクの説明
+    ///
+    /// `None`の場合は送信しない。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[garde(length(chars, max = MAX_DESCRIPTION_CHARS))]
+    description: Option<&'a str>,
+}
+
+impl<'a> CreateWebLinkBody<'a> {
+    /// ボディを作成して検証する。
+    ///
+    /// # Errors
+    ///
+    /// URL、Webリンク名または説明をBOXが拒否する場合は、[`BoxClientError::InvalidRequestBody`]を返す。
+    fn new(
+        url: &'a str,
+        parent_id: &FolderId,
+        options: &CreateWebLinkOptions<'a>,
+    ) -> BoxClientResult<Self> {
+        let body = Self {
+            url,
+            parent: ParentFolder {
+                id: parent_id.clone(),
+            },
+            name: options.name,
+            description: options.description,
+        };
+        body.validate()
+            .map_err(|report| BoxClientError::InvalidRequestBody(ValidationError::new(report)))?;
+        Ok(body)
+    }
+}
+
+/// WebリンクのURL変更リクエストのボディ
+#[derive(Debug, Clone, Serialize, Validate)]
+struct UpdateWebLinkUrlBody<'a> {
+    /// 新しいURL
+    #[garde(custom(validate_web_link_url))]
+    url: &'a str,
+}
+
+impl<'a> UpdateWebLinkUrlBody<'a> {
+    /// ボディを作成して検証する。
+    ///
+    /// # Errors
+    ///
+    /// URLが`http://`または`https://`で始まらない場合は、[`BoxClientError::InvalidRequestBody`]を返す。
+    fn new(url: &'a str) -> BoxClientResult<Self> {
+        let body = Self { url };
+        body.validate()
+            .map_err(|report| BoxClientError::InvalidRequestBody(ValidationError::new(report)))?;
+        Ok(body)
+    }
+}
+
+/// Webリンクの更新リクエスト（`PUT /web_links/{web_link_id}`）を作成する。
+///
+/// BOXのドキュメントは、このAPIが`If-Match`ヘッダーを受け付けることを明記していないが、
+/// Webリンクの`ETag`は`If-Match`ヘッダーで使用すると記載しているため、`options.etag`を指定した場合は送信する。
+///
+/// # Errors
+///
+/// ボディをJSONにシリアライズできない場合は、[`BoxClientError::SerializeBody`]を返す。
+/// `options.etag`に使用できない文字が含まれる場合は、[`BoxClientError::InvalidHeaderValue`]を返す。
+fn update_web_link_request<'a, B: Serialize>(
+    web_link_id: &'a WebLinkId,
+    body: &B,
+    options: &UpdateItemOptions<'_>,
+) -> BoxClientResult<ApiRequest<'a>> {
+    let mut request = ApiRequest::put(["web_links", web_link_id.as_ref()])
+        .idempotency(Idempotency::NonIdempotent)
+        .json(body)?;
+    if let Some(etag) = options.etag {
+        request = request.header(IF_MATCH, etag)?;
+    }
+    Ok(request)
+}
+
 impl BoxClient {
     /// Webリンク情報を取得する。
     ///
@@ -83,6 +246,208 @@ impl BoxClient {
     pub async fn web_link_information(&self, web_link_id: &WebLinkId) -> BoxClientResult<WebLink> {
         self.send_json(ApiRequest::get(["web_links", web_link_id.as_ref()]))
             .await
+    }
+
+    /// Webリンクを作成する。
+    ///
+    /// HTTPメソッドがPOSTであるため、冪等でないリクエストとして送信する。
+    /// 5xxまたはタイムアウトの後に再送すると、同じWebリンクを重複して作成するおそれがあるためである。
+    ///
+    /// # Arguments
+    ///
+    /// - `url`: WebリンクのURL。`http://`または`https://`で始まるURLを指定する。
+    /// - `parent_id`: Webリンクを作成する親フォルダのID
+    /// - `options`: Webリンク名および説明のオプション
+    ///
+    /// # Errors
+    ///
+    /// URLが`http://`または`https://`で始まらない場合、Webリンク名をBOXが拒否する場合、
+    /// または説明が[`MAX_DESCRIPTION_CHARS`]文字より長い場合は、
+    /// リクエストを送信せずに[`BoxClientError::InvalidRequestBody`]を返す。
+    /// BOXがエラーレスポンスを返した場合は、[`BoxClientError::Api`]を返す。
+    /// 公式ドキュメントは、このAPIが返すエラーのステータスを個別に記載していない。
+    ///
+    /// 再試行できないエラーが発生した場合、または再試行回数の上限に達した場合はエラーを返す。
+    /// 5xxまたはタイムアウトでエラーを返した場合は、BOXがWebリンクを作成した可能性がある。
+    /// したがって、[`BoxClient::list_items_in_folder`]で親フォルダを確認する。
+    pub async fn create_web_link(
+        &self,
+        url: &str,
+        parent_id: &FolderId,
+        options: &CreateWebLinkOptions<'_>,
+    ) -> BoxClientResult<WebLink> {
+        let body = CreateWebLinkBody::new(url, parent_id, options)?;
+        let request = ApiRequest::post(["web_links"]).json(&body)?;
+
+        let web_link: WebLink = self.send_json(request).await?;
+
+        tracing::debug!(
+            web_link_id = web_link.id.as_ref(),
+            parent_id = parent_id.as_ref(),
+            "created web link"
+        );
+
+        Ok(web_link)
+    }
+
+    /// Webリンク名を変更する。
+    ///
+    /// [`BoxClient::rename_file`]と同様に、`options.etag`を指定した場合に再送すると412を受け取り、
+    /// 変更の結果を誤って判断するおそれがあるため、HTTPメソッドがPUTであっても冪等でないリクエストとして送信する。
+    ///
+    /// # Arguments
+    ///
+    /// - `web_link_id`: 名前を変更するWebリンクのID
+    /// - `name`: 新しいWebリンク名
+    /// - `options`: `ETag`のオプション
+    ///
+    /// # Errors
+    ///
+    /// Webリンク名をBOXが拒否する場合は、リクエストを送信せずに[`BoxClientError::InvalidRequestBody`]を返す。
+    /// `options.etag`に使用できない文字が含まれる場合は、リクエストを送信せずに
+    /// [`BoxClientError::InvalidHeaderValue`]を返す。
+    /// BOXがエラーレスポンスを返した場合は、[`BoxClientError::Api`]を返す。
+    ///
+    /// 再試行できないエラーが発生した場合、または再試行回数の上限に達した場合はエラーを返す。
+    /// 5xxまたはタイムアウトでエラーを返した場合は、BOXがWebリンク名を変更した可能性がある。
+    /// したがって、[`BoxClient::web_link_information`]でWebリンク名を確認する。
+    pub async fn rename_web_link(
+        &self,
+        web_link_id: &WebLinkId,
+        name: &str,
+        options: &UpdateItemOptions<'_>,
+    ) -> BoxClientResult<WebLink> {
+        let body = RenameBody::new(name)?;
+        let request = update_web_link_request(web_link_id, &body, options)?;
+
+        let web_link: WebLink = self.send_json(request).await?;
+
+        tracing::debug!(
+            web_link_id = web_link_id.as_ref(),
+            name = web_link.name,
+            "renamed web link"
+        );
+
+        Ok(web_link)
+    }
+
+    /// Webリンクの説明を設定する。
+    ///
+    /// 説明を削除する場合は、`description`に空文字列を指定する。
+    ///
+    /// [`BoxClient::set_file_description`]と同様に、HTTPメソッドがPUTであっても冪等でないリクエストとして送信する。
+    ///
+    /// # Arguments
+    ///
+    /// - `web_link_id`: 説明を設定するWebリンクのID
+    /// - `description`: Webリンクの説明。[`MAX_DESCRIPTION_CHARS`]文字以下で指定する。
+    /// - `options`: `ETag`のオプション
+    ///
+    /// # Errors
+    ///
+    /// 説明が[`MAX_DESCRIPTION_CHARS`]文字より長い場合は、リクエストを送信せずに
+    /// [`BoxClientError::InvalidRequestBody`]を返す。
+    /// `options.etag`に使用できない文字が含まれる場合は、リクエストを送信せずに
+    /// [`BoxClientError::InvalidHeaderValue`]を返す。
+    /// BOXがエラーレスポンスを返した場合は、[`BoxClientError::Api`]を返す。
+    ///
+    /// 再試行できないエラーが発生した場合、または再試行回数の上限に達した場合はエラーを返す。
+    /// 5xxまたはタイムアウトでエラーを返した場合は、BOXが説明を設定した可能性がある。
+    /// したがって、[`BoxClient::web_link_information`]でWebリンクの説明を確認する。
+    pub async fn set_web_link_description(
+        &self,
+        web_link_id: &WebLinkId,
+        description: &str,
+        options: &UpdateItemOptions<'_>,
+    ) -> BoxClientResult<WebLink> {
+        let body = SetDescriptionBody::new(description)?;
+        let request = update_web_link_request(web_link_id, &body, options)?;
+
+        let web_link = self.send_json(request).await?;
+
+        tracing::debug!(
+            web_link_id = web_link_id.as_ref(),
+            "set web link description"
+        );
+
+        Ok(web_link)
+    }
+
+    /// Webリンクを別のフォルダへ移動する。
+    ///
+    /// [`BoxClient::move_file`]と同様に、HTTPメソッドがPUTであっても冪等でないリクエストとして送信する。
+    ///
+    /// # Arguments
+    ///
+    /// - `web_link_id`: 移動するWebリンクのID
+    /// - `destination`: 移動先。フォルダID、またはルートフォルダへ移動するユーザーのIDで指定する。
+    /// - `options`: `ETag`のオプション
+    ///
+    /// # Errors
+    ///
+    /// `destination`のユーザーIDが空文字列の場合は、リクエストを送信せずに[`BoxClientError::InvalidArgument`]を返す。
+    /// `options.etag`に使用できない文字が含まれる場合は、リクエストを送信せずに
+    /// [`BoxClientError::InvalidHeaderValue`]を返す。
+    /// BOXがエラーレスポンスを返した場合は、[`BoxClientError::Api`]を返す。
+    ///
+    /// 再試行できないエラーが発生した場合、または再試行回数の上限に達した場合はエラーを返す。
+    /// 5xxまたはタイムアウトでエラーを返した場合は、BOXがWebリンクを移動した可能性がある。
+    /// したがって、[`BoxClient::web_link_information`]でWebリンクの親フォルダを確認する。
+    pub async fn move_web_link(
+        &self,
+        web_link_id: &WebLinkId,
+        destination: &MoveDestination,
+        options: &UpdateItemOptions<'_>,
+    ) -> BoxClientResult<WebLink> {
+        let body = MoveBody::new(destination)?;
+        let request = update_web_link_request(web_link_id, &body, options)?;
+
+        let web_link = self.send_json(request).await?;
+
+        tracing::debug!(
+            web_link_id = web_link_id.as_ref(),
+            ?destination,
+            "moved web link"
+        );
+
+        Ok(web_link)
+    }
+
+    /// WebリンクのURLを変更する。
+    ///
+    /// [`BoxClient::rename_web_link`]と同様に、HTTPメソッドがPUTであっても冪等でないリクエストとして送信する。
+    ///
+    /// # Arguments
+    ///
+    /// - `web_link_id`: URLを変更するWebリンクのID
+    /// - `url`: 新しいURL。`http://`または`https://`で始まるURLを指定する。
+    /// - `options`: `ETag`のオプション
+    ///
+    /// # Errors
+    ///
+    /// URLが`http://`または`https://`で始まらない場合は、リクエストを送信せずに
+    /// [`BoxClientError::InvalidRequestBody`]を返す。
+    /// `options.etag`に使用できない文字が含まれる場合は、リクエストを送信せずに
+    /// [`BoxClientError::InvalidHeaderValue`]を返す。
+    /// BOXがエラーレスポンスを返した場合は、[`BoxClientError::Api`]を返す。
+    ///
+    /// 再試行できないエラーが発生した場合、または再試行回数の上限に達した場合はエラーを返す。
+    /// 5xxまたはタイムアウトでエラーを返した場合は、BOXがURLを変更した可能性がある。
+    /// したがって、[`BoxClient::web_link_information`]でWebリンクのURLを確認する。
+    pub async fn update_web_link_url(
+        &self,
+        web_link_id: &WebLinkId,
+        url: &str,
+        options: &UpdateItemOptions<'_>,
+    ) -> BoxClientResult<WebLink> {
+        let body = UpdateWebLinkUrlBody::new(url)?;
+        let request = update_web_link_request(web_link_id, &body, options)?;
+
+        let web_link = self.send_json(request).await?;
+
+        tracing::debug!(web_link_id = web_link_id.as_ref(), "updated web link url");
+
+        Ok(web_link)
     }
 
     /// Webリンクを削除する。
@@ -304,6 +669,319 @@ mod test_web_link_information {
             matches!(&result, Err(BoxClientError::Api(e)) if e.status == 404),
             "result: {result:?}"
         );
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod test_create_web_link {
+    use rstest::rstest;
+    use serde_json::json;
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{body_json, method, path},
+    };
+
+    use super::*;
+    use crate::test_support::{create_client, mount_token, request_count, short_retry};
+
+    /// WebリンクのAPIのパス
+    const WEB_LINKS_PATH: &str = "/2.0/web_links";
+
+    /// URLと親フォルダ、および指定した場合だけ名前と説明を送信し、作成したWebリンクを返すことを確認
+    #[rstest]
+    #[case::minimal(
+        CreateWebLinkOptions::default(),
+        json!({"url": "https://example.com", "parent": {"id": "456"}})
+    )]
+    #[case::name_and_description(
+        CreateWebLinkOptions::default().with_name("Example").with_description("Example site"),
+        json!({
+            "url": "https://example.com",
+            "parent": {"id": "456"},
+            "name": "Example",
+            "description": "Example site",
+        })
+    )]
+    #[tokio::test]
+    async fn test_create_web_link(
+        #[case] options: CreateWebLinkOptions<'static>,
+        #[case] expected_body: serde_json::Value,
+    ) -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        Mock::given(method("POST"))
+            .and(path(WEB_LINKS_PATH))
+            .and(body_json(expected_body))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "type": "web_link",
+                "id": "12345",
+                "name": "Example",
+                "url": "https://example.com",
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = create_client(&server, short_retry(0)?).await?;
+
+        let web_link = client
+            .create_web_link("https://example.com", &FolderId::new("456"), &options)
+            .await?;
+
+        assert_eq!(web_link.id, WebLinkId::new("12345"));
+        assert_eq!(web_link.url.as_deref(), Some("https://example.com"));
+
+        Ok(())
+    }
+
+    /// BOXが拒否するURL、名前または説明を指定した場合は、リクエストを送信せずにエラーを返すことを確認
+    #[rstest]
+    #[case::ftp_url("ftp://example.com", None, None)]
+    #[case::no_scheme("example.com", None, None)]
+    #[case::empty_name("https://example.com", Some(""), None)]
+    #[case::invalid_name("https://example.com", Some("a/b"), None)]
+    #[case::too_long_description(
+        "https://example.com",
+        None,
+        Some(&*"あ".repeat(MAX_DESCRIPTION_CHARS + 1))
+    )]
+    #[tokio::test]
+    async fn test_create_web_link_rejects_without_request(
+        #[case] url: &str,
+        #[case] name: Option<&str>,
+        #[case] description: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        let client = create_client(&server, short_retry(0)?).await?;
+        let requests_before = request_count(&server).await;
+        let options = CreateWebLinkOptions { name, description };
+
+        let result = client
+            .create_web_link(url, &FolderId::new("456"), &options)
+            .await;
+
+        assert!(
+            matches!(result, Err(BoxClientError::InvalidRequestBody(_))),
+            "result: {result:?}"
+        );
+        assert_eq!(request_count(&server).await, requests_before);
+
+        Ok(())
+    }
+
+    /// 作成は冪等でないため、5xxを再試行せずにそのまま返すことを確認
+    #[tokio::test]
+    async fn test_create_web_link_error_is_not_retried() -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        Mock::given(method("POST"))
+            .and(path(WEB_LINKS_PATH))
+            .respond_with(ResponseTemplate::new(500))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = create_client(&server, short_retry(2)?).await?;
+
+        let result = client
+            .create_web_link(
+                "https://example.com",
+                &FolderId::new("456"),
+                &CreateWebLinkOptions::default(),
+            )
+            .await;
+
+        assert!(
+            matches!(&result, Err(BoxClientError::Api(e)) if e.status == 500),
+            "result: {result:?}"
+        );
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod test_update_web_link {
+    use rstest::rstest;
+    use serde_json::json;
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{body_json, method, path},
+    };
+
+    use super::*;
+    use crate::{
+        UserId,
+        test_support::{create_client, mount_token, request_count, short_retry},
+    };
+
+    /// WebリンクのAPIのパス
+    const WEB_LINK_PATH: &str = "/2.0/web_links/12345";
+
+    /// Webリンクを更新するメソッド
+    #[derive(Debug, Clone)]
+    enum Update {
+        /// 名前の変更
+        Rename(&'static str),
+
+        /// 説明の設定
+        Description(String),
+
+        /// 移動
+        Move(MoveDestination),
+
+        /// URLの変更
+        Url(&'static str),
+    }
+
+    impl Update {
+        /// 更新するメソッドを呼び出す。
+        async fn call(
+            &self,
+            client: &BoxClient,
+            options: &UpdateItemOptions<'_>,
+        ) -> BoxClientResult<WebLink> {
+            let id = WebLinkId::new("12345");
+            match self {
+                Self::Rename(name) => client.rename_web_link(&id, name, options).await,
+                Self::Description(description) => {
+                    client
+                        .set_web_link_description(&id, description, options)
+                        .await
+                }
+                Self::Move(destination) => client.move_web_link(&id, destination, options).await,
+                Self::Url(url) => client.update_web_link_url(&id, url, options).await,
+            }
+        }
+    }
+
+    /// WebリンクのAPIへのPUTリクエストのIf-Matchヘッダーを返す。
+    async fn update_requests(server: &MockServer) -> Vec<Option<String>> {
+        server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|r| r.method.as_str() == "PUT" && r.url.path() == WEB_LINK_PATH)
+            .map(|r| {
+                r.headers
+                    .get("if-match")
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_owned)
+            })
+            .collect()
+    }
+
+    /// 更新する属性だけをボディで送信し、`ETag`を指定した場合だけIf-Matchヘッダーを送信することを確認
+    #[rstest]
+    #[case::rename(Update::Rename("Example"), json!({"name": "Example"}), None)]
+    #[case::rename_with_etag(Update::Rename("Example"), json!({"name": "Example"}), Some("1"))]
+    #[case::description(
+        Update::Description("Example site".to_owned()),
+        json!({"description": "Example site"}),
+        None
+    )]
+    #[case::clear_description(Update::Description(String::new()), json!({"description": ""}), None)]
+    #[case::move_to_folder(
+        Update::Move(MoveDestination::Folder(FolderId::new("456"))),
+        json!({"parent": {"id": "456"}}),
+        None
+    )]
+    #[case::move_to_user_root(
+        Update::Move(MoveDestination::User(UserId::new("789"))),
+        json!({"parent": {"id": "0", "user_id": "789"}}),
+        None
+    )]
+    #[case::url(Update::Url("http://example.org"), json!({"url": "http://example.org"}), Some("1"))]
+    #[tokio::test]
+    async fn test_update_web_link(
+        #[case] update: Update,
+        #[case] expected_body: serde_json::Value,
+        #[case] etag: Option<&'static str>,
+    ) -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        Mock::given(method("PUT"))
+            .and(path(WEB_LINK_PATH))
+            .and(body_json(expected_body))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "type": "web_link",
+                "id": "12345",
+                "etag": "2",
+                "name": "Example",
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = create_client(&server, short_retry(0)?).await?;
+        let options = UpdateItemOptions { etag };
+
+        let web_link = update.call(&client, &options).await?;
+
+        assert_eq!(web_link.id, WebLinkId::new("12345"));
+        assert_eq!(
+            update_requests(&server).await,
+            vec![etag.map(str::to_owned)]
+        );
+
+        Ok(())
+    }
+
+    /// BOXが拒否する値を指定した場合は、リクエストを送信せずにエラーを返すことを確認
+    #[rstest]
+    #[case::empty_name(Update::Rename(""))]
+    #[case::invalid_name(Update::Rename("a/b"))]
+    #[case::too_long_description(Update::Description("あ".repeat(MAX_DESCRIPTION_CHARS + 1)))]
+    #[case::empty_user_id(Update::Move(MoveDestination::User(UserId::new(""))))]
+    #[case::invalid_url(Update::Url("ftp://example.com"))]
+    #[tokio::test]
+    async fn test_update_web_link_rejects_without_request(
+        #[case] update: Update,
+    ) -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        let client = create_client(&server, short_retry(0)?).await?;
+        let requests_before = request_count(&server).await;
+
+        let result = update.call(&client, &UpdateItemOptions::default()).await;
+
+        assert!(
+            matches!(
+                result,
+                Err(BoxClientError::InvalidRequestBody(_) | BoxClientError::InvalidArgument(_))
+            ),
+            "result: {result:?}"
+        );
+        assert_eq!(request_count(&server).await, requests_before);
+
+        Ok(())
+    }
+
+    /// 更新は冪等でないため、BOXのエラーレスポンスを再試行せずにそのまま返すことを確認
+    #[rstest]
+    #[case::etag_mismatch(412)]
+    #[case::internal_server_error(500)]
+    #[tokio::test]
+    async fn test_update_web_link_error_is_not_retried(#[case] status: u16) -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        Mock::given(method("PUT"))
+            .and(path(WEB_LINK_PATH))
+            .respond_with(ResponseTemplate::new(status))
+            .mount(&server)
+            .await;
+        let client = create_client(&server, short_retry(2)?).await?;
+
+        let result = Update::Rename("Example")
+            .call(&client, &UpdateItemOptions::default())
+            .await;
+
+        assert!(
+            matches!(&result, Err(BoxClientError::Api(e)) if e.status == status),
+            "result: {result:?}"
+        );
+        assert_eq!(update_requests(&server).await.len(), 1);
 
         Ok(())
     }

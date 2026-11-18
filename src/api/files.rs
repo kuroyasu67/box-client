@@ -10,7 +10,9 @@ use crate::{
     BoxClient, BoxClientError, BoxClientResult, FileId, FileVersion, FileVersionId, FolderId,
     FolderItem, Idempotency, ItemStatus, MoveDestination, ParentFolder, PathCollection, UserMini,
     ValidationError,
-    api::types::{MoveBody, SetDescriptionBody, validate_item_name, validate_optional_item_name},
+    api::types::{
+        MoveBody, RenameBody, SetDescriptionBody, UpdateItemOptions, validate_optional_item_name,
+    },
     request::ApiRequest,
 };
 
@@ -178,59 +180,6 @@ impl<'a> CopyFileBody<'a> {
     }
 }
 
-/// ファイルの情報を更新するAPI（`PUT /files/{file_id}`）のオプション
-///
-/// # Examples
-///
-/// ```
-/// use box_client::UpdateFileOptions;
-///
-/// let options = UpdateFileOptions::default().with_etag("1");
-/// assert_eq!(options.etag, Some("1"));
-/// ```
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct UpdateFileOptions<'a> {
-    /// 最後に取得したファイルの`ETag`
-    ///
-    /// 指定した場合は、`If-Match`ヘッダーで送信する。ファイルが`ETag`の取得後に変更されていると、
-    /// BOXはファイルを更新せずに412を返す。
-    pub etag: Option<&'a str>,
-}
-
-impl<'a> UpdateFileOptions<'a> {
-    /// 最後に取得したファイルの`ETag`を設定する。
-    #[must_use]
-    pub fn with_etag(mut self, etag: &'a str) -> Self {
-        self.etag = Some(etag);
-        self
-    }
-}
-
-/// ファイル名変更リクエストのボディ
-#[derive(Debug, Clone, Serialize, Validate)]
-struct RenameFileBody<'a> {
-    /// 新しいファイル名
-    ///
-    /// BOXは、名前の長さを文字数で数える。
-    #[garde(length(chars, min = 1, max = 255), custom(validate_item_name))]
-    name: &'a str,
-}
-
-impl<'a> RenameFileBody<'a> {
-    /// ボディを作成して検証する。
-    ///
-    /// # Errors
-    ///
-    /// ファイル名をBOXが拒否する場合は、[`BoxClientError::InvalidRequestBody`]を返す。
-    fn new(name: &'a str) -> BoxClientResult<Self> {
-        let body = Self { name };
-        body.validate()
-            .map_err(|report| BoxClientError::InvalidRequestBody(ValidationError::new(report)))?;
-        Ok(body)
-    }
-}
-
 impl BoxClient {
     /// ファイル情報を取得する。
     ///
@@ -336,9 +285,9 @@ impl BoxClient {
         &self,
         file_id: &FileId,
         name: &str,
-        options: &UpdateFileOptions<'_>,
+        options: &UpdateItemOptions<'_>,
     ) -> BoxClientResult<File> {
-        let body = RenameFileBody::new(name)?;
+        let body = RenameBody::new(name)?;
         let mut request = ApiRequest::put(["files", file_id.as_ref()])
             .idempotency(Idempotency::NonIdempotent)
             .json(&body)?;
@@ -390,7 +339,7 @@ impl BoxClient {
         &self,
         file_id: &FileId,
         description: &str,
-        options: &UpdateFileOptions<'_>,
+        options: &UpdateItemOptions<'_>,
     ) -> BoxClientResult<File> {
         let body = SetDescriptionBody::new(description)?;
         let mut request = ApiRequest::put(["files", file_id.as_ref()])
@@ -441,7 +390,7 @@ impl BoxClient {
         &self,
         file_id: &FileId,
         destination: &MoveDestination,
-        options: &UpdateFileOptions<'_>,
+        options: &UpdateItemOptions<'_>,
     ) -> BoxClientResult<File> {
         let body = MoveBody::new(destination)?;
         let mut request = ApiRequest::put(["files", file_id.as_ref()])
@@ -888,11 +837,11 @@ mod test_rename_file {
 
     /// 新しい名前だけをボディで送信し、オプションに応じてIf-Matchヘッダーを送信することを確認
     #[rstest]
-    #[case::default(UpdateFileOptions::default(), None)]
-    #[case::etag(UpdateFileOptions { etag: Some("1") }, Some("1"))]
+    #[case::default(UpdateItemOptions::default(), None)]
+    #[case::etag(UpdateItemOptions { etag: Some("1") }, Some("1"))]
     #[tokio::test]
     async fn test_rename_file(
-        #[case] options: UpdateFileOptions<'static>,
+        #[case] options: UpdateItemOptions<'static>,
         #[case] expected_if_match: Option<&str>,
     ) -> anyhow::Result<()> {
         let server = MockServer::start().await;
@@ -939,7 +888,7 @@ mod test_rename_file {
         let requests_before = request_count(&server).await;
 
         let result = client
-            .rename_file(&FileId::new("12345"), name, &UpdateFileOptions::default())
+            .rename_file(&FileId::new("12345"), name, &UpdateItemOptions::default())
             .await;
 
         assert!(
@@ -972,7 +921,7 @@ mod test_rename_file {
             .rename_file(
                 &FileId::new("12345"),
                 "Renamed.pdf",
-                &UpdateFileOptions::default(),
+                &UpdateItemOptions::default(),
             )
             .await;
 
@@ -1022,22 +971,22 @@ mod test_set_file_description {
     ///
     /// 説明を削除する空文字列と、上限の文字数の説明も送信できることを確認する。
     #[rstest]
-    #[case::default("Contract for the project", UpdateFileOptions::default(), None)]
+    #[case::default("Contract for the project", UpdateItemOptions::default(), None)]
     #[case::etag(
         "Contract for the project",
-        UpdateFileOptions { etag: Some("1") },
+        UpdateItemOptions { etag: Some("1") },
         Some("1")
     )]
-    #[case::empty("", UpdateFileOptions::default(), None)]
+    #[case::empty("", UpdateItemOptions::default(), None)]
     #[case::max_japanese(
         &"あ".repeat(crate::MAX_DESCRIPTION_CHARS),
-        UpdateFileOptions::default(),
+        UpdateItemOptions::default(),
         None
     )]
     #[tokio::test]
     async fn test_set_file_description(
         #[case] description: &str,
-        #[case] options: UpdateFileOptions<'static>,
+        #[case] options: UpdateItemOptions<'static>,
         #[case] expected_if_match: Option<&str>,
     ) -> anyhow::Result<()> {
         let server = MockServer::start().await;
@@ -1082,7 +1031,7 @@ mod test_set_file_description {
             .set_file_description(
                 &FileId::new("12345"),
                 &"あ".repeat(crate::MAX_DESCRIPTION_CHARS + 1),
-                &UpdateFileOptions::default(),
+                &UpdateItemOptions::default(),
             )
             .await;
 
@@ -1117,7 +1066,7 @@ mod test_set_file_description {
             .set_file_description(
                 &FileId::new("12345"),
                 "Contract for the project",
-                &UpdateFileOptions::default(),
+                &UpdateItemOptions::default(),
             )
             .await;
 
@@ -1170,26 +1119,26 @@ mod test_move_file {
     #[rstest]
     #[case::folder(
         MoveDestination::Folder(FolderId::new("456")),
-        UpdateFileOptions::default(),
+        UpdateItemOptions::default(),
         json!({"parent": {"id": "456"}}),
         None
     )]
     #[case::folder_with_etag(
         MoveDestination::Folder(FolderId::new("456")),
-        UpdateFileOptions { etag: Some("1") },
+        UpdateItemOptions { etag: Some("1") },
         json!({"parent": {"id": "456"}}),
         Some("1")
     )]
     #[case::user_root(
         MoveDestination::User(UserId::new("789")),
-        UpdateFileOptions::default(),
+        UpdateItemOptions::default(),
         json!({"parent": {"id": "0", "user_id": "789"}}),
         None
     )]
     #[tokio::test]
     async fn test_move_file(
         #[case] destination: MoveDestination,
-        #[case] options: UpdateFileOptions<'static>,
+        #[case] options: UpdateItemOptions<'static>,
         #[case] expected_body: serde_json::Value,
         #[case] expected_if_match: Option<&str>,
     ) -> anyhow::Result<()> {
@@ -1235,7 +1184,7 @@ mod test_move_file {
             .move_file(
                 &FileId::new("12345"),
                 &MoveDestination::User(UserId::new("")),
-                &UpdateFileOptions::default(),
+                &UpdateItemOptions::default(),
             )
             .await;
 
@@ -1269,7 +1218,7 @@ mod test_move_file {
             .move_file(
                 &FileId::new("12345"),
                 &MoveDestination::Folder(FolderId::new("456")),
-                &UpdateFileOptions::default(),
+                &UpdateItemOptions::default(),
             )
             .await;
 

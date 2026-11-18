@@ -1,7 +1,7 @@
 //! フォルダを移動するサンプル
 mod common;
 
-use box_client::{FolderId, MoveDestination, UpdateFolderOptions, UserId};
+use box_client::{FolderId, MoveDestination, UpdateItemOptions, UserId};
 
 /// 使用方法
 const USAGE: &str = "usage: RUST_LOG=info cargo run --quiet --example=folder_move -- <folder-id> (<parent-folder-id> | --user <user-id>)";
@@ -29,7 +29,7 @@ async fn main() -> anyhow::Result<()> {
 
     // フォルダの最新のETagを取得し、取得後にフォルダが変更されていた場合は移動しない。
     let folder = client.folder_information(&folder_id).await?;
-    let mut options = UpdateFolderOptions::default();
+    let mut options = UpdateItemOptions::default();
     if let Some(etag) = folder.etag.as_deref() {
         options = options.with_etag(etag);
     }

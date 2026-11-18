@@ -10,8 +10,8 @@ use crate::{
     BoxClient, BoxClientError, BoxClientResult, BoxItem, FolderId, FolderItem, Idempotency,
     ItemStatus, MoveDestination, ParentFolder, UserMini, ValidationError,
     api::types::{
-        MoveBody, PathCollection, SetDescriptionBody, validate_item_name,
-        validate_optional_item_name,
+        MoveBody, PathCollection, RenameBody, SetDescriptionBody, UpdateItemOptions,
+        validate_item_name, validate_optional_item_name,
     },
     request::ApiRequest,
 };
@@ -365,62 +365,6 @@ impl<'a> CopyFolderBody<'a> {
     }
 }
 
-/// フォルダの情報を更新するAPI（`PUT /folders/{folder_id}`）のオプション
-///
-/// [`BoxClient::move_folder`]、[`BoxClient::rename_folder`]および
-/// [`BoxClient::set_folder_description`]で共通に使用する。
-///
-/// # Examples
-///
-/// ```
-/// use box_client::UpdateFolderOptions;
-///
-/// let options = UpdateFolderOptions::default().with_etag("1");
-/// assert_eq!(options.etag, Some("1"));
-/// ```
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct UpdateFolderOptions<'a> {
-    /// 最後に取得したフォルダの`ETag`
-    ///
-    /// 指定した場合は、`If-Match`ヘッダーで送信する。フォルダが`ETag`の取得後に変更されていると、
-    /// BOXはフォルダを更新せずに412を返す。
-    pub etag: Option<&'a str>,
-}
-
-impl<'a> UpdateFolderOptions<'a> {
-    /// 最後に取得したフォルダの`ETag`を設定する。
-    #[must_use]
-    pub fn with_etag(mut self, etag: &'a str) -> Self {
-        self.etag = Some(etag);
-        self
-    }
-}
-
-/// フォルダ名変更リクエストのボディ
-#[derive(Debug, Clone, Serialize, Validate)]
-struct RenameFolderBody<'a> {
-    /// 新しいフォルダ名
-    ///
-    /// BOXは、名前の長さを文字数で数える。
-    #[garde(length(chars, min = 1, max = 255), custom(validate_item_name))]
-    name: &'a str,
-}
-
-impl<'a> RenameFolderBody<'a> {
-    /// ボディを作成して検証する。
-    ///
-    /// # Errors
-    ///
-    /// フォルダ名をBOXが拒否する場合は、[`BoxClientError::InvalidRequestBody`]を返す。
-    fn new(name: &'a str) -> BoxClientResult<Self> {
-        let body = Self { name };
-        body.validate()
-            .map_err(|report| BoxClientError::InvalidRequestBody(ValidationError::new(report)))?;
-        Ok(body)
-    }
-}
-
 /// フォルダを削除するときのオプション
 ///
 /// 将来フィールドを追加しても利用者のコードが壊れないように、`#[non_exhaustive]`を付けている。
@@ -699,7 +643,7 @@ impl BoxClient {
         &self,
         folder_id: &FolderId,
         name: &str,
-        options: &UpdateFolderOptions<'_>,
+        options: &UpdateItemOptions<'_>,
     ) -> BoxClientResult<Folder> {
         if folder_id.is_root() {
             return Err(BoxClientError::InvalidArgument(
@@ -707,7 +651,7 @@ impl BoxClient {
             ));
         }
 
-        let body = RenameFolderBody::new(name)?;
+        let body = RenameBody::new(name)?;
         let mut request = ApiRequest::put(["folders", folder_id.as_ref()])
             .idempotency(Idempotency::NonIdempotent)
             .json(&body)?;
@@ -766,7 +710,7 @@ impl BoxClient {
         &self,
         folder_id: &FolderId,
         description: &str,
-        options: &UpdateFolderOptions<'_>,
+        options: &UpdateItemOptions<'_>,
     ) -> BoxClientResult<Folder> {
         if folder_id.is_root() {
             return Err(BoxClientError::InvalidArgument(
@@ -834,7 +778,7 @@ impl BoxClient {
         &self,
         folder_id: &FolderId,
         destination: &MoveDestination,
-        options: &UpdateFolderOptions<'_>,
+        options: &UpdateItemOptions<'_>,
     ) -> BoxClientResult<Folder> {
         if folder_id.is_root() {
             return Err(BoxClientError::InvalidArgument(
@@ -1932,11 +1876,11 @@ mod test_rename_folder {
 
     /// 新しい名前だけをボディで送信し、オプションに応じてIf-Matchヘッダーを送信することを確認
     #[rstest]
-    #[case::default(UpdateFolderOptions::default(), None)]
-    #[case::etag(UpdateFolderOptions { etag: Some("1") }, Some("1"))]
+    #[case::default(UpdateItemOptions::default(), None)]
+    #[case::etag(UpdateItemOptions { etag: Some("1") }, Some("1"))]
     #[tokio::test]
     async fn test_rename_folder(
-        #[case] options: UpdateFolderOptions<'static>,
+        #[case] options: UpdateItemOptions<'static>,
         #[case] expected_if_match: Option<&str>,
     ) -> anyhow::Result<()> {
         let server = MockServer::start().await;
@@ -1988,7 +1932,7 @@ mod test_rename_folder {
         let requests_before = request_count(&server).await;
 
         let result = client
-            .rename_folder(&folder_id, name, &UpdateFolderOptions::default())
+            .rename_folder(&folder_id, name, &UpdateItemOptions::default())
             .await;
 
         let matched = match expected {
@@ -2022,7 +1966,7 @@ mod test_rename_folder {
             .rename_folder(
                 &FolderId::new("123"),
                 "Renamed",
-                &UpdateFolderOptions::default(),
+                &UpdateItemOptions::default(),
             )
             .await;
 
@@ -2072,22 +2016,22 @@ mod test_set_folder_description {
     ///
     /// 説明を削除する空文字列と、上限の文字数の説明も送信できることを確認する。
     #[rstest]
-    #[case::default("Legal contracts", UpdateFolderOptions::default(), None)]
+    #[case::default("Legal contracts", UpdateItemOptions::default(), None)]
     #[case::etag(
         "Legal contracts",
-        UpdateFolderOptions { etag: Some("1") },
+        UpdateItemOptions { etag: Some("1") },
         Some("1")
     )]
-    #[case::empty("", UpdateFolderOptions::default(), None)]
+    #[case::empty("", UpdateItemOptions::default(), None)]
     #[case::max_japanese(
         &"あ".repeat(crate::MAX_DESCRIPTION_CHARS),
-        UpdateFolderOptions::default(),
+        UpdateItemOptions::default(),
         None
     )]
     #[tokio::test]
     async fn test_set_folder_description(
         #[case] description: &str,
-        #[case] options: UpdateFolderOptions<'static>,
+        #[case] options: UpdateItemOptions<'static>,
         #[case] expected_if_match: Option<&str>,
     ) -> anyhow::Result<()> {
         let server = MockServer::start().await;
@@ -2132,7 +2076,7 @@ mod test_set_folder_description {
             .set_folder_description(
                 &FolderId::root(),
                 "Legal contracts",
-                &UpdateFolderOptions::default(),
+                &UpdateItemOptions::default(),
             )
             .await;
 
@@ -2157,7 +2101,7 @@ mod test_set_folder_description {
             .set_folder_description(
                 &FolderId::new("123"),
                 &"あ".repeat(crate::MAX_DESCRIPTION_CHARS + 1),
-                &UpdateFolderOptions::default(),
+                &UpdateItemOptions::default(),
             )
             .await;
 
@@ -2192,7 +2136,7 @@ mod test_set_folder_description {
             .set_folder_description(
                 &FolderId::new("123"),
                 "Legal contracts",
-                &UpdateFolderOptions::default(),
+                &UpdateItemOptions::default(),
             )
             .await;
 
@@ -2241,11 +2185,11 @@ mod test_move_folder {
 
     /// 移動先の親フォルダだけをボディで送信し、オプションに応じてIf-Matchヘッダーを送信することを確認
     #[rstest]
-    #[case::default(UpdateFolderOptions::default(), None)]
-    #[case::etag(UpdateFolderOptions { etag: Some("1") }, Some("1"))]
+    #[case::default(UpdateItemOptions::default(), None)]
+    #[case::etag(UpdateItemOptions { etag: Some("1") }, Some("1"))]
     #[tokio::test]
     async fn test_move_folder(
-        #[case] options: UpdateFolderOptions<'static>,
+        #[case] options: UpdateItemOptions<'static>,
         #[case] expected_if_match: Option<&str>,
     ) -> anyhow::Result<()> {
         let server = MockServer::start().await;
@@ -2306,7 +2250,7 @@ mod test_move_folder {
             .move_folder(
                 &FolderId::new("123"),
                 &MoveDestination::User(UserId::new("789")),
-                &UpdateFolderOptions::default(),
+                &UpdateItemOptions::default(),
             )
             .await?;
 
@@ -2331,7 +2275,7 @@ mod test_move_folder {
         let requests_before = request_count(&server).await;
 
         let result = client
-            .move_folder(&folder_id, &destination, &UpdateFolderOptions::default())
+            .move_folder(&folder_id, &destination, &UpdateItemOptions::default())
             .await;
 
         assert!(
@@ -2366,7 +2310,7 @@ mod test_move_folder {
             .move_folder(
                 &FolderId::new("123"),
                 &MoveDestination::Folder(FolderId::new("456")),
-                &UpdateFolderOptions::default(),
+                &UpdateItemOptions::default(),
             )
             .await;
 
