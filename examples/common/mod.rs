@@ -1,7 +1,11 @@
-use std::{path::PathBuf, time::Duration};
+use std::{
+    path::PathBuf,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
 use box_client::{
     BoxClient, BoxClientTimeout, BoxConfig, BoxItem, ListTrashedItemsOptions, RetryPolicy,
+    UpdateItemOptions,
 };
 
 /// BOX設定ファイルのパスを指定する環境変数の名前
@@ -43,6 +47,43 @@ pub async fn setup() -> anyhow::Result<BoxClient> {
         .await?;
 
     Ok(client)
+}
+
+/// 削除または復元した項目の状態をBOXが反映するまで待機する時間
+#[allow(
+    dead_code,
+    reason = "サンプルごとに`common`モジュールをコンパイルするため、この定数を使用しないサンプルでは未使用になる"
+)]
+pub const WAIT_FOR_TRASH: Duration = Duration::from_secs(3);
+
+/// サンプルが作成する項目の名前に付ける接頭辞を返す。
+///
+/// 接頭辞は、サンプルの実行ごとに異なる現在のUNIX時刻（秒）を含む。
+/// したがって、サンプルを繰り返し実行しても、作成する項目の名前が既存の項目と衝突しない。
+#[allow(
+    dead_code,
+    reason = "サンプルごとに`common`モジュールをコンパイルするため、この関数を呼び出さないサンプルでは未使用になる"
+)]
+pub fn name_prefix() -> String {
+    let seconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs());
+    format!("box-client-example-{seconds}")
+}
+
+/// `ETag`を指定した場合は、`ETag`を設定した項目の更新オプションを返す。
+///
+/// 項目を更新するメソッドは、項目が`ETag`の取得後に変更されていると、項目を更新せずにエラーを返す。
+#[allow(
+    dead_code,
+    reason = "サンプルごとに`common`モジュールをコンパイルするため、この関数を呼び出さないサンプルでは未使用になる"
+)]
+pub fn update_options(etag: Option<&str>) -> UpdateItemOptions<'_> {
+    let options = UpdateItemOptions::default();
+    match etag {
+        Some(etag) => options.with_etag(etag),
+        None => options,
+    }
 }
 
 /// ゴミ箱内のすべての項目を表示する。
