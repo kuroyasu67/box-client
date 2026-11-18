@@ -29,7 +29,7 @@ mod retry;
 #[cfg(test)]
 mod test_support;
 
-pub use api::files::File;
+pub use api::files::{File, UpdateFileOptions};
 pub use api::folders::{
     CopyFolderOptions, DeleteFolderOptions, Folder, ItemSort, ItemsPage, ListItemsOptions,
     MAX_FOLDER_DESCRIPTION_CHARS, MAX_ITEMS_LIMIT, MoveFolderDestination, SortDirection,
