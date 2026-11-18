@@ -98,6 +98,20 @@ pub(crate) async fn requests(server: &MockServer, method: &str, path: &str) -> V
         .collect()
 }
 
+/// モックサーバーが受信した、指定したパスのリクエストのクエリ文字列を、受信した順に返す。
+///
+/// クエリ文字列がないリクエストは、空文字列として返す。
+pub(crate) async fn request_queries(server: &MockServer, path: &str) -> Vec<String> {
+    server
+        .received_requests()
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|r| r.url.path() == path)
+        .map(|r| r.url.query().unwrap_or_default().to_owned())
+        .collect()
+}
+
 /// モックサーバーが受信した、指定したメソッドとパスのリクエストの数を返す。
 pub(crate) async fn count_requests(server: &MockServer, method: &str, path: &str) -> usize {
     requests(server, method, path).await.len()

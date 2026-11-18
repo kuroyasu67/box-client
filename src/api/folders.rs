@@ -225,6 +225,29 @@ pub(crate) fn validate_limit(limit: u32) -> BoxClientResult<u32> {
     }
 }
 
+/// マーカー方式のページ送りで、1ページ分の項目を取得するリクエストを作成する。
+///
+/// フォルダ内の項目のリストとゴミ箱内の項目のリストで共有する。
+/// `limit`を指定した場合は`limit`クエリパラメーターで、`marker`を指定した場合は`marker`クエリパラメーターで送信する。
+///
+/// # Errors
+///
+/// `limit`が範囲外の場合は、[`BoxClientError::InvalidArgument`]を返す。
+pub(crate) fn marker_page_request<'a>(
+    path: impl IntoIterator<Item = &'a str>,
+    marker: Option<&'a str>,
+    limit: Option<u32>,
+) -> BoxClientResult<ApiRequest<'a>> {
+    let mut request = ApiRequest::get(path).query("usemarker", "true");
+    if let Some(limit) = limit {
+        request = request.query("limit", validate_limit(limit)?.to_string());
+    }
+    if let Some(marker) = marker {
+        request = request.query("marker", marker);
+    }
+    Ok(request)
+}
+
 /// マーカー方式のページ送りで、すべてのページの項目を取得する。
 ///
 /// `fetch_page`には前のページの`next_marker`を渡す。最初のページでは`None`を渡す。
@@ -446,14 +469,11 @@ impl BoxClient {
             ));
         }
 
-        let mut request =
-            ApiRequest::get(["folders", folder_id.as_ref(), "items"]).query("usemarker", "true");
-        if let Some(limit) = options.limit {
-            request = request.query("limit", validate_limit(limit)?.to_string());
-        }
-        if let Some(marker) = marker {
-            request = request.query("marker", marker);
-        }
+        let mut request = marker_page_request(
+            ["folders", folder_id.as_ref(), "items"],
+            marker,
+            options.limit,
+        )?;
         if let Some(sort) = options.sort {
             request = request.query("sort", sort.as_str());
         }
@@ -1238,22 +1258,10 @@ mod test_list_items_in_folder {
     };
 
     use super::*;
-    use crate::test_support::{create_client, mount_token, short_retry};
+    use crate::test_support::{create_client, mount_token, request_queries, short_retry};
 
     /// 項目のAPIのパス
     const ITEMS_PATH: &str = "/2.0/folders/123/items";
-
-    /// 項目のAPIへのリクエストのクエリ文字列を返す。
-    async fn items_queries(server: &MockServer) -> Vec<String> {
-        server
-            .received_requests()
-            .await
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|r| r.url.path() == ITEMS_PATH)
-            .map(|r| r.url.query().unwrap_or_default().to_owned())
-            .collect()
-    }
 
     /// マーカーとオプションをクエリパラメーターに変換し、ページを返すことを確認
     #[rstest]
@@ -1292,7 +1300,10 @@ mod test_list_items_in_folder {
 
         assert_eq!(page.entries.len(), 1);
         assert_eq!(page.next_marker.as_deref(), Some("m2"));
-        assert_eq!(items_queries(&server).await, vec![expected_query]);
+        assert_eq!(
+            request_queries(&server, ITEMS_PATH).await,
+            vec![expected_query]
+        );
 
         Ok(())
     }
@@ -1319,25 +1330,16 @@ mod test_list_items_in_folder {
             matches!(result, Err(BoxClientError::InvalidArgument(_))),
             "result: {result:?}"
         );
-        assert_eq!(items_queries(&server).await, Vec::<String>::new());
+        assert_eq!(
+            request_queries(&server, ITEMS_PATH).await,
+            Vec::<String>::new()
+        );
 
         Ok(())
     }
 
     /// ルートフォルダの項目のAPIのパス
     const ROOT_ITEMS_PATH: &str = "/2.0/folders/0/items";
-
-    /// ルートフォルダの項目のAPIへのリクエストのクエリ文字列を返す。
-    async fn root_items_queries(server: &MockServer) -> Vec<String> {
-        server
-            .received_requests()
-            .await
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|r| r.url.path() == ROOT_ITEMS_PATH)
-            .map(|r| r.url.query().unwrap_or_default().to_owned())
-            .collect()
-    }
 
     /// ルートフォルダで並び替えに使用する属性を指定した場合は、リクエストを送信せずにエラーを返すことを確認
     #[tokio::test]
@@ -1358,7 +1360,10 @@ mod test_list_items_in_folder {
             matches!(result, Err(BoxClientError::InvalidArgument(_))),
             "result: {result:?}"
         );
-        assert_eq!(root_items_queries(&server).await, Vec::<String>::new());
+        assert_eq!(
+            request_queries(&server, ROOT_ITEMS_PATH).await,
+            Vec::<String>::new()
+        );
 
         Ok(())
     }
@@ -1389,7 +1394,7 @@ mod test_list_items_in_folder {
 
         assert_eq!(page.entries, Vec::<BoxItem>::new());
         assert_eq!(
-            root_items_queries(&server).await,
+            request_queries(&server, ROOT_ITEMS_PATH).await,
             vec!["usemarker=true&direction=DESC"]
         );
 

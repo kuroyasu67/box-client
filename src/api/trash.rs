@@ -7,7 +7,7 @@ use crate::{
     BoxClient, BoxClientError, BoxClientResult, BoxItem, FileId, Folder, FolderId, WebLink,
     WebLinkId,
     api::files::File,
-    api::folders::{ItemsPage, MAX_ITEMS_LIMIT, collect_all_pages, validate_limit},
+    api::folders::{ItemsPage, MAX_ITEMS_LIMIT, collect_all_pages, marker_page_request},
     api::types::{MAX_NAME_CHARS, ParentFolder, validate_optional_item_name, validated},
     request::ApiRequest,
 };
@@ -424,13 +424,7 @@ impl BoxClient {
         marker: Option<&str>,
         options: &ListTrashedItemsOptions,
     ) -> BoxClientResult<ItemsPage> {
-        let mut request = ApiRequest::get(["folders", "trash", "items"]).query("usemarker", "true");
-        if let Some(limit) = options.limit {
-            request = request.query("limit", validate_limit(limit)?.to_string());
-        }
-        if let Some(marker) = marker {
-            request = request.query("marker", marker);
-        }
+        let request = marker_page_request(["folders", "trash", "items"], marker, options.limit)?;
 
         self.send_json(request).await
     }
@@ -1225,23 +1219,11 @@ mod test_list_trashed_items {
     use super::*;
     use crate::{
         BoxClientError,
-        test_support::{create_client, mount_token, short_retry},
+        test_support::{create_client, mount_token, request_queries, short_retry},
     };
 
     /// ゴミ箱の項目のAPIのパス
     const TRASH_ITEMS_PATH: &str = "/2.0/folders/trash/items";
-
-    /// ゴミ箱の項目のAPIへのリクエストのクエリ文字列を返す。
-    async fn trash_queries(server: &MockServer) -> Vec<String> {
-        server
-            .received_requests()
-            .await
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|r| r.url.path() == TRASH_ITEMS_PATH)
-            .map(|r| r.url.query().unwrap_or_default().to_owned())
-            .collect()
-    }
 
     /// `GET /folders/trash/items`を呼び出し、マーカーとオプションをクエリパラメーターに変換することを確認
     #[rstest]
@@ -1279,7 +1261,10 @@ mod test_list_trashed_items {
 
         assert_eq!(page.entries.len(), 1);
         assert_eq!(page.next_marker.as_deref(), Some("m2"));
-        assert_eq!(trash_queries(&server).await, vec![expected_query]);
+        assert_eq!(
+            request_queries(&server, TRASH_ITEMS_PATH).await,
+            vec![expected_query]
+        );
 
         Ok(())
     }
@@ -1301,7 +1286,10 @@ mod test_list_trashed_items {
             matches!(result, Err(BoxClientError::InvalidArgument(_))),
             "result: {result:?}"
         );
-        assert_eq!(trash_queries(&server).await, Vec::<String>::new());
+        assert_eq!(
+            request_queries(&server, TRASH_ITEMS_PATH).await,
+            Vec::<String>::new()
+        );
 
         Ok(())
     }
