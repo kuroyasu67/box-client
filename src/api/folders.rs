@@ -8,8 +8,8 @@ use time::OffsetDateTime;
 
 use crate::{
     BoxClient, BoxClientError, BoxClientResult, BoxItem, FolderId, FolderItem, Idempotency,
-    ItemStatus, ParentFolder, UserId, UserMini, ValidationError,
-    api::types::{PathCollection, SetDescriptionBody, validate_item_name},
+    ItemStatus, MoveDestination, ParentFolder, UserMini, ValidationError,
+    api::types::{MoveBody, PathCollection, SetDescriptionBody, validate_item_name},
     request::ApiRequest,
 };
 use reqwest::header::IF_MATCH;
@@ -403,85 +403,6 @@ impl<'a> CreateFolderBody<'a> {
     }
 }
 
-/// フォルダの移動先
-///
-/// # Examples
-///
-/// ```
-/// use box_client::{FolderId, MoveFolderDestination, UserId};
-///
-/// // IDが`456`のフォルダへ移動する。
-/// let to_folder = MoveFolderDestination::Folder(FolderId::new("456"));
-/// // 認証中のユーザーのルートフォルダへ移動する。
-/// let to_root = MoveFolderDestination::Folder(FolderId::root());
-/// // IDが`789`のユーザーのルートフォルダへ移動する。
-/// let to_user = MoveFolderDestination::User(UserId::new("789"));
-/// ```
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum MoveFolderDestination {
-    /// IDで指定したフォルダ
-    ///
-    /// 認証中のユーザーのルートフォルダへ移動する場合は、[`FolderId::root`]を指定する。
-    Folder(FolderId),
-
-    /// IDで指定したユーザーのルートフォルダ
-    ///
-    /// BOXは、ユーザーIDを指定した場合に、ルートフォルダ以外への移動を受け付けない。
-    /// したがって、ユーザーのルートフォルダだけを移動先にできる。
-    User(UserId),
-}
-
-/// フォルダ移動リクエストのボディ
-///
-/// BOXは、移動先の親フォルダと他の属性を同時に指定すると、403（`operation_limit_exceeded`）を返す。
-/// したがって、移動先の親フォルダだけを送信する。
-#[derive(Debug, Clone, Serialize)]
-struct MoveFolderBody<'a> {
-    /// 移動先の親フォルダ
-    parent: MoveFolderParent<'a>,
-}
-
-/// フォルダ移動リクエストのボディの、移動先の親フォルダ
-#[derive(Debug, Clone, Serialize)]
-struct MoveFolderParent<'a> {
-    /// 移動先の親フォルダのID
-    ///
-    /// ユーザーのルートフォルダへ移動する場合は、ルートフォルダのIDを指定する。
-    id: FolderId,
-
-    /// 移動先のルートフォルダを所有するユーザーのID
-    #[serde(skip_serializing_if = "Option::is_none")]
-    user_id: Option<&'a UserId>,
-}
-
-impl<'a> MoveFolderBody<'a> {
-    /// 移動先からボディを作成する。
-    ///
-    /// # Errors
-    ///
-    /// ユーザーIDが空文字列の場合は、[`BoxClientError::InvalidArgument`]を返す。
-    fn new(destination: &'a MoveFolderDestination) -> BoxClientResult<Self> {
-        let parent = match destination {
-            MoveFolderDestination::Folder(folder_id) => MoveFolderParent {
-                id: folder_id.clone(),
-                user_id: None,
-            },
-            MoveFolderDestination::User(user_id) => {
-                // フォルダIDと異なり、ユーザーIDはパスに含めないため、空文字列をクライアントが検出しないとBOXへ送信してしまう。
-                // BOXが空のユーザーIDをどう扱うかは不明であり、認証中のユーザーのルートフォルダへ移動するおそれもあるため、送信しない。
-                if user_id.as_ref().is_empty() {
-                    return Err(BoxClientError::InvalidArgument("user_id must not be empty"));
-                }
-                MoveFolderParent {
-                    id: FolderId::root(),
-                    user_id: Some(user_id),
-                }
-            }
-        };
-        Ok(Self { parent })
-    }
-}
-
 /// フォルダ名変更リクエストのボディ
 #[derive(Debug, Clone, Serialize, Validate)]
 struct RenameFolderBody<'a> {
@@ -642,7 +563,7 @@ impl BoxClient {
     pub async fn move_folder(
         &self,
         folder_id: &FolderId,
-        destination: &MoveFolderDestination,
+        destination: &MoveDestination,
         options: &UpdateFolderOptions<'_>,
     ) -> BoxClientResult<Folder> {
         if folder_id.is_root() {
@@ -651,7 +572,7 @@ impl BoxClient {
             ));
         }
 
-        let body = MoveFolderBody::new(destination)?;
+        let body = MoveBody::new(destination)?;
         let mut request = ApiRequest::put(["folders", folder_id.as_ref()])
             .idempotency(Idempotency::NonIdempotent)
             .json(&body)?;
@@ -1510,6 +1431,7 @@ mod test_move_folder {
     };
 
     use super::*;
+    use crate::UserId;
     use crate::test_support::{create_client, mount_token, request_count, short_retry};
 
     /// フォルダのAPIのパス
@@ -1561,7 +1483,7 @@ mod test_move_folder {
         let folder = client
             .move_folder(
                 &FolderId::new("123"),
-                &MoveFolderDestination::Folder(FolderId::new("456")),
+                &MoveDestination::Folder(FolderId::new("456")),
                 &options,
             )
             .await?;
@@ -1598,7 +1520,7 @@ mod test_move_folder {
         let folder = client
             .move_folder(
                 &FolderId::new("123"),
-                &MoveFolderDestination::User(UserId::new("789")),
+                &MoveDestination::User(UserId::new("789")),
                 &UpdateFolderOptions::default(),
             )
             .await?;
@@ -1611,12 +1533,12 @@ mod test_move_folder {
     /// ルートフォルダを移動しようとした場合、またはユーザーIDが空文字列の場合は、
     /// リクエストを送信せずにエラーを返すことを確認
     #[rstest]
-    #[case::root_folder(FolderId::root(), MoveFolderDestination::Folder(FolderId::new("456")))]
-    #[case::empty_user_id(FolderId::new("123"), MoveFolderDestination::User(UserId::new("")))]
+    #[case::root_folder(FolderId::root(), MoveDestination::Folder(FolderId::new("456")))]
+    #[case::empty_user_id(FolderId::new("123"), MoveDestination::User(UserId::new("")))]
     #[tokio::test]
     async fn test_move_folder_rejects_without_request(
         #[case] folder_id: FolderId,
-        #[case] destination: MoveFolderDestination,
+        #[case] destination: MoveDestination,
     ) -> anyhow::Result<()> {
         let server = MockServer::start().await;
         mount_token(&server).await;
@@ -1658,7 +1580,7 @@ mod test_move_folder {
         let result = client
             .move_folder(
                 &FolderId::new("123"),
-                &MoveFolderDestination::Folder(FolderId::new("456")),
+                &MoveDestination::Folder(FolderId::new("456")),
                 &UpdateFolderOptions::default(),
             )
             .await;

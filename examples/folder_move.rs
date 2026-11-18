@@ -1,7 +1,7 @@
 //! フォルダを移動するサンプル
 mod common;
 
-use box_client::{FolderId, MoveFolderDestination, UpdateFolderOptions, UserId};
+use box_client::{FolderId, MoveDestination, UpdateFolderOptions, UserId};
 
 /// 使用方法
 const USAGE: &str = "usage: RUST_LOG=info cargo run --quiet --example=folder_move -- <folder-id> (<parent-folder-id> | --user <user-id>)";
@@ -16,11 +16,11 @@ async fn main() -> anyhow::Result<()> {
     let (folder_id, destination) = match args.as_slice() {
         [folder_id, flag, user_id] if flag == "--user" => (
             FolderId::new(folder_id),
-            MoveFolderDestination::User(UserId::new(user_id)),
+            MoveDestination::User(UserId::new(user_id)),
         ),
         [folder_id, parent_id] => (
             FolderId::new(folder_id),
-            MoveFolderDestination::Folder(FolderId::new(parent_id)),
+            MoveDestination::Folder(FolderId::new(parent_id)),
         ),
         _ => anyhow::bail!(USAGE),
     };

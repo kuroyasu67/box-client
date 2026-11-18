@@ -224,6 +224,89 @@ impl<'a> SetDescriptionBody<'a> {
     }
 }
 
+/// ファイルまたはフォルダの移動先
+///
+/// BOXは、ファイルとフォルダの移動先を同じ形式で受け付けるため、
+/// [`BoxClient::move_file`](crate::BoxClient::move_file)および
+/// [`BoxClient::move_folder`](crate::BoxClient::move_folder)で共有する。
+///
+/// # Examples
+///
+/// ```
+/// use box_client::{FolderId, MoveDestination, UserId};
+///
+/// // IDが`456`のフォルダへ移動する。
+/// let to_folder = MoveDestination::Folder(FolderId::new("456"));
+/// // 認証中のユーザーのルートフォルダへ移動する。
+/// let to_root = MoveDestination::Folder(FolderId::root());
+/// // IDが`789`のユーザーのルートフォルダへ移動する。
+/// let to_user = MoveDestination::User(UserId::new("789"));
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MoveDestination {
+    /// IDで指定したフォルダ
+    ///
+    /// 認証中のユーザーのルートフォルダへ移動する場合は、[`FolderId::root`]を指定する。
+    Folder(FolderId),
+
+    /// IDで指定したユーザーのルートフォルダ
+    ///
+    /// BOXは、ユーザーIDを指定した場合に、ルートフォルダ以外への移動を受け付けない。
+    /// したがって、ユーザーのルートフォルダだけを移動先にできる。
+    User(UserId),
+}
+
+/// ファイルまたはフォルダの移動リクエストのボディ
+///
+/// BOXは、フォルダの移動先の親フォルダと他の属性を同時に指定すると、403（`operation_limit_exceeded`）を返す。
+/// したがって、移動先の親フォルダだけを送信する。
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct MoveBody<'a> {
+    /// 移動先の親フォルダ
+    parent: MoveParent<'a>,
+}
+
+/// 移動リクエストのボディの、移動先の親フォルダ
+#[derive(Debug, Clone, Serialize)]
+struct MoveParent<'a> {
+    /// 移動先の親フォルダのID
+    ///
+    /// ユーザーのルートフォルダへ移動する場合は、ルートフォルダのIDを指定する。
+    id: FolderId,
+
+    /// 移動先のルートフォルダを所有するユーザーのID
+    #[serde(skip_serializing_if = "Option::is_none")]
+    user_id: Option<&'a UserId>,
+}
+
+impl<'a> MoveBody<'a> {
+    /// 移動先からボディを作成する。
+    ///
+    /// # Errors
+    ///
+    /// ユーザーIDが空文字列の場合は、[`BoxClientError::InvalidArgument`]を返す。
+    pub(crate) fn new(destination: &'a MoveDestination) -> BoxClientResult<Self> {
+        let parent = match destination {
+            MoveDestination::Folder(folder_id) => MoveParent {
+                id: folder_id.clone(),
+                user_id: None,
+            },
+            MoveDestination::User(user_id) => {
+                // フォルダIDと異なり、ユーザーIDはパスに含めないため、空文字列をクライアントが検出しないとBOXへ送信してしまう。
+                // BOXが空のユーザーIDをどう扱うかは不明であり、認証中のユーザーのルートフォルダへ移動するおそれもあるため、送信しない。
+                if user_id.as_ref().is_empty() {
+                    return Err(BoxClientError::InvalidArgument("user_id must not be empty"));
+                }
+                MoveParent {
+                    id: FolderId::root(),
+                    user_id: Some(user_id),
+                }
+            }
+        };
+        Ok(Self { parent })
+    }
+}
+
 #[cfg(test)]
 mod test_validate_item_name {
     use rstest::rstest;

@@ -8,8 +8,8 @@ use reqwest::header::IF_MATCH;
 
 use crate::{
     BoxClient, BoxClientError, BoxClientResult, FileId, FileVersion, FolderItem, Idempotency,
-    ItemStatus, PathCollection, UserMini, ValidationError,
-    api::types::{SetDescriptionBody, validate_item_name},
+    ItemStatus, MoveDestination, PathCollection, UserMini, ValidationError,
+    api::types::{MoveBody, SetDescriptionBody, validate_item_name},
     request::ApiRequest,
 };
 
@@ -211,6 +211,57 @@ impl BoxClient {
         let file: File = self.send_json(request).await?;
 
         tracing::debug!(file_id = file_id.as_ref(), name = file.name, "renamed file");
+
+        Ok(file)
+    }
+
+    /// ファイルを別のフォルダへ移動する。
+    ///
+    /// クライアントは、5xxを受け取った場合、またはタイムアウトした場合に、同じリクエストを再送して再試行する。
+    /// しかし、これらの場合は、BOXがファイルの移動を完了している可能性がある。
+    /// `options.etag`を指定した場合は、移動によって`ETag`が変わるため、再送すると412を受け取る。
+    /// その結果、移動に成功したにもかかわらず、移動に失敗したと誤って判断するおそれがある。
+    /// したがって、[`BoxClient::move_folder`]と同様に、HTTPメソッドがPUTであっても冪等でないリクエストとして送信し、
+    /// 429、エラーコードが`operation_blocked_temporary`の409および接続エラーの後にのみ再試行する。
+    ///
+    /// # Arguments
+    ///
+    /// - `file_id`: 移動するファイルのID
+    /// - `destination`: 移動先。フォルダID、またはルートフォルダへ移動するユーザーのIDで指定する。
+    /// - `options`: `ETag`のオプション
+    ///
+    /// # Errors
+    ///
+    /// `destination`のユーザーIDが空文字列の場合は、リクエストを送信せずに[`BoxClientError::InvalidArgument`]を返す。
+    /// `options.etag`に使用できない文字が含まれる場合は、リクエストを送信せずに
+    /// [`BoxClientError::InvalidHeaderValue`]を返す。
+    /// BOXがエラーレスポンスを返した場合は、[`BoxClientError::Api`]を返す。主なステータスは次のとおり。
+    ///
+    /// - 403: 移動先のフォルダにアクセスする権限がない（`access_denied_insufficient_permissions`）。
+    /// - 404: ファイルが存在しない、またはファイルにアクセスする権限がない。
+    /// - 409: 同じ名前の項目が移動先のフォルダに存在する。
+    /// - 412: `options.etag`がファイルの現在の`ETag`と一致しない。
+    ///
+    /// 再試行できないエラーが発生した場合、または再試行回数の上限に達した場合はエラーを返す。
+    /// 5xxまたはタイムアウトでエラーを返した場合は、BOXがファイルを移動した可能性がある。
+    /// したがって、[`BoxClient::file_information`]でファイルの親フォルダを確認する。
+    pub async fn move_file(
+        &self,
+        file_id: &FileId,
+        destination: &MoveDestination,
+        options: &UpdateFileOptions<'_>,
+    ) -> BoxClientResult<File> {
+        let body = MoveBody::new(destination)?;
+        let mut request = ApiRequest::put(["files", file_id.as_ref()])
+            .idempotency(Idempotency::NonIdempotent)
+            .json(&body)?;
+        if let Some(etag) = options.etag {
+            request = request.header(IF_MATCH, etag)?;
+        }
+
+        let file = self.send_json(request).await?;
+
+        tracing::debug!(file_id = file_id.as_ref(), ?destination, "moved file");
 
         Ok(file)
     }
@@ -938,6 +989,158 @@ mod test_set_file_description {
             "result: {result:?}"
         );
         assert_eq!(update_requests(&server).await.len(), 1);
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod test_move_file {
+    use rstest::rstest;
+    use serde_json::json;
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{body_json, method, path},
+    };
+
+    use super::*;
+    use crate::{
+        FolderId, UserId,
+        test_support::{create_client, mount_token, request_count, short_retry},
+    };
+
+    /// ファイルのAPIのパス
+    const FILE_PATH: &str = "/2.0/files/12345";
+
+    /// ファイルのAPIへのPUTリクエストのIf-Matchヘッダーを返す。
+    async fn move_requests(server: &MockServer) -> Vec<Option<String>> {
+        server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|r| r.method.as_str() == "PUT" && r.url.path() == FILE_PATH)
+            .map(|r| {
+                r.headers
+                    .get("if-match")
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_owned)
+            })
+            .collect()
+    }
+
+    /// 移動先に応じた親フォルダだけをボディで送信し、オプションに応じてIf-Matchヘッダーを送信することを確認
+    #[rstest]
+    #[case::folder(
+        MoveDestination::Folder(FolderId::new("456")),
+        UpdateFileOptions::default(),
+        json!({"parent": {"id": "456"}}),
+        None
+    )]
+    #[case::folder_with_etag(
+        MoveDestination::Folder(FolderId::new("456")),
+        UpdateFileOptions { etag: Some("1") },
+        json!({"parent": {"id": "456"}}),
+        Some("1")
+    )]
+    #[case::user_root(
+        MoveDestination::User(UserId::new("789")),
+        UpdateFileOptions::default(),
+        json!({"parent": {"id": "0", "user_id": "789"}}),
+        None
+    )]
+    #[tokio::test]
+    async fn test_move_file(
+        #[case] destination: MoveDestination,
+        #[case] options: UpdateFileOptions<'static>,
+        #[case] expected_body: serde_json::Value,
+        #[case] expected_if_match: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        Mock::given(method("PUT"))
+            .and(path(FILE_PATH))
+            .and(body_json(expected_body))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "type": "file",
+                "id": "12345",
+                "etag": "2",
+                "name": "Contract.pdf",
+                "parent": {"type": "folder", "id": "456", "etag": "0", "name": "Archive"},
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = create_client(&server, short_retry(0)?).await?;
+
+        let file = client
+            .move_file(&FileId::new("12345"), &destination, &options)
+            .await?;
+
+        assert_eq!(file.id, FileId::new("12345"));
+        assert_eq!(
+            move_requests(&server).await,
+            vec![expected_if_match.map(str::to_owned)]
+        );
+
+        Ok(())
+    }
+
+    /// ユーザーIDが空文字列の場合は、リクエストを送信せずにエラーを返すことを確認
+    #[tokio::test]
+    async fn test_move_file_rejects_empty_user_id() -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        let client = create_client(&server, short_retry(0)?).await?;
+        let requests_before = request_count(&server).await;
+
+        let result = client
+            .move_file(
+                &FileId::new("12345"),
+                &MoveDestination::User(UserId::new("")),
+                &UpdateFileOptions::default(),
+            )
+            .await;
+
+        assert!(
+            matches!(result, Err(BoxClientError::InvalidArgument(_))),
+            "result: {result:?}"
+        );
+        assert_eq!(request_count(&server).await, requests_before);
+
+        Ok(())
+    }
+
+    /// BOXのエラーレスポンスを、再試行せずにそのまま返すことを確認
+    #[rstest]
+    #[case::forbidden(403)]
+    #[case::name_in_use(409)]
+    #[case::etag_mismatch(412)]
+    #[case::internal_server_error(500)]
+    #[tokio::test]
+    async fn test_move_file_error_is_not_retried(#[case] status: u16) -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        Mock::given(method("PUT"))
+            .and(path(FILE_PATH))
+            .respond_with(ResponseTemplate::new(status))
+            .mount(&server)
+            .await;
+        let client = create_client(&server, short_retry(2)?).await?;
+
+        let result = client
+            .move_file(
+                &FileId::new("12345"),
+                &MoveDestination::Folder(FolderId::new("456")),
+                &UpdateFileOptions::default(),
+            )
+            .await;
+
+        assert!(
+            matches!(&result, Err(BoxClientError::Api(e)) if e.status == status),
+            "result: {result:?}"
+        );
+        assert_eq!(move_requests(&server).await.len(), 1);
 
         Ok(())
     }
