@@ -660,7 +660,9 @@ mod test_create_web_link {
     };
 
     use super::*;
-    use crate::test_support::{create_client, mount_token, request_count, short_retry};
+    use crate::test_support::{
+        assert_not_retried, create_client, mount_token, request_count, short_retry,
+    };
 
     /// WebリンクのAPIのパス
     const WEB_LINKS_PATH: &str = "/2.0/web_links";
@@ -753,30 +755,16 @@ mod test_create_web_link {
     /// 作成は冪等でないため、5xxを再試行せずにそのまま返すことを確認
     #[tokio::test]
     async fn test_create_web_link_error_is_not_retried() -> anyhow::Result<()> {
-        let server = MockServer::start().await;
-        mount_token(&server).await;
-        Mock::given(method("POST"))
-            .and(path(WEB_LINKS_PATH))
-            .respond_with(ResponseTemplate::new(500))
-            .expect(1)
-            .mount(&server)
-            .await;
-        let client = create_client(&server, short_retry(2)?).await?;
-
-        let result = client
-            .create_web_link(
-                "https://example.com",
-                &FolderId::new("456"),
-                &CreateWebLinkOptions::default(),
-            )
-            .await;
-
-        assert!(
-            matches!(&result, Err(BoxClientError::Api(e)) if e.status == 500),
-            "result: {result:?}"
-        );
-
-        Ok(())
+        assert_not_retried("POST", WEB_LINKS_PATH, 500, async |client: &BoxClient| {
+            client
+                .create_web_link(
+                    "https://example.com",
+                    &FolderId::new("456"),
+                    &CreateWebLinkOptions::default(),
+                )
+                .await
+        })
+        .await
     }
 }
 
@@ -793,7 +781,7 @@ mod test_update_web_link {
     use crate::{
         UserId,
         test_support::{
-            count_requests, create_client, if_match_headers, mount_token, request_count,
+            assert_not_retried, create_client, if_match_headers, mount_token, request_count,
             short_retry,
         },
     };
@@ -935,26 +923,12 @@ mod test_update_web_link {
     #[case::internal_server_error(500)]
     #[tokio::test]
     async fn test_update_web_link_error_is_not_retried(#[case] status: u16) -> anyhow::Result<()> {
-        let server = MockServer::start().await;
-        mount_token(&server).await;
-        Mock::given(method("PUT"))
-            .and(path(WEB_LINK_PATH))
-            .respond_with(ResponseTemplate::new(status))
-            .mount(&server)
-            .await;
-        let client = create_client(&server, short_retry(2)?).await?;
-
-        let result = Update::Rename("Example")
-            .call(&client, &UpdateItemOptions::default())
-            .await;
-
-        assert!(
-            matches!(&result, Err(BoxClientError::Api(e)) if e.status == status),
-            "result: {result:?}"
-        );
-        assert_eq!(count_requests(&server, "PUT", WEB_LINK_PATH).await, 1);
-
-        Ok(())
+        assert_not_retried("PUT", WEB_LINK_PATH, status, async |client: &BoxClient| {
+            Update::Rename("Example")
+                .call(client, &UpdateItemOptions::default())
+                .await
+        })
+        .await
     }
 }
 
@@ -967,11 +941,9 @@ mod test_delete_web_link {
     };
 
     use super::*;
-    use crate::{
-        BoxClientError,
-        test_support::{
-            count_requests, create_client, mount_token, operation_blocked_response, short_retry,
-        },
+    use crate::test_support::{
+        assert_not_retried, assert_retried_after, count_requests, create_client, mount_token,
+        operation_blocked_response, short_retry,
     };
 
     /// WebリンクのAPIのパス
@@ -1008,24 +980,13 @@ mod test_delete_web_link {
     #[case::service_unavailable(503)]
     #[tokio::test]
     async fn test_delete_web_link_error_is_not_retried(#[case] status: u16) -> anyhow::Result<()> {
-        let server = MockServer::start().await;
-        mount_token(&server).await;
-        Mock::given(method("DELETE"))
-            .and(path(WEB_LINK_PATH))
-            .respond_with(ResponseTemplate::new(status))
-            .mount(&server)
-            .await;
-        let client = create_client(&server, short_retry(2)?).await?;
-
-        let result = client.delete_web_link(&WebLinkId::new("123")).await;
-
-        assert!(
-            matches!(&result, Err(BoxClientError::Api(e)) if e.status == status),
-            "result: {result:?}"
-        );
-        assert_eq!(count_requests(&server, "DELETE", WEB_LINK_PATH).await, 1);
-
-        Ok(())
+        assert_not_retried(
+            "DELETE",
+            WEB_LINK_PATH,
+            status,
+            async |client: &BoxClient| client.delete_web_link(&WebLinkId::new("123")).await,
+        )
+        .await
     }
 
     /// 429または他の操作によるロックで409を受け取った場合は、冪等でないリクエストとして送信しても再試行することを確認
@@ -1036,24 +997,14 @@ mod test_delete_web_link {
     async fn test_delete_web_link_retries_request_not_processed(
         #[case] first_response: ResponseTemplate,
     ) -> anyhow::Result<()> {
-        let server = MockServer::start().await;
-        mount_token(&server).await;
-        Mock::given(method("DELETE"))
-            .and(path(WEB_LINK_PATH))
-            .respond_with(first_response)
-            .up_to_n_times(1)
-            .mount(&server)
-            .await;
-        Mock::given(method("DELETE"))
-            .and(path(WEB_LINK_PATH))
-            .respond_with(ResponseTemplate::new(204))
-            .mount(&server)
-            .await;
-        let client = create_client(&server, short_retry(1)?).await?;
-
-        client.delete_web_link(&WebLinkId::new("123")).await?;
-
-        assert_eq!(count_requests(&server, "DELETE", WEB_LINK_PATH).await, 2);
+        assert_retried_after(
+            "DELETE",
+            WEB_LINK_PATH,
+            first_response,
+            ResponseTemplate::new(204),
+            async |client: &BoxClient| client.delete_web_link(&WebLinkId::new("123")).await,
+        )
+        .await?;
 
         Ok(())
     }

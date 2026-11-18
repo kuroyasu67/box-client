@@ -15,12 +15,15 @@ use tokio::{
     io::AsyncReadExt as _,
     net::{TcpListener, TcpStream},
 };
-use wiremock::{Match, Mock, MockServer, Request, ResponseTemplate, matchers::path};
+use wiremock::{
+    Match, Mock, MockServer, Request, ResponseTemplate,
+    matchers::{method, path},
+};
 
 use crate::{
     client::{BoxClient, BoxClientBuilder, BoxClientTimeout},
     config::{BoxAppAuth, BoxAppSettings, BoxConfig},
-    errors::BoxClientResult,
+    errors::{ApiError, BoxClientError, BoxClientResult},
     retry::RetryPolicy,
 };
 
@@ -292,4 +295,108 @@ pub(crate) async fn create_client_with_upload_concurrency(
         .upload_concurrency(upload_concurrency)?
         .build()
         .await
+}
+
+/// BOXがエラーレスポンスを返した場合に、BOXクライアントが再試行せずにエラーを返すことを確認する。
+///
+/// この関数は、モックサーバーの`http_method`と`request_path`に`status`のエラーレスポンスを登録し、
+/// 再試行を有効にしたBOXクライアントで`call`を呼び出す。
+/// そして、`call`がステータスが`status`の[`BoxClientError::Api`]を返すこと、および
+/// BOXクライアントがリクエストを1回だけ送信したことを確認する。
+pub(crate) async fn assert_not_retried<T: std::fmt::Debug>(
+    http_method: &str,
+    request_path: &str,
+    status: u16,
+    call: impl AsyncFnOnce(&BoxClient) -> BoxClientResult<T>,
+) -> anyhow::Result<()> {
+    let error = assert_not_retried_with_response(
+        http_method,
+        request_path,
+        ResponseTemplate::new(status),
+        call,
+    )
+    .await?;
+    assert_eq!(error.status, status, "error: {error:?}");
+
+    Ok(())
+}
+
+/// BOXが`response`を返した場合に、BOXクライアントが再試行せずにエラーを返すことを確認する。
+///
+/// この関数は、[`assert_not_retried`]と同様に、`call`が[`BoxClientError::Api`]を返すこと、および
+/// BOXクライアントがリクエストを1回だけ送信したことを確認する。
+/// 呼び出し側がステータスやエラーコードを検証できるように、この関数はBOXのエラーを返す。
+pub(crate) async fn assert_not_retried_with_response<T: std::fmt::Debug>(
+    http_method: &str,
+    request_path: &str,
+    response: ResponseTemplate,
+    call: impl AsyncFnOnce(&BoxClient) -> BoxClientResult<T>,
+) -> anyhow::Result<Box<ApiError>> {
+    let server = MockServer::start().await;
+    mount_token(&server).await;
+    Mock::given(method(http_method))
+        .and(path(request_path))
+        .respond_with(response)
+        .mount(&server)
+        .await;
+    let client = create_client(&server, short_retry(2)?).await?;
+
+    let result = call(&client).await;
+
+    let Err(BoxClientError::Api(error)) = result else {
+        panic!("result: {result:?}");
+    };
+    assert_eq!(count_requests(&server, http_method, request_path).await, 1);
+
+    Ok(error)
+}
+
+/// BOXが最初に`first`を返した場合に、BOXクライアントが再試行して成功することを確認する。
+///
+/// この関数は、モックサーバーの`http_method`と`request_path`に、最初の1回だけ`first`を返し、
+/// その後は`success`を返すモックを登録する。そして、再試行を有効にしたBOXクライアントで`call`を呼び出し、
+/// `call`が成功すること、およびBOXクライアントがリクエストを2回送信したことを確認する。
+/// 呼び出し側が再送したリクエストを検証できるように、この関数は受信したリクエストを返す。
+pub(crate) async fn assert_retried_after<T>(
+    http_method: &str,
+    request_path: &str,
+    first: ResponseTemplate,
+    success: ResponseTemplate,
+    call: impl AsyncFnOnce(&BoxClient) -> BoxClientResult<T>,
+) -> anyhow::Result<Vec<Request>> {
+    let server = MockServer::start().await;
+    mount_token(&server).await;
+    Mock::given(method(http_method))
+        .and(path(request_path))
+        .respond_with(first)
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method(http_method))
+        .and(path(request_path))
+        .respond_with(success)
+        .mount(&server)
+        .await;
+    let client = create_client(&server, short_retry(1)?).await?;
+
+    call(&client).await?;
+
+    let requests = requests(&server, http_method, request_path).await;
+    assert_eq!(requests.len(), 2);
+
+    Ok(requests)
+}
+
+/// エラーが[`BoxClientError::InvalidArgument`]であるか確認する。
+///
+/// テストケースごとに期待するエラーの種類を関数として渡すときに使用する。
+pub(crate) fn is_invalid_argument(error: &BoxClientError) -> bool {
+    matches!(error, BoxClientError::InvalidArgument(_))
+}
+
+/// エラーが[`BoxClientError::InvalidRequestBody`]であるか確認する。
+///
+/// テストケースごとに期待するエラーの種類を関数として渡すときに使用する。
+pub(crate) fn is_invalid_request_body(error: &BoxClientError) -> bool {
+    matches!(error, BoxClientError::InvalidRequestBody(_))
 }

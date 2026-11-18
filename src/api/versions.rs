@@ -747,7 +747,7 @@ mod test_promote_file_version {
     };
 
     use super::*;
-    use crate::test_support::{create_client, mount_token, short_retry};
+    use crate::test_support::{assert_not_retried, create_client, mount_token, short_retry};
 
     /// ファイルの現在のバージョンのAPIのパス
     const CURRENT_VERSION_PATH: &str = "/2.0/files/12345/versions/current";
@@ -793,26 +793,17 @@ mod test_promote_file_version {
     async fn test_promote_file_version_error_is_not_retried(
         #[case] status: u16,
     ) -> anyhow::Result<()> {
-        let server = MockServer::start().await;
-        mount_token(&server).await;
-        Mock::given(method("POST"))
-            .and(path(CURRENT_VERSION_PATH))
-            .respond_with(ResponseTemplate::new(status))
-            .expect(1)
-            .mount(&server)
-            .await;
-        let client = create_client(&server, short_retry(2)?).await?;
-
-        let result = client
-            .promote_file_version(&FileId::new("12345"), &FileVersionId::new("67890"))
-            .await;
-
-        assert!(
-            matches!(&result, Err(BoxClientError::Api(e)) if e.status == status),
-            "result: {result:?}"
-        );
-
-        Ok(())
+        assert_not_retried(
+            "POST",
+            CURRENT_VERSION_PATH,
+            status,
+            async |client: &BoxClient| {
+                client
+                    .promote_file_version(&FileId::new("12345"), &FileVersionId::new("67890"))
+                    .await
+            },
+        )
+        .await
     }
 }
 
@@ -904,7 +895,7 @@ mod test_delete_file_version {
 
     use super::*;
     use crate::test_support::{
-        count_requests, create_client, if_match_headers, mount_token, short_retry,
+        assert_not_retried, create_client, if_match_headers, mount_token, short_retry,
     };
 
     /// ファイルのバージョンのAPIのパス
@@ -953,29 +944,20 @@ mod test_delete_file_version {
     async fn test_delete_file_version_error_is_not_retried(
         #[case] status: u16,
     ) -> anyhow::Result<()> {
-        let server = MockServer::start().await;
-        mount_token(&server).await;
-        Mock::given(method("DELETE"))
-            .and(path(VERSION_PATH))
-            .respond_with(ResponseTemplate::new(status))
-            .mount(&server)
-            .await;
-        let client = create_client(&server, short_retry(2)?).await?;
-
-        let result = client
-            .delete_file_version(
-                &FileId::new("12345"),
-                &FileVersionId::new("67890"),
-                &DeleteItemOptions::default(),
-            )
-            .await;
-
-        assert!(
-            matches!(&result, Err(BoxClientError::Api(e)) if e.status == status),
-            "result: {result:?}"
-        );
-        assert_eq!(count_requests(&server, "DELETE", VERSION_PATH).await, 1);
-
-        Ok(())
+        assert_not_retried(
+            "DELETE",
+            VERSION_PATH,
+            status,
+            async |client: &BoxClient| {
+                client
+                    .delete_file_version(
+                        &FileId::new("12345"),
+                        &FileVersionId::new("67890"),
+                        &DeleteItemOptions::default(),
+                    )
+                    .await
+            },
+        )
+        .await
     }
 }

@@ -657,7 +657,9 @@ mod test_copy_file {
     };
 
     use super::*;
-    use crate::test_support::{create_client, mount_token, request_count, short_retry};
+    use crate::test_support::{
+        assert_not_retried, create_client, mount_token, request_count, short_retry,
+    };
 
     /// ファイルのコピーのAPIのパス
     const COPY_PATH: &str = "/2.0/files/12345/copy";
@@ -756,282 +758,21 @@ mod test_copy_file {
     #[case::service_unavailable(503)]
     #[tokio::test]
     async fn test_copy_file_error_is_not_retried(#[case] status: u16) -> anyhow::Result<()> {
-        let server = MockServer::start().await;
-        mount_token(&server).await;
-        Mock::given(method("POST"))
-            .and(path(COPY_PATH))
-            .respond_with(ResponseTemplate::new(status))
-            .expect(1)
-            .mount(&server)
-            .await;
-        let client = create_client(&server, short_retry(2)?).await?;
-
-        let result = client
-            .copy_file(
-                &FileId::new("12345"),
-                &FolderId::new("456"),
-                &CopyFileOptions::default(),
-            )
-            .await;
-
-        assert!(
-            matches!(&result, Err(BoxClientError::Api(e)) if e.status == status),
-            "result: {result:?}"
-        );
-
-        Ok(())
+        assert_not_retried("POST", COPY_PATH, status, async |client: &BoxClient| {
+            client
+                .copy_file(
+                    &FileId::new("12345"),
+                    &FolderId::new("456"),
+                    &CopyFileOptions::default(),
+                )
+                .await
+        })
+        .await
     }
 }
 
 #[cfg(test)]
-mod test_rename_file {
-    use rstest::rstest;
-    use serde_json::json;
-    use wiremock::{
-        Mock, MockServer, ResponseTemplate,
-        matchers::{body_json, method, path},
-    };
-
-    use super::*;
-    use crate::test_support::{
-        count_requests, create_client, if_match_headers, mount_token, request_count, short_retry,
-    };
-
-    /// ファイルのAPIのパス
-    const FILE_PATH: &str = "/2.0/files/12345";
-
-    /// 新しい名前だけをボディで送信し、オプションに応じてIf-Matchヘッダーを送信することを確認
-    #[rstest]
-    #[case::default(UpdateItemOptions::default(), None)]
-    #[case::etag(UpdateItemOptions { etag: Some("1") }, Some("1"))]
-    #[tokio::test]
-    async fn test_rename_file(
-        #[case] options: UpdateItemOptions<'static>,
-        #[case] expected_if_match: Option<&str>,
-    ) -> anyhow::Result<()> {
-        let server = MockServer::start().await;
-        mount_token(&server).await;
-        Mock::given(method("PUT"))
-            .and(path(FILE_PATH))
-            .and(body_json(json!({"name": "Renamed.pdf"})))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "type": "file",
-                "id": "12345",
-                "etag": "2",
-                "name": "Renamed.pdf",
-            })))
-            .expect(1)
-            .mount(&server)
-            .await;
-        let client = create_client(&server, short_retry(0)?).await?;
-
-        let file = client
-            .rename_file(&FileId::new("12345"), "Renamed.pdf", &options)
-            .await?;
-
-        assert_eq!(file.name, "Renamed.pdf");
-        assert_eq!(
-            if_match_headers(&server, "PUT", FILE_PATH).await,
-            vec![expected_if_match.map(str::to_owned)]
-        );
-
-        Ok(())
-    }
-
-    /// BOXが拒否するファイル名を指定した場合は、リクエストを送信せずにエラーを返すことを確認
-    ///
-    /// 使用できない文字の詳細な検証は、`validate_item_name`のテストで確認する。
-    #[rstest]
-    #[case::empty("")]
-    #[case::too_long(&"あ".repeat(256))]
-    #[case::invalid_char("a/b")]
-    #[tokio::test]
-    async fn test_rename_file_rejects_invalid_name(#[case] name: &str) -> anyhow::Result<()> {
-        let server = MockServer::start().await;
-        mount_token(&server).await;
-        let client = create_client(&server, short_retry(0)?).await?;
-        let requests_before = request_count(&server).await;
-
-        let result = client
-            .rename_file(&FileId::new("12345"), name, &UpdateItemOptions::default())
-            .await;
-
-        assert!(
-            matches!(result, Err(BoxClientError::InvalidRequestBody(_))),
-            "result: {result:?}"
-        );
-        assert_eq!(request_count(&server).await, requests_before);
-
-        Ok(())
-    }
-
-    /// BOXのエラーレスポンスを、再試行せずにそのまま返すことを確認
-    #[rstest]
-    #[case::name_in_use(409)]
-    #[case::etag_mismatch(412)]
-    #[case::internal_server_error(500)]
-    #[case::service_unavailable(503)]
-    #[tokio::test]
-    async fn test_rename_file_error_is_not_retried(#[case] status: u16) -> anyhow::Result<()> {
-        let server = MockServer::start().await;
-        mount_token(&server).await;
-        Mock::given(method("PUT"))
-            .and(path(FILE_PATH))
-            .respond_with(ResponseTemplate::new(status))
-            .mount(&server)
-            .await;
-        let client = create_client(&server, short_retry(2)?).await?;
-
-        let result = client
-            .rename_file(
-                &FileId::new("12345"),
-                "Renamed.pdf",
-                &UpdateItemOptions::default(),
-            )
-            .await;
-
-        assert!(
-            matches!(&result, Err(BoxClientError::Api(e)) if e.status == status),
-            "result: {result:?}"
-        );
-        assert_eq!(count_requests(&server, "PUT", FILE_PATH).await, 1);
-
-        Ok(())
-    }
-}
-
-#[cfg(test)]
-mod test_set_file_description {
-    use rstest::rstest;
-    use serde_json::json;
-    use wiremock::{
-        Mock, MockServer, ResponseTemplate,
-        matchers::{body_json, method, path},
-    };
-
-    use super::*;
-    use crate::test_support::{
-        count_requests, create_client, if_match_headers, mount_token, request_count, short_retry,
-    };
-
-    /// ファイルのAPIのパス
-    const FILE_PATH: &str = "/2.0/files/12345";
-
-    /// 説明だけをボディで送信し、オプションに応じてIf-Matchヘッダーを送信することを確認
-    ///
-    /// 説明を削除する空文字列と、上限の文字数の説明も送信できることを確認する。
-    #[rstest]
-    #[case::default("Contract for the project", UpdateItemOptions::default(), None)]
-    #[case::etag(
-        "Contract for the project",
-        UpdateItemOptions { etag: Some("1") },
-        Some("1")
-    )]
-    #[case::empty("", UpdateItemOptions::default(), None)]
-    #[case::max_japanese(
-        &"あ".repeat(crate::MAX_DESCRIPTION_CHARS),
-        UpdateItemOptions::default(),
-        None
-    )]
-    #[tokio::test]
-    async fn test_set_file_description(
-        #[case] description: &str,
-        #[case] options: UpdateItemOptions<'static>,
-        #[case] expected_if_match: Option<&str>,
-    ) -> anyhow::Result<()> {
-        let server = MockServer::start().await;
-        mount_token(&server).await;
-        Mock::given(method("PUT"))
-            .and(path(FILE_PATH))
-            .and(body_json(json!({"description": description})))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "type": "file",
-                "id": "12345",
-                "etag": "2",
-                "name": "Contract.pdf",
-                "description": description,
-            })))
-            .expect(1)
-            .mount(&server)
-            .await;
-        let client = create_client(&server, short_retry(0)?).await?;
-
-        let file = client
-            .set_file_description(&FileId::new("12345"), description, &options)
-            .await?;
-
-        assert_eq!(file.description.as_deref(), Some(description));
-        assert_eq!(
-            if_match_headers(&server, "PUT", FILE_PATH).await,
-            vec![expected_if_match.map(str::to_owned)]
-        );
-
-        Ok(())
-    }
-
-    /// 説明が上限の文字数より長い場合は、リクエストを送信せずにエラーを返すことを確認
-    #[tokio::test]
-    async fn test_set_file_description_rejects_too_long() -> anyhow::Result<()> {
-        let server = MockServer::start().await;
-        mount_token(&server).await;
-        let client = create_client(&server, short_retry(0)?).await?;
-        let requests_before = request_count(&server).await;
-
-        let result = client
-            .set_file_description(
-                &FileId::new("12345"),
-                &"あ".repeat(crate::MAX_DESCRIPTION_CHARS + 1),
-                &UpdateItemOptions::default(),
-            )
-            .await;
-
-        assert!(
-            matches!(result, Err(BoxClientError::InvalidRequestBody(_))),
-            "result: {result:?}"
-        );
-        assert_eq!(request_count(&server).await, requests_before);
-
-        Ok(())
-    }
-
-    /// BOXのエラーレスポンスを、再試行せずにそのまま返すことを確認
-    #[rstest]
-    #[case::etag_mismatch(412)]
-    #[case::internal_server_error(500)]
-    #[case::service_unavailable(503)]
-    #[tokio::test]
-    async fn test_set_file_description_error_is_not_retried(
-        #[case] status: u16,
-    ) -> anyhow::Result<()> {
-        let server = MockServer::start().await;
-        mount_token(&server).await;
-        Mock::given(method("PUT"))
-            .and(path(FILE_PATH))
-            .respond_with(ResponseTemplate::new(status))
-            .mount(&server)
-            .await;
-        let client = create_client(&server, short_retry(2)?).await?;
-
-        let result = client
-            .set_file_description(
-                &FileId::new("12345"),
-                "Contract for the project",
-                &UpdateItemOptions::default(),
-            )
-            .await;
-
-        assert!(
-            matches!(&result, Err(BoxClientError::Api(e)) if e.status == status),
-            "result: {result:?}"
-        );
-        assert_eq!(count_requests(&server, "PUT", FILE_PATH).await, 1);
-
-        Ok(())
-    }
-}
-
-#[cfg(test)]
-mod test_move_file {
+mod test_update_file {
     use rstest::rstest;
     use serde_json::json;
     use wiremock::{
@@ -1043,89 +784,193 @@ mod test_move_file {
     use crate::{
         FolderId, UserId,
         test_support::{
-            count_requests, create_client, if_match_headers, mount_token, request_count,
-            short_retry,
+            assert_not_retried, create_client, if_match_headers, is_invalid_argument,
+            is_invalid_request_body, mount_token, request_count, short_retry,
         },
     };
 
     /// ファイルのAPIのパス
     const FILE_PATH: &str = "/2.0/files/12345";
 
-    /// 移動先に応じた親フォルダだけをボディで送信し、オプションに応じてIf-Matchヘッダーを送信することを確認
+    /// ファイルを更新するメソッド
+    #[derive(Debug, Clone)]
+    enum Update {
+        /// 名前の変更
+        Rename(String),
+
+        /// 説明の設定
+        Description(String),
+
+        /// 移動
+        Move(MoveDestination),
+    }
+
+    impl Update {
+        /// 更新するメソッドを呼び出す。
+        async fn call(
+            &self,
+            client: &BoxClient,
+            options: &UpdateItemOptions<'_>,
+        ) -> BoxClientResult<File> {
+            let id = FileId::new("12345");
+            match self {
+                Self::Rename(name) => client.rename_file(&id, name, options).await,
+                Self::Description(description) => {
+                    client.set_file_description(&id, description, options).await
+                }
+                Self::Move(destination) => client.move_file(&id, destination, options).await,
+            }
+        }
+
+        /// BOXが返す、更新した属性を含むファイルのレスポンスを返す。
+        fn response(&self) -> ResponseTemplate {
+            let mut file = json!({
+                "type": "file",
+                "id": "12345",
+                "etag": "2",
+                "name": "Contract.pdf",
+            });
+            match self {
+                Self::Rename(name) => file["name"] = json!(name),
+                Self::Description(description) => file["description"] = json!(description),
+                Self::Move(MoveDestination::Folder(folder_id)) => {
+                    file["parent"] = json!({
+                        "type": "folder",
+                        "id": folder_id.as_ref(),
+                        "etag": "0",
+                        "name": "Archive",
+                    });
+                }
+                Self::Move(MoveDestination::User(_)) => {
+                    file["parent"] =
+                        json!({"type": "folder", "id": "0", "etag": null, "name": "All Files"});
+                }
+            }
+            ResponseTemplate::new(200).set_body_json(file)
+        }
+
+        /// 更新後のファイルに、更新した属性が反映されていることを確認する。
+        fn assert_applied(&self, file: &File) {
+            let parent_id = file.parent.as_ref().map(|p| &p.id);
+            match self {
+                Self::Rename(name) => assert_eq!(&file.name, name),
+                Self::Description(description) => {
+                    assert_eq!(file.description.as_ref(), Some(description));
+                }
+                Self::Move(MoveDestination::Folder(folder_id)) => {
+                    assert_eq!(parent_id, Some(folder_id));
+                }
+                Self::Move(MoveDestination::User(_)) => {
+                    assert_eq!(parent_id, Some(&FolderId::root()));
+                }
+            }
+        }
+    }
+
+    /// 更新する属性だけをボディで送信し、`ETag`を指定した場合だけIf-Matchヘッダーを送信することを確認
+    ///
+    /// 説明を削除する空文字列と、上限の文字数の説明も送信できることを確認する。
     #[rstest]
-    #[case::folder(
-        MoveDestination::Folder(FolderId::new("456")),
-        UpdateItemOptions::default(),
+    #[case::rename(
+        Update::Rename("Renamed.pdf".to_owned()),
+        json!({"name": "Renamed.pdf"}),
+        None
+    )]
+    #[case::rename_with_etag(
+        Update::Rename("Renamed.pdf".to_owned()),
+        json!({"name": "Renamed.pdf"}),
+        Some("1")
+    )]
+    #[case::description(
+        Update::Description("Contract for the project".to_owned()),
+        json!({"description": "Contract for the project"}),
+        None
+    )]
+    #[case::description_with_etag(
+        Update::Description("Contract for the project".to_owned()),
+        json!({"description": "Contract for the project"}),
+        Some("1")
+    )]
+    #[case::clear_description(Update::Description(String::new()), json!({"description": ""}), None)]
+    #[case::max_japanese_description(
+        Update::Description("あ".repeat(crate::MAX_DESCRIPTION_CHARS)),
+        json!({"description": "あ".repeat(crate::MAX_DESCRIPTION_CHARS)}),
+        None
+    )]
+    #[case::move_to_folder(
+        Update::Move(MoveDestination::Folder(FolderId::new("456"))),
         json!({"parent": {"id": "456"}}),
         None
     )]
-    #[case::folder_with_etag(
-        MoveDestination::Folder(FolderId::new("456")),
-        UpdateItemOptions { etag: Some("1") },
+    #[case::move_to_folder_with_etag(
+        Update::Move(MoveDestination::Folder(FolderId::new("456"))),
         json!({"parent": {"id": "456"}}),
         Some("1")
     )]
-    #[case::user_root(
-        MoveDestination::User(UserId::new("789")),
-        UpdateItemOptions::default(),
+    #[case::move_to_user_root(
+        Update::Move(MoveDestination::User(UserId::new("789"))),
         json!({"parent": {"id": "0", "user_id": "789"}}),
         None
     )]
     #[tokio::test]
-    async fn test_move_file(
-        #[case] destination: MoveDestination,
-        #[case] options: UpdateItemOptions<'static>,
+    async fn test_update_file(
+        #[case] update: Update,
         #[case] expected_body: serde_json::Value,
-        #[case] expected_if_match: Option<&str>,
+        #[case] etag: Option<&'static str>,
     ) -> anyhow::Result<()> {
         let server = MockServer::start().await;
         mount_token(&server).await;
         Mock::given(method("PUT"))
             .and(path(FILE_PATH))
             .and(body_json(expected_body))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "type": "file",
-                "id": "12345",
-                "etag": "2",
-                "name": "Contract.pdf",
-                "parent": {"type": "folder", "id": "456", "etag": "0", "name": "Archive"},
-            })))
+            .respond_with(update.response())
             .expect(1)
             .mount(&server)
             .await;
         let client = create_client(&server, short_retry(0)?).await?;
+        let options = UpdateItemOptions { etag };
 
-        let file = client
-            .move_file(&FileId::new("12345"), &destination, &options)
-            .await?;
+        let file = update.call(&client, &options).await?;
 
         assert_eq!(file.id, FileId::new("12345"));
+        update.assert_applied(&file);
         assert_eq!(
             if_match_headers(&server, "PUT", FILE_PATH).await,
-            vec![expected_if_match.map(str::to_owned)]
+            vec![etag.map(str::to_owned)]
         );
 
         Ok(())
     }
 
-    /// ユーザーIDが空文字列の場合は、リクエストを送信せずにエラーを返すことを確認
+    /// BOXが拒否する値を指定した場合は、リクエストを送信せずにエラーを返すことを確認
+    ///
+    /// 使用できない文字の詳細な検証は、`validate_item_name`のテストで確認する。
+    #[rstest]
+    #[case::empty_name(Update::Rename(String::new()), is_invalid_request_body)]
+    #[case::too_long_name(Update::Rename("あ".repeat(256)), is_invalid_request_body)]
+    #[case::invalid_char_name(Update::Rename("a/b".to_owned()), is_invalid_request_body)]
+    #[case::too_long_description(
+        Update::Description("あ".repeat(crate::MAX_DESCRIPTION_CHARS + 1)),
+        is_invalid_request_body
+    )]
+    #[case::empty_user_id(
+        Update::Move(MoveDestination::User(UserId::new(""))),
+        is_invalid_argument
+    )]
     #[tokio::test]
-    async fn test_move_file_rejects_empty_user_id() -> anyhow::Result<()> {
+    async fn test_update_file_rejects_without_request(
+        #[case] update: Update,
+        #[case] is_expected_error: fn(&BoxClientError) -> bool,
+    ) -> anyhow::Result<()> {
         let server = MockServer::start().await;
         mount_token(&server).await;
         let client = create_client(&server, short_retry(0)?).await?;
         let requests_before = request_count(&server).await;
 
-        let result = client
-            .move_file(
-                &FileId::new("12345"),
-                &MoveDestination::User(UserId::new("")),
-                &UpdateItemOptions::default(),
-            )
-            .await;
+        let result = update.call(&client, &UpdateItemOptions::default()).await;
 
         assert!(
-            matches!(result, Err(BoxClientError::InvalidArgument(_))),
+            result.as_ref().is_err_and(is_expected_error),
             "result: {result:?}"
         );
         assert_eq!(request_count(&server).await, requests_before);
@@ -1133,38 +978,40 @@ mod test_move_file {
         Ok(())
     }
 
-    /// BOXのエラーレスポンスを、再試行せずにそのまま返すことを確認
+    /// 更新は冪等でないため、BOXのエラーレスポンスを再試行せずにそのまま返すことを確認
     #[rstest]
-    #[case::forbidden(403)]
-    #[case::name_in_use(409)]
-    #[case::etag_mismatch(412)]
-    #[case::internal_server_error(500)]
+    #[case::rename_name_in_use(Update::Rename("Renamed.pdf".to_owned()), 409)]
+    #[case::rename_etag_mismatch(Update::Rename("Renamed.pdf".to_owned()), 412)]
+    #[case::rename_internal_server_error(Update::Rename("Renamed.pdf".to_owned()), 500)]
+    #[case::rename_service_unavailable(Update::Rename("Renamed.pdf".to_owned()), 503)]
+    #[case::description_etag_mismatch(
+        Update::Description("Contract for the project".to_owned()),
+        412
+    )]
+    #[case::description_internal_server_error(
+        Update::Description("Contract for the project".to_owned()),
+        500
+    )]
+    #[case::description_service_unavailable(
+        Update::Description("Contract for the project".to_owned()),
+        503
+    )]
+    #[case::move_forbidden(Update::Move(MoveDestination::Folder(FolderId::new("456"))), 403)]
+    #[case::move_name_in_use(Update::Move(MoveDestination::Folder(FolderId::new("456"))), 409)]
+    #[case::move_etag_mismatch(Update::Move(MoveDestination::Folder(FolderId::new("456"))), 412)]
+    #[case::move_internal_server_error(
+        Update::Move(MoveDestination::Folder(FolderId::new("456"))),
+        500
+    )]
     #[tokio::test]
-    async fn test_move_file_error_is_not_retried(#[case] status: u16) -> anyhow::Result<()> {
-        let server = MockServer::start().await;
-        mount_token(&server).await;
-        Mock::given(method("PUT"))
-            .and(path(FILE_PATH))
-            .respond_with(ResponseTemplate::new(status))
-            .mount(&server)
-            .await;
-        let client = create_client(&server, short_retry(2)?).await?;
-
-        let result = client
-            .move_file(
-                &FileId::new("12345"),
-                &MoveDestination::Folder(FolderId::new("456")),
-                &UpdateItemOptions::default(),
-            )
-            .await;
-
-        assert!(
-            matches!(&result, Err(BoxClientError::Api(e)) if e.status == status),
-            "result: {result:?}"
-        );
-        assert_eq!(count_requests(&server, "PUT", FILE_PATH).await, 1);
-
-        Ok(())
+    async fn test_update_file_error_is_not_retried(
+        #[case] update: Update,
+        #[case] status: u16,
+    ) -> anyhow::Result<()> {
+        assert_not_retried("PUT", FILE_PATH, status, async |client: &BoxClient| {
+            update.call(client, &UpdateItemOptions::default()).await
+        })
+        .await
     }
 }
 
@@ -1180,8 +1027,8 @@ mod test_delete_file {
     use crate::{
         BoxClientError,
         test_support::{
-            count_requests, create_client, if_match_headers, mount_token, request_count,
-            short_retry,
+            assert_not_retried, assert_retried_after, create_client, if_match_headers, mount_token,
+            operation_blocked_response, request_count, short_retry,
         },
     };
 
@@ -1250,51 +1097,34 @@ mod test_delete_file {
     #[case::service_unavailable(503)]
     #[tokio::test]
     async fn test_delete_file_error_is_not_retried(#[case] status: u16) -> anyhow::Result<()> {
-        let server = MockServer::start().await;
-        mount_token(&server).await;
-        Mock::given(method("DELETE"))
-            .and(path(FILE_PATH))
-            .respond_with(ResponseTemplate::new(status))
-            .mount(&server)
-            .await;
-        let client = create_client(&server, short_retry(2)?).await?;
-
-        let result = client
-            .delete_file(&FileId::new("123"), &DeleteItemOptions::default())
-            .await;
-
-        assert!(
-            matches!(&result, Err(BoxClientError::Api(e)) if e.status == status),
-            "result: {result:?}"
-        );
-        assert_eq!(count_requests(&server, "DELETE", FILE_PATH).await, 1);
-
-        Ok(())
+        assert_not_retried("DELETE", FILE_PATH, status, async |client: &BoxClient| {
+            client
+                .delete_file(&FileId::new("123"), &DeleteItemOptions::default())
+                .await
+        })
+        .await
     }
 
-    /// 429の場合は、冪等でないリクエストとして送信しても再試行することを確認
+    /// 429または他の操作によるロックで409を受け取った場合は、冪等でないリクエストとして送信しても再試行することを確認
+    #[rstest]
+    #[case::too_many_requests(ResponseTemplate::new(429))]
+    #[case::operation_blocked_temporary(operation_blocked_response())]
     #[tokio::test]
-    async fn test_delete_file_retries_too_many_requests() -> anyhow::Result<()> {
-        let server = MockServer::start().await;
-        mount_token(&server).await;
-        Mock::given(method("DELETE"))
-            .and(path(FILE_PATH))
-            .respond_with(ResponseTemplate::new(429))
-            .up_to_n_times(1)
-            .mount(&server)
-            .await;
-        Mock::given(method("DELETE"))
-            .and(path(FILE_PATH))
-            .respond_with(ResponseTemplate::new(204))
-            .mount(&server)
-            .await;
-        let client = create_client(&server, short_retry(1)?).await?;
-
-        client
-            .delete_file(&FileId::new("123"), &DeleteItemOptions::default())
-            .await?;
-
-        assert_eq!(count_requests(&server, "DELETE", FILE_PATH).await, 2);
+    async fn test_delete_file_retries_request_not_processed(
+        #[case] first_response: ResponseTemplate,
+    ) -> anyhow::Result<()> {
+        assert_retried_after(
+            "DELETE",
+            FILE_PATH,
+            first_response,
+            ResponseTemplate::new(204),
+            async |client: &BoxClient| {
+                client
+                    .delete_file(&FileId::new("123"), &DeleteItemOptions::default())
+                    .await
+            },
+        )
+        .await?;
 
         Ok(())
     }

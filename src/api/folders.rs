@@ -1574,7 +1574,7 @@ mod test_create_folder {
 
     use super::*;
     use crate::test_support::{
-        count_requests, create_client, mount_token, request_count, short_retry,
+        assert_not_retried, create_client, mount_token, request_count, short_retry,
     };
 
     /// フォルダのAPIのパス
@@ -1640,24 +1640,10 @@ mod test_create_folder {
     #[case::service_unavailable(503)]
     #[tokio::test]
     async fn test_create_folder_error_is_not_retried(#[case] status: u16) -> anyhow::Result<()> {
-        let server = MockServer::start().await;
-        mount_token(&server).await;
-        Mock::given(method("POST"))
-            .and(path(FOLDERS_PATH))
-            .respond_with(ResponseTemplate::new(status))
-            .mount(&server)
-            .await;
-        let client = create_client(&server, short_retry(2)?).await?;
-
-        let result = client.create_folder("Contracts", &FolderId::root()).await;
-
-        assert!(
-            matches!(&result, Err(BoxClientError::Api(e)) if e.status == status),
-            "result: {result:?}"
-        );
-        assert_eq!(count_requests(&server, "POST", FOLDERS_PATH).await, 1);
-
-        Ok(())
+        assert_not_retried("POST", FOLDERS_PATH, status, async |client: &BoxClient| {
+            client.create_folder("Contracts", &FolderId::root()).await
+        })
+        .await
     }
 }
 
@@ -1672,7 +1658,7 @@ mod test_copy_folder {
 
     use super::*;
     use crate::test_support::{
-        count_requests, create_client, mount_token, request_count, short_retry,
+        assert_not_retried, create_client, mount_token, request_count, short_retry,
     };
 
     /// フォルダのコピーのAPIのパス
@@ -1768,35 +1754,21 @@ mod test_copy_folder {
     #[case::service_unavailable(503)]
     #[tokio::test]
     async fn test_copy_folder_error_is_not_retried(#[case] status: u16) -> anyhow::Result<()> {
-        let server = MockServer::start().await;
-        mount_token(&server).await;
-        Mock::given(method("POST"))
-            .and(path(COPY_PATH))
-            .respond_with(ResponseTemplate::new(status))
-            .mount(&server)
-            .await;
-        let client = create_client(&server, short_retry(2)?).await?;
-
-        let result = client
-            .copy_folder(
-                &FolderId::new("123"),
-                &FolderId::new("456"),
-                &CopyFolderOptions::default(),
-            )
-            .await;
-
-        assert!(
-            matches!(&result, Err(BoxClientError::Api(e)) if e.status == status),
-            "result: {result:?}"
-        );
-        assert_eq!(count_requests(&server, "POST", COPY_PATH).await, 1);
-
-        Ok(())
+        assert_not_retried("POST", COPY_PATH, status, async |client: &BoxClient| {
+            client
+                .copy_folder(
+                    &FolderId::new("123"),
+                    &FolderId::new("456"),
+                    &CopyFolderOptions::default(),
+                )
+                .await
+        })
+        .await
     }
 }
 
 #[cfg(test)]
-mod test_rename_folder {
+mod test_update_folder {
     use rstest::rstest;
     use serde_json::json;
     use wiremock::{
@@ -1805,430 +1777,274 @@ mod test_rename_folder {
     };
 
     use super::*;
-    use crate::test_support::{
-        count_requests, create_client, if_match_headers, mount_token, request_count, short_retry,
+    use crate::{
+        UserId,
+        test_support::{
+            assert_not_retried, create_client, if_match_headers, is_invalid_argument,
+            is_invalid_request_body, mount_token, request_count, short_retry,
+        },
     };
 
     /// フォルダのAPIのパス
     const FOLDER_PATH: &str = "/2.0/folders/123";
 
-    /// 新しい名前だけをボディで送信し、オプションに応じてIf-Matchヘッダーを送信することを確認
-    #[rstest]
-    #[case::default(UpdateItemOptions::default(), None)]
-    #[case::etag(UpdateItemOptions { etag: Some("1") }, Some("1"))]
-    #[tokio::test]
-    async fn test_rename_folder(
-        #[case] options: UpdateItemOptions<'static>,
-        #[case] expected_if_match: Option<&str>,
-    ) -> anyhow::Result<()> {
-        let server = MockServer::start().await;
-        mount_token(&server).await;
-        Mock::given(method("PUT"))
-            .and(path(FOLDER_PATH))
-            .and(body_json(json!({"name": "Renamed"})))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+    /// フォルダを更新するメソッド
+    #[derive(Debug, Clone)]
+    enum Update {
+        /// 名前の変更
+        Rename(String),
+
+        /// 説明の設定
+        Description(String),
+
+        /// 移動
+        Move(MoveDestination),
+    }
+
+    impl Update {
+        /// `folder_id`のフォルダを更新するメソッドを呼び出す。
+        async fn call(
+            &self,
+            client: &BoxClient,
+            folder_id: &FolderId,
+            options: &UpdateItemOptions<'_>,
+        ) -> BoxClientResult<Folder> {
+            match self {
+                Self::Rename(name) => client.rename_folder(folder_id, name, options).await,
+                Self::Description(description) => {
+                    client
+                        .set_folder_description(folder_id, description, options)
+                        .await
+                }
+                Self::Move(destination) => {
+                    client.move_folder(folder_id, destination, options).await
+                }
+            }
+        }
+
+        /// BOXが返す、更新した属性を含むフォルダのレスポンスを返す。
+        fn response(&self) -> ResponseTemplate {
+            let mut folder = json!({
                 "type": "folder",
                 "id": "123",
                 "etag": "2",
-                "name": "Renamed",
-            })))
-            .expect(1)
-            .mount(&server)
-            .await;
-        let client = create_client(&server, short_retry(0)?).await?;
+                "name": "Contracts",
+            });
+            match self {
+                Self::Rename(name) => folder["name"] = json!(name),
+                Self::Description(description) => folder["description"] = json!(description),
+                Self::Move(MoveDestination::Folder(folder_id)) => {
+                    folder["parent"] = json!({
+                        "type": "folder",
+                        "id": folder_id.as_ref(),
+                        "etag": "0",
+                        "name": "Archive",
+                    });
+                }
+                Self::Move(MoveDestination::User(_)) => {
+                    folder["parent"] =
+                        json!({"type": "folder", "id": "0", "etag": null, "name": "All Files"});
+                }
+            }
+            ResponseTemplate::new(200).set_body_json(folder)
+        }
 
-        let folder = client
-            .rename_folder(&FolderId::new("123"), "Renamed", &options)
-            .await?;
-
-        assert_eq!(folder.name, "Renamed");
-        assert_eq!(
-            if_match_headers(&server, "PUT", FOLDER_PATH).await,
-            vec![expected_if_match.map(str::to_owned)]
-        );
-
-        Ok(())
+        /// 更新後のフォルダに、更新した属性が反映されていることを確認する。
+        fn assert_applied(&self, folder: &Folder) {
+            let parent_id = folder.parent.as_ref().map(|p| &p.id);
+            match self {
+                Self::Rename(name) => assert_eq!(&folder.name, name),
+                Self::Description(description) => {
+                    assert_eq!(folder.description.as_ref(), Some(description));
+                }
+                Self::Move(MoveDestination::Folder(folder_id)) => {
+                    assert_eq!(parent_id, Some(folder_id));
+                }
+                Self::Move(MoveDestination::User(_)) => {
+                    assert_eq!(parent_id, Some(&FolderId::root()));
+                }
+            }
+        }
     }
 
-    /// ルートフォルダ、またはBOXが拒否するフォルダ名を指定した場合は、リクエストを送信せずにエラーを返すことを確認
-    ///
-    /// 使用できない文字の詳細な検証は、`validate_item_name`のテストで確認する。
-    #[rstest]
-    #[case::root(FolderId::root(), "Renamed", "InvalidArgument")]
-    #[case::empty(FolderId::new("123"), "", "InvalidRequestBody")]
-    #[case::too_long(FolderId::new("123"), &"あ".repeat(256), "InvalidRequestBody")]
-    #[case::invalid_char(FolderId::new("123"), "a/b", "InvalidRequestBody")]
-    #[tokio::test]
-    async fn test_rename_folder_rejects_without_request(
-        #[case] folder_id: FolderId,
-        #[case] name: &str,
-        #[case] expected: &str,
-    ) -> anyhow::Result<()> {
-        let server = MockServer::start().await;
-        mount_token(&server).await;
-        let client = create_client(&server, short_retry(0)?).await?;
-        let requests_before = request_count(&server).await;
-
-        let result = client
-            .rename_folder(&folder_id, name, &UpdateItemOptions::default())
-            .await;
-
-        let matched = match expected {
-            "InvalidArgument" => matches!(result, Err(BoxClientError::InvalidArgument(_))),
-            _ => matches!(result, Err(BoxClientError::InvalidRequestBody(_))),
-        };
-        assert!(matched, "result: {result:?}");
-        assert_eq!(request_count(&server).await, requests_before);
-
-        Ok(())
-    }
-
-    /// BOXのエラーレスポンスを、再試行せずにそのまま返すことを確認
-    #[rstest]
-    #[case::name_in_use(409)]
-    #[case::etag_mismatch(412)]
-    #[case::internal_server_error(500)]
-    #[case::service_unavailable(503)]
-    #[tokio::test]
-    async fn test_rename_folder_error_is_not_retried(#[case] status: u16) -> anyhow::Result<()> {
-        let server = MockServer::start().await;
-        mount_token(&server).await;
-        Mock::given(method("PUT"))
-            .and(path(FOLDER_PATH))
-            .respond_with(ResponseTemplate::new(status))
-            .mount(&server)
-            .await;
-        let client = create_client(&server, short_retry(2)?).await?;
-
-        let result = client
-            .rename_folder(
-                &FolderId::new("123"),
-                "Renamed",
-                &UpdateItemOptions::default(),
-            )
-            .await;
-
-        assert!(
-            matches!(&result, Err(BoxClientError::Api(e)) if e.status == status),
-            "result: {result:?}"
-        );
-        assert_eq!(count_requests(&server, "PUT", FOLDER_PATH).await, 1);
-
-        Ok(())
-    }
-}
-
-#[cfg(test)]
-mod test_set_folder_description {
-    use rstest::rstest;
-    use serde_json::json;
-    use wiremock::{
-        Mock, MockServer, ResponseTemplate,
-        matchers::{body_json, method, path},
-    };
-
-    use super::*;
-    use crate::test_support::{
-        count_requests, create_client, if_match_headers, mount_token, request_count, short_retry,
-    };
-
-    /// フォルダのAPIのパス
-    const FOLDER_PATH: &str = "/2.0/folders/123";
-
-    /// 説明だけをボディで送信し、オプションに応じてIf-Matchヘッダーを送信することを確認
+    /// 更新する属性だけをボディで送信し、`ETag`を指定した場合だけIf-Matchヘッダーを送信することを確認
     ///
     /// 説明を削除する空文字列と、上限の文字数の説明も送信できることを確認する。
+    /// ユーザーを移動先に指定した場合は、ルートフォルダのIDとユーザーIDを送信することを確認する。
     #[rstest]
-    #[case::default("Legal contracts", UpdateItemOptions::default(), None)]
-    #[case::etag(
-        "Legal contracts",
-        UpdateItemOptions { etag: Some("1") },
+    #[case::rename(Update::Rename("Renamed".to_owned()), json!({"name": "Renamed"}), None)]
+    #[case::rename_with_etag(
+        Update::Rename("Renamed".to_owned()),
+        json!({"name": "Renamed"}),
         Some("1")
     )]
-    #[case::empty("", UpdateItemOptions::default(), None)]
-    #[case::max_japanese(
-        &"あ".repeat(crate::MAX_DESCRIPTION_CHARS),
-        UpdateItemOptions::default(),
+    #[case::description(
+        Update::Description("Legal contracts".to_owned()),
+        json!({"description": "Legal contracts"}),
+        None
+    )]
+    #[case::description_with_etag(
+        Update::Description("Legal contracts".to_owned()),
+        json!({"description": "Legal contracts"}),
+        Some("1")
+    )]
+    #[case::clear_description(Update::Description(String::new()), json!({"description": ""}), None)]
+    #[case::max_japanese_description(
+        Update::Description("あ".repeat(crate::MAX_DESCRIPTION_CHARS)),
+        json!({"description": "あ".repeat(crate::MAX_DESCRIPTION_CHARS)}),
+        None
+    )]
+    #[case::move_to_folder(
+        Update::Move(MoveDestination::Folder(FolderId::new("456"))),
+        json!({"parent": {"id": "456"}}),
+        None
+    )]
+    #[case::move_to_folder_with_etag(
+        Update::Move(MoveDestination::Folder(FolderId::new("456"))),
+        json!({"parent": {"id": "456"}}),
+        Some("1")
+    )]
+    #[case::move_to_user_root(
+        Update::Move(MoveDestination::User(UserId::new("789"))),
+        json!({"parent": {"id": "0", "user_id": "789"}}),
         None
     )]
     #[tokio::test]
-    async fn test_set_folder_description(
-        #[case] description: &str,
-        #[case] options: UpdateItemOptions<'static>,
-        #[case] expected_if_match: Option<&str>,
+    async fn test_update_folder(
+        #[case] update: Update,
+        #[case] expected_body: serde_json::Value,
+        #[case] etag: Option<&'static str>,
     ) -> anyhow::Result<()> {
         let server = MockServer::start().await;
         mount_token(&server).await;
         Mock::given(method("PUT"))
             .and(path(FOLDER_PATH))
-            .and(body_json(json!({"description": description})))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "type": "folder",
-                "id": "123",
-                "etag": "2",
-                "name": "Contracts",
-                "description": description,
-            })))
+            .and(body_json(expected_body))
+            .respond_with(update.response())
             .expect(1)
             .mount(&server)
             .await;
         let client = create_client(&server, short_retry(0)?).await?;
+        let options = UpdateItemOptions { etag };
 
-        let folder = client
-            .set_folder_description(&FolderId::new("123"), description, &options)
+        let folder = update
+            .call(&client, &FolderId::new("123"), &options)
             .await?;
 
-        assert_eq!(folder.description.as_deref(), Some(description));
+        assert_eq!(folder.id, FolderId::new("123"));
+        update.assert_applied(&folder);
         assert_eq!(
             if_match_headers(&server, "PUT", FOLDER_PATH).await,
-            vec![expected_if_match.map(str::to_owned)]
+            vec![etag.map(str::to_owned)]
         );
 
         Ok(())
     }
 
-    /// ルートフォルダを指定した場合は、リクエストを送信せずにエラーを返すことを確認
-    #[tokio::test]
-    async fn test_set_folder_description_rejects_root() -> anyhow::Result<()> {
-        let server = MockServer::start().await;
-        mount_token(&server).await;
-        let client = create_client(&server, short_retry(0)?).await?;
-        let requests_before = request_count(&server).await;
-
-        let result = client
-            .set_folder_description(
-                &FolderId::root(),
-                "Legal contracts",
-                &UpdateItemOptions::default(),
-            )
-            .await;
-
-        assert!(
-            matches!(result, Err(BoxClientError::InvalidArgument(_))),
-            "result: {result:?}"
-        );
-        assert_eq!(request_count(&server).await, requests_before);
-
-        Ok(())
-    }
-
-    /// 説明が上限の文字数より長い場合は、リクエストを送信せずにエラーを返すことを確認
-    #[tokio::test]
-    async fn test_set_folder_description_rejects_too_long() -> anyhow::Result<()> {
-        let server = MockServer::start().await;
-        mount_token(&server).await;
-        let client = create_client(&server, short_retry(0)?).await?;
-        let requests_before = request_count(&server).await;
-
-        let result = client
-            .set_folder_description(
-                &FolderId::new("123"),
-                &"あ".repeat(crate::MAX_DESCRIPTION_CHARS + 1),
-                &UpdateItemOptions::default(),
-            )
-            .await;
-
-        assert!(
-            matches!(result, Err(BoxClientError::InvalidRequestBody(_))),
-            "result: {result:?}"
-        );
-        assert_eq!(request_count(&server).await, requests_before);
-
-        Ok(())
-    }
-
-    /// BOXのエラーレスポンスを、再試行せずにそのまま返すことを確認
+    /// ルートフォルダを更新しようとした場合、またはBOXが拒否する値を指定した場合は、
+    /// リクエストを送信せずにエラーを返すことを確認
+    ///
+    /// 使用できない文字の詳細な検証は、`validate_item_name`のテストで確認する。
     #[rstest]
-    #[case::etag_mismatch(412)]
-    #[case::internal_server_error(500)]
-    #[case::service_unavailable(503)]
+    #[case::rename_root(
+        FolderId::root(),
+        Update::Rename("Renamed".to_owned()),
+        is_invalid_argument
+    )]
+    #[case::empty_name(
+        FolderId::new("123"),
+        Update::Rename(String::new()),
+        is_invalid_request_body
+    )]
+    #[case::too_long_name(
+        FolderId::new("123"),
+        Update::Rename("あ".repeat(256)),
+        is_invalid_request_body
+    )]
+    #[case::invalid_char_name(
+        FolderId::new("123"),
+        Update::Rename("a/b".to_owned()),
+        is_invalid_request_body
+    )]
+    #[case::describe_root(
+        FolderId::root(),
+        Update::Description("Legal contracts".to_owned()),
+        is_invalid_argument
+    )]
+    #[case::too_long_description(
+        FolderId::new("123"),
+        Update::Description("あ".repeat(crate::MAX_DESCRIPTION_CHARS + 1)),
+        is_invalid_request_body
+    )]
+    #[case::move_root(
+        FolderId::root(),
+        Update::Move(MoveDestination::Folder(FolderId::new("456"))),
+        is_invalid_argument
+    )]
+    #[case::empty_user_id(
+        FolderId::new("123"),
+        Update::Move(MoveDestination::User(UserId::new(""))),
+        is_invalid_argument
+    )]
     #[tokio::test]
-    async fn test_set_folder_description_error_is_not_retried(
+    async fn test_update_folder_rejects_without_request(
+        #[case] folder_id: FolderId,
+        #[case] update: Update,
+        #[case] is_expected_error: fn(&BoxClientError) -> bool,
+    ) -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        let client = create_client(&server, short_retry(0)?).await?;
+        let requests_before = request_count(&server).await;
+
+        let result = update
+            .call(&client, &folder_id, &UpdateItemOptions::default())
+            .await;
+
+        assert!(
+            result.as_ref().is_err_and(is_expected_error),
+            "result: {result:?}"
+        );
+        assert_eq!(request_count(&server).await, requests_before);
+
+        Ok(())
+    }
+
+    /// 更新は冪等でないため、BOXのエラーレスポンスを再試行せずにそのまま返すことを確認
+    ///
+    /// 移動の503は移動処理が継続していることを示すため、再試行の上限に余裕があっても再送しない。
+    #[rstest]
+    #[case::rename_name_in_use(Update::Rename("Renamed".to_owned()), 409)]
+    #[case::rename_etag_mismatch(Update::Rename("Renamed".to_owned()), 412)]
+    #[case::rename_internal_server_error(Update::Rename("Renamed".to_owned()), 500)]
+    #[case::rename_service_unavailable(Update::Rename("Renamed".to_owned()), 503)]
+    #[case::description_etag_mismatch(Update::Description("Legal contracts".to_owned()), 412)]
+    #[case::description_internal_server_error(
+        Update::Description("Legal contracts".to_owned()),
+        500
+    )]
+    #[case::description_service_unavailable(
+        Update::Description("Legal contracts".to_owned()),
+        503
+    )]
+    #[case::move_name_in_use(Update::Move(MoveDestination::Folder(FolderId::new("456"))), 409)]
+    #[case::move_etag_mismatch(Update::Move(MoveDestination::Folder(FolderId::new("456"))), 412)]
+    #[case::move_internal_server_error(
+        Update::Move(MoveDestination::Folder(FolderId::new("456"))),
+        500
+    )]
+    #[case::move_still_moving(Update::Move(MoveDestination::Folder(FolderId::new("456"))), 503)]
+    #[tokio::test]
+    async fn test_update_folder_error_is_not_retried(
+        #[case] update: Update,
         #[case] status: u16,
     ) -> anyhow::Result<()> {
-        let server = MockServer::start().await;
-        mount_token(&server).await;
-        Mock::given(method("PUT"))
-            .and(path(FOLDER_PATH))
-            .respond_with(ResponseTemplate::new(status))
-            .mount(&server)
-            .await;
-        let client = create_client(&server, short_retry(2)?).await?;
-
-        let result = client
-            .set_folder_description(
-                &FolderId::new("123"),
-                "Legal contracts",
-                &UpdateItemOptions::default(),
-            )
-            .await;
-
-        assert!(
-            matches!(&result, Err(BoxClientError::Api(e)) if e.status == status),
-            "result: {result:?}"
-        );
-        assert_eq!(count_requests(&server, "PUT", FOLDER_PATH).await, 1);
-
-        Ok(())
-    }
-}
-
-#[cfg(test)]
-mod test_move_folder {
-    use rstest::rstest;
-    use serde_json::json;
-    use wiremock::{
-        Mock, MockServer, ResponseTemplate,
-        matchers::{body_json, method, path},
-    };
-
-    use super::*;
-    use crate::UserId;
-    use crate::test_support::{
-        count_requests, create_client, if_match_headers, mount_token, request_count, short_retry,
-    };
-
-    /// フォルダのAPIのパス
-    const FOLDER_PATH: &str = "/2.0/folders/123";
-
-    /// 移動先の親フォルダだけをボディで送信し、オプションに応じてIf-Matchヘッダーを送信することを確認
-    #[rstest]
-    #[case::default(UpdateItemOptions::default(), None)]
-    #[case::etag(UpdateItemOptions { etag: Some("1") }, Some("1"))]
-    #[tokio::test]
-    async fn test_move_folder(
-        #[case] options: UpdateItemOptions<'static>,
-        #[case] expected_if_match: Option<&str>,
-    ) -> anyhow::Result<()> {
-        let server = MockServer::start().await;
-        mount_token(&server).await;
-        Mock::given(method("PUT"))
-            .and(path(FOLDER_PATH))
-            .and(body_json(json!({"parent": {"id": "456"}})))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "type": "folder",
-                "id": "123",
-                "etag": "2",
-                "name": "Contracts",
-                "parent": {"type": "folder", "id": "456", "etag": "0", "name": "Archive"},
-            })))
-            .expect(1)
-            .mount(&server)
-            .await;
-        let client = create_client(&server, short_retry(0)?).await?;
-
-        let folder = client
-            .move_folder(
-                &FolderId::new("123"),
-                &MoveDestination::Folder(FolderId::new("456")),
-                &options,
-            )
-            .await?;
-
-        assert_eq!(folder.parent.map(|p| p.id), Some(FolderId::new("456")));
-        assert_eq!(
-            if_match_headers(&server, "PUT", FOLDER_PATH).await,
-            vec![expected_if_match.map(str::to_owned)]
-        );
-
-        Ok(())
-    }
-
-    /// ユーザーを指定した場合は、ルートフォルダのIDとユーザーIDを送信することを確認
-    #[tokio::test]
-    async fn test_move_folder_to_user_root() -> anyhow::Result<()> {
-        let server = MockServer::start().await;
-        mount_token(&server).await;
-        Mock::given(method("PUT"))
-            .and(path(FOLDER_PATH))
-            .and(body_json(json!({"parent": {"id": "0", "user_id": "789"}})))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "type": "folder",
-                "id": "123",
-                "etag": "2",
-                "name": "Contracts",
-                "parent": {"type": "folder", "id": "0", "etag": null, "name": "All Files"},
-            })))
-            .expect(1)
-            .mount(&server)
-            .await;
-        let client = create_client(&server, short_retry(0)?).await?;
-
-        let folder = client
-            .move_folder(
-                &FolderId::new("123"),
-                &MoveDestination::User(UserId::new("789")),
-                &UpdateItemOptions::default(),
-            )
-            .await?;
-
-        assert_eq!(folder.parent.map(|p| p.id), Some(FolderId::root()));
-
-        Ok(())
-    }
-
-    /// ルートフォルダを移動しようとした場合、またはユーザーIDが空文字列の場合は、
-    /// リクエストを送信せずにエラーを返すことを確認
-    #[rstest]
-    #[case::root_folder(FolderId::root(), MoveDestination::Folder(FolderId::new("456")))]
-    #[case::empty_user_id(FolderId::new("123"), MoveDestination::User(UserId::new("")))]
-    #[tokio::test]
-    async fn test_move_folder_rejects_without_request(
-        #[case] folder_id: FolderId,
-        #[case] destination: MoveDestination,
-    ) -> anyhow::Result<()> {
-        let server = MockServer::start().await;
-        mount_token(&server).await;
-        let client = create_client(&server, short_retry(0)?).await?;
-        let requests_before = request_count(&server).await;
-
-        let result = client
-            .move_folder(&folder_id, &destination, &UpdateItemOptions::default())
-            .await;
-
-        assert!(
-            matches!(result, Err(BoxClientError::InvalidArgument(_))),
-            "result: {result:?}"
-        );
-        assert_eq!(request_count(&server).await, requests_before);
-
-        Ok(())
-    }
-
-    /// BOXのエラーレスポンスを、再試行せずにそのまま返すことを確認
-    ///
-    /// 503は移動処理が継続していることを示すため、再試行の上限に余裕があっても再送しない。
-    #[rstest]
-    #[case::name_in_use(409)]
-    #[case::etag_mismatch(412)]
-    #[case::internal_server_error(500)]
-    #[case::still_moving(503)]
-    #[tokio::test]
-    async fn test_move_folder_error_is_not_retried(#[case] status: u16) -> anyhow::Result<()> {
-        let server = MockServer::start().await;
-        mount_token(&server).await;
-        Mock::given(method("PUT"))
-            .and(path(FOLDER_PATH))
-            .respond_with(ResponseTemplate::new(status))
-            .mount(&server)
-            .await;
-        let client = create_client(&server, short_retry(2)?).await?;
-
-        let result = client
-            .move_folder(
-                &FolderId::new("123"),
-                &MoveDestination::Folder(FolderId::new("456")),
-                &UpdateItemOptions::default(),
-            )
-            .await;
-
-        assert!(
-            matches!(&result, Err(BoxClientError::Api(e)) if e.status == status),
-            "result: {result:?}"
-        );
-        assert_eq!(count_requests(&server, "PUT", FOLDER_PATH).await, 1);
-
-        Ok(())
+        assert_not_retried("PUT", FOLDER_PATH, status, async |client: &BoxClient| {
+            update
+                .call(client, &FolderId::new("123"), &UpdateItemOptions::default())
+                .await
+        })
+        .await
     }
 }
 
@@ -2242,7 +2058,8 @@ mod test_delete_folder {
 
     use super::*;
     use crate::test_support::{
-        count_requests, create_client, if_match, mount_token, request_count, requests, short_retry,
+        assert_not_retried, assert_retried_after, create_client, if_match, mount_token,
+        operation_blocked_response, request_count, requests, short_retry,
     };
 
     /// フォルダのAPIのパス
@@ -2338,51 +2155,34 @@ mod test_delete_folder {
     #[case::still_deleting(503)]
     #[tokio::test]
     async fn test_delete_folder_error_is_not_retried(#[case] status: u16) -> anyhow::Result<()> {
-        let server = MockServer::start().await;
-        mount_token(&server).await;
-        Mock::given(method("DELETE"))
-            .and(path(FOLDER_PATH))
-            .respond_with(ResponseTemplate::new(status))
-            .mount(&server)
-            .await;
-        let client = create_client(&server, short_retry(2)?).await?;
-
-        let result = client
-            .delete_folder(&FolderId::new("123"), &DeleteFolderOptions::default())
-            .await;
-
-        assert!(
-            matches!(&result, Err(BoxClientError::Api(e)) if e.status == status),
-            "result: {result:?}"
-        );
-        assert_eq!(count_requests(&server, "DELETE", FOLDER_PATH).await, 1);
-
-        Ok(())
+        assert_not_retried("DELETE", FOLDER_PATH, status, async |client: &BoxClient| {
+            client
+                .delete_folder(&FolderId::new("123"), &DeleteFolderOptions::default())
+                .await
+        })
+        .await
     }
 
-    /// 429の場合は、冪等でないリクエストとして送信しても再試行することを確認
+    /// 429または他の操作によるロックで409を受け取った場合は、冪等でないリクエストとして送信しても再試行することを確認
+    #[rstest]
+    #[case::too_many_requests(ResponseTemplate::new(429))]
+    #[case::operation_blocked_temporary(operation_blocked_response())]
     #[tokio::test]
-    async fn test_delete_folder_retries_too_many_requests() -> anyhow::Result<()> {
-        let server = MockServer::start().await;
-        mount_token(&server).await;
-        Mock::given(method("DELETE"))
-            .and(path(FOLDER_PATH))
-            .respond_with(ResponseTemplate::new(429))
-            .up_to_n_times(1)
-            .mount(&server)
-            .await;
-        Mock::given(method("DELETE"))
-            .and(path(FOLDER_PATH))
-            .respond_with(ResponseTemplate::new(204))
-            .mount(&server)
-            .await;
-        let client = create_client(&server, short_retry(1)?).await?;
-
-        client
-            .delete_folder(&FolderId::new("123"), &DeleteFolderOptions::default())
-            .await?;
-
-        assert_eq!(count_requests(&server, "DELETE", FOLDER_PATH).await, 2);
+    async fn test_delete_folder_retries_request_not_processed(
+        #[case] first_response: ResponseTemplate,
+    ) -> anyhow::Result<()> {
+        assert_retried_after(
+            "DELETE",
+            FOLDER_PATH,
+            first_response,
+            ResponseTemplate::new(204),
+            async |client: &BoxClient| {
+                client
+                    .delete_folder(&FolderId::new("123"), &DeleteFolderOptions::default())
+                    .await
+            },
+        )
+        .await?;
 
         Ok(())
     }

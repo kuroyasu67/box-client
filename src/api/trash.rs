@@ -830,8 +830,8 @@ mod test_restore_folder {
     use crate::{
         ItemStatus,
         test_support::{
-            count_requests, create_client, mount_token, operation_blocked_response, request_count,
-            short_retry,
+            assert_not_retried, assert_not_retried_with_response, assert_retried_after,
+            create_client, mount_token, operation_blocked_response, request_count, short_retry,
         },
     };
 
@@ -919,51 +919,38 @@ mod test_restore_folder {
     #[case::service_unavailable(503)]
     #[tokio::test]
     async fn test_restore_folder_error_is_not_retried(#[case] status: u16) -> anyhow::Result<()> {
-        let server = MockServer::start().await;
-        mount_token(&server).await;
-        Mock::given(method("POST"))
-            .and(path(FOLDER_PATH))
-            .respond_with(ResponseTemplate::new(status))
-            .mount(&server)
-            .await;
-        let client = create_client(&server, short_retry(2)?).await?;
-
-        let result = client
-            .restore_folder(&FolderId::new("123"), &RestoreItemOptions::default())
-            .await;
-
-        assert!(
-            matches!(&result, Err(BoxClientError::Api(e)) if e.status == status),
-            "result: {result:?}"
-        );
-        assert_eq!(count_requests(&server, "POST", FOLDER_PATH).await, 1);
-
-        Ok(())
+        assert_not_retried("POST", FOLDER_PATH, status, async |client: &BoxClient| {
+            client
+                .restore_folder(&FolderId::new("123"), &RestoreItemOptions::default())
+                .await
+        })
+        .await
     }
 
-    /// 他の操作によるロックで409を受け取った場合は、冪等でないリクエストとして送信しても再試行することを確認
+    /// 429または他の操作によるロックで409を受け取った場合は、冪等でないリクエストとして送信しても再試行することを確認
+    #[rstest]
+    #[case::too_many_requests(ResponseTemplate::new(429))]
+    #[case::operation_blocked_temporary(operation_blocked_response())]
     #[tokio::test]
-    async fn test_restore_folder_retries_operation_blocked_temporary() -> anyhow::Result<()> {
-        let server = MockServer::start().await;
-        mount_token(&server).await;
-        Mock::given(method("POST"))
-            .and(path(FOLDER_PATH))
-            .respond_with(operation_blocked_response())
-            .up_to_n_times(1)
-            .mount(&server)
-            .await;
-        Mock::given(method("POST"))
-            .and(path(FOLDER_PATH))
-            .respond_with(restored_response())
-            .mount(&server)
-            .await;
-        let client = create_client(&server, short_retry(1)?).await?;
+    async fn test_restore_folder_retries_request_not_processed(
+        #[case] first_response: ResponseTemplate,
+    ) -> anyhow::Result<()> {
+        let requests = assert_retried_after(
+            "POST",
+            FOLDER_PATH,
+            first_response,
+            restored_response(),
+            async |client: &BoxClient| {
+                client
+                    .restore_folder(&FolderId::new("123"), &RestoreItemOptions::default())
+                    .await
+            },
+        )
+        .await?;
 
-        client
-            .restore_folder(&FolderId::new("123"), &RestoreItemOptions::default())
-            .await?;
-
-        assert_eq!(count_requests(&server, "POST", FOLDER_PATH).await, 2);
+        for request in requests {
+            assert_eq!(request.body_json::<serde_json::Value>()?, json!({}));
+        }
 
         Ok(())
     }
@@ -971,58 +958,27 @@ mod test_restore_folder {
     /// 名前の重複で409を受け取った場合は、再試行せずにエラーを返すことを確認
     #[tokio::test]
     async fn test_restore_folder_name_conflict_is_not_retried() -> anyhow::Result<()> {
-        let server = MockServer::start().await;
-        mount_token(&server).await;
-        Mock::given(method("POST"))
-            .and(path(FOLDER_PATH))
-            .respond_with(ResponseTemplate::new(409).set_body_json(json!({
-                "type": "error",
-                "status": 409,
-                "code": "item_name_in_use",
-                "message": "Item with the same name already exists",
-            })))
-            .mount(&server)
-            .await;
-        let client = create_client(&server, short_retry(2)?).await?;
+        let response = ResponseTemplate::new(409).set_body_json(json!({
+            "type": "error",
+            "status": 409,
+            "code": "item_name_in_use",
+            "message": "Item with the same name already exists",
+        }));
 
-        let result = client
-            .restore_folder(&FolderId::new("123"), &RestoreItemOptions::default())
-            .await;
+        let error = assert_not_retried_with_response(
+            "POST",
+            FOLDER_PATH,
+            response,
+            async |client: &BoxClient| {
+                client
+                    .restore_folder(&FolderId::new("123"), &RestoreItemOptions::default())
+                    .await
+            },
+        )
+        .await?;
 
-        assert!(
-            matches!(&result, Err(BoxClientError::Api(e))
-                if e.status == 409 && e.code.as_deref() == Some("item_name_in_use")),
-            "result: {result:?}"
-        );
-        assert_eq!(count_requests(&server, "POST", FOLDER_PATH).await, 1);
-
-        Ok(())
-    }
-
-    /// 429の場合は、冪等でないリクエストとして送信しても再試行することを確認
-    #[tokio::test]
-    async fn test_restore_folder_retries_too_many_requests() -> anyhow::Result<()> {
-        let server = MockServer::start().await;
-        mount_token(&server).await;
-        Mock::given(method("POST"))
-            .and(path(FOLDER_PATH))
-            .respond_with(ResponseTemplate::new(429))
-            .up_to_n_times(1)
-            .mount(&server)
-            .await;
-        Mock::given(method("POST"))
-            .and(path(FOLDER_PATH))
-            .and(body_json(json!({})))
-            .respond_with(restored_response())
-            .mount(&server)
-            .await;
-        let client = create_client(&server, short_retry(1)?).await?;
-
-        client
-            .restore_folder(&FolderId::new("123"), &RestoreItemOptions::default())
-            .await?;
-
-        assert_eq!(count_requests(&server, "POST", FOLDER_PATH).await, 2);
+        assert_eq!(error.status, 409);
+        assert_eq!(error.code.as_deref(), Some("item_name_in_use"));
 
         Ok(())
     }
@@ -1041,7 +997,8 @@ mod test_restore_file {
     use crate::{
         ItemStatus,
         test_support::{
-            count_requests, create_client, mount_token, operation_blocked_response, short_retry,
+            assert_not_retried, assert_retried_after, create_client, mount_token,
+            operation_blocked_response, short_retry,
         },
     };
 
@@ -1107,26 +1064,12 @@ mod test_restore_file {
     #[case::service_unavailable(503)]
     #[tokio::test]
     async fn test_restore_file_error_is_not_retried(#[case] status: u16) -> anyhow::Result<()> {
-        let server = MockServer::start().await;
-        mount_token(&server).await;
-        Mock::given(method("POST"))
-            .and(path(FILE_PATH))
-            .respond_with(ResponseTemplate::new(status))
-            .mount(&server)
-            .await;
-        let client = create_client(&server, short_retry(2)?).await?;
-
-        let result = client
-            .restore_file(&FileId::new("123"), &RestoreItemOptions::default())
-            .await;
-
-        assert!(
-            matches!(&result, Err(BoxClientError::Api(e)) if e.status == status),
-            "result: {result:?}"
-        );
-        assert_eq!(count_requests(&server, "POST", FILE_PATH).await, 1);
-
-        Ok(())
+        assert_not_retried("POST", FILE_PATH, status, async |client: &BoxClient| {
+            client
+                .restore_file(&FileId::new("123"), &RestoreItemOptions::default())
+                .await
+        })
+        .await
     }
 
     /// 429または他の操作によるロックで409を受け取った場合は、冪等でないリクエストとして送信しても再試行することを確認
@@ -1137,27 +1080,22 @@ mod test_restore_file {
     async fn test_restore_file_retries_request_not_processed(
         #[case] first_response: ResponseTemplate,
     ) -> anyhow::Result<()> {
-        let server = MockServer::start().await;
-        mount_token(&server).await;
-        Mock::given(method("POST"))
-            .and(path(FILE_PATH))
-            .respond_with(first_response)
-            .up_to_n_times(1)
-            .mount(&server)
-            .await;
-        Mock::given(method("POST"))
-            .and(path(FILE_PATH))
-            .and(body_json(json!({})))
-            .respond_with(restored_response())
-            .mount(&server)
-            .await;
-        let client = create_client(&server, short_retry(1)?).await?;
+        let requests = assert_retried_after(
+            "POST",
+            FILE_PATH,
+            first_response,
+            restored_response(),
+            async |client: &BoxClient| {
+                client
+                    .restore_file(&FileId::new("123"), &RestoreItemOptions::default())
+                    .await
+            },
+        )
+        .await?;
 
-        client
-            .restore_file(&FileId::new("123"), &RestoreItemOptions::default())
-            .await?;
-
-        assert_eq!(count_requests(&server, "POST", FILE_PATH).await, 2);
+        for request in requests {
+            assert_eq!(request.body_json::<serde_json::Value>()?, json!({}));
+        }
 
         Ok(())
     }
@@ -1176,7 +1114,8 @@ mod test_restore_web_link {
     use crate::{
         ItemStatus,
         test_support::{
-            count_requests, create_client, mount_token, operation_blocked_response, short_retry,
+            assert_not_retried, assert_retried_after, create_client, mount_token,
+            operation_blocked_response, short_retry,
         },
     };
 
@@ -1246,26 +1185,12 @@ mod test_restore_web_link {
     #[case::service_unavailable(503)]
     #[tokio::test]
     async fn test_restore_web_link_error_is_not_retried(#[case] status: u16) -> anyhow::Result<()> {
-        let server = MockServer::start().await;
-        mount_token(&server).await;
-        Mock::given(method("POST"))
-            .and(path(WEB_LINK_PATH))
-            .respond_with(ResponseTemplate::new(status))
-            .mount(&server)
-            .await;
-        let client = create_client(&server, short_retry(2)?).await?;
-
-        let result = client
-            .restore_web_link(&WebLinkId::new("123"), &RestoreItemOptions::default())
-            .await;
-
-        assert!(
-            matches!(&result, Err(BoxClientError::Api(e)) if e.status == status),
-            "result: {result:?}"
-        );
-        assert_eq!(count_requests(&server, "POST", WEB_LINK_PATH).await, 1);
-
-        Ok(())
+        assert_not_retried("POST", WEB_LINK_PATH, status, async |client: &BoxClient| {
+            client
+                .restore_web_link(&WebLinkId::new("123"), &RestoreItemOptions::default())
+                .await
+        })
+        .await
     }
 
     /// 429または他の操作によるロックで409を受け取った場合は、冪等でないリクエストとして送信しても再試行することを確認
@@ -1276,27 +1201,22 @@ mod test_restore_web_link {
     async fn test_restore_web_link_retries_request_not_processed(
         #[case] first_response: ResponseTemplate,
     ) -> anyhow::Result<()> {
-        let server = MockServer::start().await;
-        mount_token(&server).await;
-        Mock::given(method("POST"))
-            .and(path(WEB_LINK_PATH))
-            .respond_with(first_response)
-            .up_to_n_times(1)
-            .mount(&server)
-            .await;
-        Mock::given(method("POST"))
-            .and(path(WEB_LINK_PATH))
-            .and(body_json(json!({})))
-            .respond_with(restored_response())
-            .mount(&server)
-            .await;
-        let client = create_client(&server, short_retry(1)?).await?;
+        let requests = assert_retried_after(
+            "POST",
+            WEB_LINK_PATH,
+            first_response,
+            restored_response(),
+            async |client: &BoxClient| {
+                client
+                    .restore_web_link(&WebLinkId::new("123"), &RestoreItemOptions::default())
+                    .await
+            },
+        )
+        .await?;
 
-        client
-            .restore_web_link(&WebLinkId::new("123"), &RestoreItemOptions::default())
-            .await?;
-
-        assert_eq!(count_requests(&server, "POST", WEB_LINK_PATH).await, 2);
+        for request in requests {
+            assert_eq!(request.body_json::<serde_json::Value>()?, json!({}));
+        }
 
         Ok(())
     }
