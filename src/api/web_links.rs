@@ -232,7 +232,7 @@ impl BoxClient {
     /// # Errors
     ///
     /// Webリンクが存在しない場合、またはWebリンクにアクセスする権限がない場合は、
-    /// [`BoxClientError::Api`](crate::BoxClientError::Api)を返す。
+    /// [`BoxClientError::Api`]を返す。
     /// 再試行できないエラーが発生した場合、または再試行回数の上限に達した場合はエラーを返す。
     pub async fn web_link_information(&self, web_link_id: &WebLinkId) -> BoxClientResult<WebLink> {
         self.send_json(ApiRequest::get(["web_links", web_link_id.as_ref()]))
@@ -457,7 +457,7 @@ impl BoxClient {
     ///
     /// # Errors
     ///
-    /// BOXがエラーレスポンスを返した場合は、[`BoxClientError::Api`](crate::BoxClientError::Api)を返す。
+    /// BOXがエラーレスポンスを返した場合は、[`BoxClientError::Api`]を返す。
     /// 公式ドキュメントは、このAPIが返すエラーのステータスを個別に記載していない。
     ///
     /// 再試行できないエラーが発生した場合、または再試行回数の上限に達した場合はエラーを返す。

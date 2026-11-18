@@ -163,7 +163,7 @@ impl BoxClient {
     /// # Errors
     ///
     /// ファイルまたはバージョンが存在しない場合、またはファイルにアクセスする権限がない場合は、
-    /// [`BoxClientError::Api`](crate::BoxClientError::Api)を返す。
+    /// [`BoxClientError::Api`]を返す。
     /// 再試行できないエラーが発生した場合、または再試行回数の上限に達した場合はエラーを返す。
     pub async fn file_version(
         &self,
