@@ -444,6 +444,12 @@ impl TokenManager {
                 client_id: &self.assertion_signer.client_id,
                 client_secret: self.client_secret.expose_secret(),
             };
+            // フォームにはクライアントシークレットとJWTアサーションが含まれるため、URLだけを記録する。
+            tracing::debug!(
+                method = "POST",
+                url = %self.token_url,
+                "sending request to BOX token endpoint"
+            );
             let response = self
                 .http_client
                 .post(&self.token_url)

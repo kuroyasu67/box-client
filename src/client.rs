@@ -177,6 +177,14 @@ impl BoxClient {
                     .header(CONTENT_TYPE, HeaderValue::from_static("application/json"))
                     .body(body.clone());
             }
+            // スパンもメソッドとパスを持つが、スパンを出力しない設定のサブスクライバーでも呼び出したAPIを識別できるように、
+            // イベントにもメソッドとパスを記録する。クエリ文字列にはページ送りのマーカーなどが含まれ、長くなるため記録しない。
+            // 再試行および401の後の再送でも、送信のたびに出力する。
+            tracing::debug!(
+                method = %request.method,
+                path = url.path(),
+                "sending request to BOX API"
+            );
             let response = builder
                 .send()
                 .await
