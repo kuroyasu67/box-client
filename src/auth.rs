@@ -230,7 +230,7 @@ pub(crate) struct TokenManager {
     /// アクセストークンを取得するタスクを1つに限るためのロック
     ///
     /// ロックは、バックグラウンドでの取得に最後に失敗した時刻を保持する。
-    /// バックグラウンドで取得に成功した場合は`None`に戻す。
+    /// バックグラウンドまたは呼び出し元のタスクで取得に成功した場合は`None`に戻す。
     /// バックグラウンドのタスクにロックを渡せるように、`Arc`で保持する。
     refresh_lock: Arc<Mutex<Option<Instant>>>,
 
@@ -320,7 +320,7 @@ impl TokenManager {
 
         // キャッシュしたアクセストークンが期限切れの場合、またはキャッシュがない場合は、ロックを得た1つのタスクだけが取得し、
         // 他のタスクはロックを待つことで、そのタスクの取得を待つ。
-        let _guard = self.refresh_lock.lock().await;
+        let mut guard = self.refresh_lock.lock().await;
 
         // ロックを待つ間に別のタスクまたはバックグラウンドのタスクが取得し直している場合、このタスクはそのアクセストークンを返す。
         if let Some(token) = self.unexpired_cached_token().await {
@@ -329,6 +329,8 @@ impl TokenManager {
 
         let token = Arc::new(self.fetch().await?);
         *self.cache.write().await = Some(Arc::clone(&token));
+        // 取得に成功したため、バックグラウンドでの取得に最後に失敗した時刻を破棄する。
+        *guard = None;
 
         Ok(token)
     }
@@ -1067,6 +1069,27 @@ mod test_token_manager {
 
         assert_eq!(token.secret(), "new-token");
         assert_eq!(request_count(&server).await, 2);
+
+        Ok(())
+    }
+
+    /// 呼び出し元のタスクでアクセストークンを取得できた場合は、バックグラウンドでの取得に失敗した時刻を破棄することを確認
+    #[tokio::test]
+    async fn test_access_token_clears_background_failure_after_fetch() -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_always(&server, method("POST"), token_response()).await;
+        let manager = create_manager(
+            &server,
+            Duration::from_secs(2),
+            short_retry(0)?,
+            REFRESH_BEFORE_EXPIRY,
+        )?;
+        // バックグラウンドでの取得に失敗した状態を再現する。
+        *manager.refresh_lock.lock().await = Some(Instant::now());
+
+        manager.access_token().await?;
+
+        assert_eq!(*manager.refresh_lock.lock().await, None);
 
         Ok(())
     }

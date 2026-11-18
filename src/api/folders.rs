@@ -1,7 +1,5 @@
 //! フォルダに関するAPI
 
-use std::collections::HashSet;
-
 use garde::Validate;
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
@@ -9,16 +7,16 @@ use time::OffsetDateTime;
 use crate::{
     BoxClient, BoxClientError, BoxClientResult, BoxItem, FolderId, FolderItem, Idempotency,
     ItemStatus, MoveDestination, UserMini,
-    api::types::ParentFolder,
+    api::pagination::{
+        ItemSort, ItemsPage, MAX_ITEMS_LIMIT, SortDirection, collect_all_pages, marker_page_request,
+    },
     api::types::{
-        MAX_NAME_CHARS, MoveBody, PathCollection, RenameBody, SetDescriptionBody,
-        UpdateItemOptions, update_item_request, validate_item_name, validate_optional_item_name,
-        validated,
+        MAX_NAME_CHARS, MoveBody, ParentFolder, PathCollection, RenameBody, SetDescriptionBody,
+        UpdateItemOptions, ensure_not_root, update_item_request, validate_item_name,
+        validate_optional_item_name, validated,
     },
     request::ApiRequest,
 };
-/// 1回のリクエストで取得できる項目数の上限
-pub const MAX_ITEMS_LIMIT: u32 = 1000;
 
 /// フォルダ情報
 ///
@@ -90,71 +88,6 @@ pub struct Folder {
     pub item_status: Option<ItemStatus>,
 }
 
-/// フォルダ内の項目の1ページ
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[non_exhaustive]
-pub struct ItemsPage {
-    /// このページの項目
-    pub entries: Vec<BoxItem>,
-
-    /// このページの取得に使用した項目数の上限
-    pub limit: u32,
-
-    /// 次のページを取得するためのマーカー
-    ///
-    /// 後続の項目がない場合は`None`になる。
-    pub next_marker: Option<String>,
-}
-
-/// 項目の並び替えに使用する属性
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum ItemSort {
-    /// ID
-    Id,
-
-    /// 名前
-    Name,
-
-    /// 作成日時
-    Date,
-
-    /// サイズ
-    Size,
-}
-
-impl ItemSort {
-    /// クエリパラメーターに指定する文字列を返す。
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Id => "id",
-            Self::Name => "name",
-            Self::Date => "date",
-            Self::Size => "size",
-        }
-    }
-}
-
-/// 並び替えの方向
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SortDirection {
-    /// 昇順
-    Asc,
-
-    /// 降順
-    Desc,
-}
-
-impl SortDirection {
-    /// クエリパラメーターに指定する文字列を返す。
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::Asc => "ASC",
-            Self::Desc => "DESC",
-        }
-    }
-}
-
 /// フォルダ内の項目をリストするときのオプション
 ///
 /// 将来フィールドを追加しても利用者のコードが壊れないように、`#[non_exhaustive]`を付けている。
@@ -179,11 +112,14 @@ pub struct ListItemsOptions {
 
     /// 並び替えに使用する属性
     ///
-    /// BOXはルートフォルダでマーカー方式のページ送りと並び替えの併用を受け付けない。
-    /// BOXクライアントは常にマーカー方式でページを送るため、ルートフォルダでは指定できない。
+    /// BOXは、ルートフォルダでマーカー方式のページ送りと並び替えに使用する属性を併用すると、
+    /// エラーを返さずに属性の指定を無視する。BOXクライアントは常にマーカー方式でページを送るため、
+    /// 指定した並び順で項目を受け取ったと利用者が誤解しないように、ルートフォルダでは指定できないようにする。
     pub sort: Option<ItemSort>,
 
     /// 並び替えの方向
+    ///
+    /// 並び替えに使用する属性と異なり、BOXはルートフォルダでも並び替えの方向を反映するため、ルートフォルダでも指定できる。
     pub direction: Option<SortDirection>,
 }
 
@@ -212,84 +148,6 @@ impl ListItemsOptions {
         self.direction = Some(direction);
         self
     }
-}
-
-/// 1ページで取得する項目数の上限が、BOXが受け付ける範囲内であることを検証する。
-pub(crate) fn validate_limit(limit: u32) -> BoxClientResult<u32> {
-    if (1..=MAX_ITEMS_LIMIT).contains(&limit) {
-        Ok(limit)
-    } else {
-        Err(BoxClientError::InvalidArgument(
-            "limit must be between 1 and 1000",
-        ))
-    }
-}
-
-/// マーカー方式のページ送りで、1ページ分の項目を取得するリクエストを作成する。
-///
-/// フォルダ内の項目のリストとゴミ箱内の項目のリストで共有する。
-/// `limit`を指定した場合は`limit`クエリパラメーターで、`marker`を指定した場合は`marker`クエリパラメーターで送信する。
-///
-/// # Errors
-///
-/// `limit`が範囲外の場合は、[`BoxClientError::InvalidArgument`]を返す。
-pub(crate) fn marker_page_request<'a>(
-    path: impl IntoIterator<Item = &'a str>,
-    marker: Option<&'a str>,
-    limit: Option<u32>,
-) -> BoxClientResult<ApiRequest<'a>> {
-    let mut request = ApiRequest::get(path).query("usemarker", "true");
-    if let Some(limit) = limit {
-        request = request.query("limit", validate_limit(limit)?.to_string());
-    }
-    if let Some(marker) = marker {
-        request = request.query("marker", marker);
-    }
-    Ok(request)
-}
-
-/// マーカー方式のページ送りで、すべてのページの項目を取得する。
-///
-/// `fetch_page`には前のページの`next_marker`を渡す。最初のページでは`None`を渡す。
-/// 戻り値は、すべての項目と取得したページ数である。
-///
-/// # Errors
-///
-/// BOXが以前に返したマーカーを再び返した場合、この関数は無限ループを避けるため[`BoxClientError::UnexpectedResponse`]を返す。
-/// `fetch_page`がエラーを返した場合、この関数は取得済みの項目を破棄してそのエラーを返す。
-pub(crate) async fn collect_all_pages<F>(mut fetch_page: F) -> BoxClientResult<(Vec<BoxItem>, u32)>
-where
-    F: AsyncFnMut(Option<&str>) -> BoxClientResult<ItemsPage>,
-{
-    let mut items = Vec::new();
-    let mut marker: Option<String> = None;
-    // `m1 → m2 → m1`のように、BOXが以前のマーカーを再び返す循環も検出するため、使用したマーカーを記録する。
-    // 現在のマーカーは`marker`が保持するため、このセットには現在のマーカーより前に使用したマーカーだけを記録する。
-    let mut used_markers: HashSet<String> = HashSet::new();
-    let mut pages: u32 = 0;
-
-    loop {
-        let page = fetch_page(marker.as_deref()).await?;
-        pages += 1;
-        items.extend(page.entries);
-
-        // BOXは最終ページで`next_marker`をnullにするが、空文字列を返す場合もあるため、どちらも終端として扱う。
-        match page.next_marker {
-            Some(next) if !next.is_empty() => {
-                if marker.as_deref() == Some(next.as_str()) || used_markers.contains(&next) {
-                    return Err(BoxClientError::UnexpectedResponse(
-                        "next_marker was already returned",
-                    ));
-                }
-                if let Some(previous) = marker.replace(next) {
-                    used_markers.insert(previous);
-                }
-            }
-            _ => break,
-        }
-    }
-
-    Ok((items, pages))
 }
 
 /// フォルダ作成リクエストのボディ
@@ -469,17 +327,13 @@ impl BoxClient {
             ));
         }
 
-        let mut request = marker_page_request(
+        let request = marker_page_request(
             ["folders", folder_id.as_ref(), "items"],
             marker,
             options.limit,
+            options.sort,
+            options.direction,
         )?;
-        if let Some(sort) = options.sort {
-            request = request.query("sort", sort.as_str());
-        }
-        if let Some(direction) = options.direction {
-            request = request.query("direction", direction.as_str());
-        }
 
         self.send_json(request).await
     }
@@ -582,8 +436,10 @@ impl BoxClient {
     /// - 400: パラメーターが不足している、または不正である。
     /// - 403: フォルダをコピーする権限がない、または情報バリアがコピーを禁止している。
     /// - 404: コピー元のフォルダまたはコピー先の親フォルダが存在しない、またはアクセスする権限がない。
-    /// - 409: 同じ名前の項目がコピー先の親フォルダに存在する（`item_name_in_use`）、
-    ///   またはコピー先の親フォルダがロックされている。
+    /// - 409: 同じ名前の項目がコピー先の親フォルダに存在する（`item_name_in_use`）。
+    ///   または、移動、コピーなど、他の操作がコピー元のフォルダまたはコピー先の親フォルダをロックしている
+    ///   （`operation_blocked_temporary`）。後者の場合、クライアントは再試行設定に従って再試行し、
+    ///   再試行回数の上限に達してもロックが解除されない場合にこのエラーを返す。
     ///
     /// 再試行できないエラーが発生した場合、または再試行回数の上限に達した場合はエラーを返す。
     /// 5xxまたはタイムアウトでエラーを返した場合は、BOXがフォルダをコピーした可能性がある。
@@ -594,11 +450,7 @@ impl BoxClient {
         parent_id: &FolderId,
         options: &CopyFolderOptions<'_>,
     ) -> BoxClientResult<Folder> {
-        if folder_id.is_root() {
-            return Err(BoxClientError::InvalidArgument(
-                "the root folder cannot be copied",
-            ));
-        }
+        ensure_not_root(folder_id, "the root folder cannot be copied")?;
 
         let body = CopyFolderBody::new(parent_id, options.name)?;
         let request = ApiRequest::post(["folders", folder_id.as_ref(), "copy"]).json(&body)?;
@@ -655,11 +507,7 @@ impl BoxClient {
         name: &str,
         options: &UpdateItemOptions<'_>,
     ) -> BoxClientResult<Folder> {
-        if folder_id.is_root() {
-            return Err(BoxClientError::InvalidArgument(
-                "the root folder cannot be renamed",
-            ));
-        }
+        ensure_not_root(folder_id, "the root folder cannot be renamed")?;
 
         let body = RenameBody::new(name)?;
         let request = update_item_request("folders", folder_id.as_ref(), &body, options.etag)?;
@@ -717,11 +565,10 @@ impl BoxClient {
         description: &str,
         options: &UpdateItemOptions<'_>,
     ) -> BoxClientResult<Folder> {
-        if folder_id.is_root() {
-            return Err(BoxClientError::InvalidArgument(
-                "the description of the root folder cannot be set",
-            ));
-        }
+        ensure_not_root(
+            folder_id,
+            "the description of the root folder cannot be set",
+        )?;
 
         let body = SetDescriptionBody::new(description)?;
         let request = update_item_request("folders", folder_id.as_ref(), &body, options.etag)?;
@@ -780,11 +627,7 @@ impl BoxClient {
         destination: &MoveDestination,
         options: &UpdateItemOptions<'_>,
     ) -> BoxClientResult<Folder> {
-        if folder_id.is_root() {
-            return Err(BoxClientError::InvalidArgument(
-                "the root folder cannot be moved",
-            ));
-        }
+        ensure_not_root(folder_id, "the root folder cannot be moved")?;
 
         let body = MoveBody::new(destination)?;
         let request = update_item_request("folders", folder_id.as_ref(), &body, options.etag)?;
@@ -844,11 +687,7 @@ impl BoxClient {
         folder_id: &FolderId,
         options: &DeleteFolderOptions<'_>,
     ) -> BoxClientResult<()> {
-        if folder_id.is_root() {
-            return Err(BoxClientError::InvalidArgument(
-                "the root folder cannot be deleted",
-            ));
-        }
+        ensure_not_root(folder_id, "the root folder cannot be deleted")?;
 
         let mut request = ApiRequest::delete(["folders", folder_id.as_ref()])
             .idempotency(Idempotency::NonIdempotent);
@@ -1005,183 +844,6 @@ mod test_folder {
         }));
 
         assert!(result.is_err(), "result: {result:?}");
-    }
-}
-
-#[cfg(test)]
-mod test_items_page {
-    use serde_json::json;
-
-    use crate::{
-        FileItem, FolderItem, WebLinkItem,
-        api::types::{FileId, FolderId, WebLinkId},
-    };
-
-    use super::*;
-
-    /// type属性に従って項目をデシリアライズし、知らない種類の項目を受け入れることを確認
-    #[test]
-    fn test_deserialize() -> anyhow::Result<()> {
-        let page: ItemsPage = serde_json::from_value(json!({
-            "entries": [
-                {"type": "file", "id": "1", "name": "a.txt", "etag": "0"},
-                {"type": "folder", "id": "2", "name": "docs", "etag": null},
-                {"type": "web_link", "id": "3", "name": "link", "etag": "1"},
-                {"type": "hubs", "id": "4", "name": "hub"},
-            ],
-            "limit": 100,
-            "next_marker": "m1",
-        }))?;
-
-        assert_eq!(
-            page,
-            ItemsPage {
-                entries: vec![
-                    BoxItem::File(FileItem {
-                        id: FileId::new("1"),
-                        name: "a.txt".to_owned(),
-                        etag: Some("0".to_owned()),
-                    }),
-                    BoxItem::Folder(FolderItem {
-                        id: FolderId::new("2"),
-                        name: "docs".to_owned(),
-                        etag: None,
-                    }),
-                    BoxItem::WebLink(WebLinkItem {
-                        id: WebLinkId::new("3"),
-                        name: "link".to_owned(),
-                        etag: Some("1".to_owned()),
-                    }),
-                    BoxItem::Unknown,
-                ],
-                limit: 100,
-                next_marker: Some("m1".to_owned()),
-            }
-        );
-
-        Ok(())
-    }
-
-    /// `next_marker`がnullの場合と省略された場合に、後続がないと判定することを確認
-    #[test]
-    fn test_deserialize_without_next_marker() -> anyhow::Result<()> {
-        let null_marker: ItemsPage =
-            serde_json::from_value(json!({"entries": [], "limit": 100, "next_marker": null}))?;
-        let missing_marker: ItemsPage =
-            serde_json::from_value(json!({"entries": [], "limit": 100}))?;
-
-        assert_eq!(null_marker.next_marker, None);
-        assert_eq!(missing_marker.next_marker, None);
-
-        Ok(())
-    }
-}
-
-#[cfg(test)]
-mod test_validate_limit {
-    use rstest::rstest;
-
-    use super::*;
-
-    /// 1以上1000以下の項目数の上限だけを受け付けることを確認
-    #[rstest]
-    #[case::zero(0, false)]
-    #[case::min(1, true)]
-    #[case::max(1000, true)]
-    #[case::over_max(1001, false)]
-    fn test_validate_limit(#[case] limit: u32, #[case] valid: bool) {
-        let result = validate_limit(limit);
-
-        if valid {
-            assert!(matches!(result, Ok(l) if l == limit), "result: {result:?}");
-        } else {
-            assert!(
-                matches!(result, Err(BoxClientError::InvalidArgument(_))),
-                "result: {result:?}"
-            );
-        }
-    }
-}
-
-#[cfg(test)]
-mod test_collect_all_pages {
-    use rstest::rstest;
-
-    use super::*;
-
-    /// `next_markers`の順に`next_marker`を返すページを取得し、`fetch_page`に渡されたマーカーを記録する。
-    ///
-    /// 用意したページを使い切った後に呼び出された場合は、無限ループでテストが終わらなくなるのを防ぐため、エラーを返す。
-    async fn collect(
-        next_markers: &[Option<&str>],
-    ) -> (BoxClientResult<(Vec<BoxItem>, u32)>, Vec<Option<String>>) {
-        let mut received_markers = Vec::new();
-        let mut remaining = next_markers.iter();
-        let result = collect_all_pages(async |marker: Option<&str>| {
-            received_markers.push(marker.map(str::to_owned));
-            let Some(next_marker) = remaining.next() else {
-                return Err(BoxClientError::InvalidArgument("no more pages"));
-            };
-            Ok(ItemsPage {
-                entries: vec![BoxItem::Unknown],
-                limit: 1,
-                next_marker: next_marker.map(str::to_owned),
-            })
-        })
-        .await;
-
-        (result, received_markers)
-    }
-
-    /// 終端までマーカーが重複しない場合は、すべてのページの項目とページ数を返し、前のページのマーカーを渡すことを確認
-    #[rstest]
-    #[case::single_page(vec![None], vec![None])]
-    #[case::empty_marker_terminates(vec![Some("")], vec![None])]
-    #[case::three_pages(
-        vec![Some("m1"), Some("m2"), None],
-        vec![None, Some("m1"), Some("m2")]
-    )]
-    #[tokio::test]
-    async fn test_collect_all_pages(
-        #[case] next_markers: Vec<Option<&str>>,
-        #[case] expected_markers: Vec<Option<&str>>,
-    ) -> anyhow::Result<()> {
-        let (result, received_markers) = collect(&next_markers).await;
-
-        let (items, pages) = result?;
-        assert_eq!(items.len(), next_markers.len());
-        assert_eq!(pages as usize, next_markers.len());
-        assert_eq!(
-            received_markers,
-            expected_markers
-                .into_iter()
-                .map(|m| m.map(str::to_owned))
-                .collect::<Vec<_>>()
-        );
-
-        Ok(())
-    }
-
-    /// BOXが以前に返したマーカーを再び返した場合は、そのマーカーでページを取得せずにエラーを返すことを確認
-    #[rstest]
-    // 直前のマーカーと同じマーカーを返す
-    #[case::same_as_previous(vec![Some("m1"), Some("m1")], 2)]
-    // 2つ前のマーカーに戻る
-    #[case::two_page_cycle(vec![Some("m1"), Some("m2"), Some("m1")], 3)]
-    // 最初のマーカーに戻る
-    #[case::back_to_first(vec![Some("m1"), Some("m2"), Some("m3"), Some("m1")], 4)]
-    #[tokio::test]
-    async fn test_collect_all_pages_detects_repeated_marker(
-        #[case] next_markers: Vec<Option<&str>>,
-        #[case] expected_fetches: usize,
-    ) {
-        let (result, received_markers) = collect(&next_markers).await;
-
-        assert!(
-            matches!(result, Err(BoxClientError::UnexpectedResponse(_))),
-            "result: {result:?}"
-        );
-        assert_eq!(received_markers.len(), expected_fetches);
     }
 }
 

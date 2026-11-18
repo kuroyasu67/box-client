@@ -8,7 +8,7 @@ use time::OffsetDateTime;
 use crate::{
     BoxClient, BoxClientError, BoxClientResult, DeleteItemOptions, FileId, FileVersionId,
     Idempotency, UserMini,
-    api::folders::{MAX_ITEMS_LIMIT, validate_limit},
+    api::pagination::{MAX_ITEMS_LIMIT, validate_limit},
     request::ApiRequest,
 };
 
@@ -73,10 +73,20 @@ pub struct FileVersion {
     pub uploader_display_name: Option<String>,
 }
 
+/// ファイルのバージョンのリストで指定できるオフセットの最大値を表す整数リテラルに展開する。
+///
+/// `concat!`は定数を受け付けないため、[`MAX_FILE_VERSIONS_OFFSET`]とエラーのメッセージで、このマクロを共有する。
+/// これにより、最大値を変更したときに、メッセージの値も追随させる。
+macro_rules! max_file_versions_offset {
+    () => {
+        10_000
+    };
+}
+
 /// ファイルのバージョンのリストで指定できるオフセットの最大値
 ///
 /// BOXは、オフセットがこの値を超えるリクエストを400で拒否する。
-pub const MAX_FILE_VERSIONS_OFFSET: u64 = 10_000;
+pub const MAX_FILE_VERSIONS_OFFSET: u64 = max_file_versions_offset!();
 
 /// ファイルのバージョンのリストのオプション
 ///
@@ -209,9 +219,10 @@ impl BoxClient {
         options: &ListFileVersionsOptions,
     ) -> BoxClientResult<FileVersionsPage> {
         if MAX_FILE_VERSIONS_OFFSET < offset {
-            return Err(BoxClientError::InvalidArgument(
-                "offset must be less than or equal to 10000",
-            ));
+            return Err(BoxClientError::InvalidArgument(concat!(
+                "offset must be less than or equal to ",
+                max_file_versions_offset!()
+            )));
         }
 
         let mut request = ApiRequest::get(["files", file_id.as_ref(), "versions"])
@@ -405,6 +416,7 @@ impl BoxClient {
     /// - 404: ファイルまたはバージョンが存在しない、またはファイルにアクセスする権限がない。
     /// - 412: `options.etag`がファイルの現在の`ETag`と一致しない。
     ///
+    /// 再試行できないエラーが発生した場合、または再試行回数の上限に達した場合はエラーを返す。
     /// 5xxまたはタイムアウトでエラーを返した場合は、BOXがバージョンを削除した可能性があるため、
     /// [`BoxClient::file_version`]でバージョンの`trashed_at`を確認する。
     pub async fn delete_file_version(

@@ -10,9 +10,8 @@ use crate::BoxClientError;
 use crate::{
     BoxClient, BoxClientResult, FileId, FileVersion, FileVersionId, FolderId, FolderItem,
     Idempotency, ItemStatus, MoveDestination, PathCollection, UserMini,
-    api::types::ParentFolder,
     api::types::{
-        DeleteItemOptions, MAX_NAME_CHARS, MoveBody, RenameBody, SetDescriptionBody,
+        DeleteItemOptions, MAX_NAME_CHARS, MoveBody, ParentFolder, RenameBody, SetDescriptionBody,
         UpdateItemOptions, update_item_request, validate_optional_item_name, validated,
     },
     request::ApiRequest,
@@ -367,7 +366,10 @@ impl BoxClient {
     ///
     /// - 403: 移動先のフォルダにアクセスする権限がない（`access_denied_insufficient_permissions`）。
     /// - 404: ファイルが存在しない、またはファイルにアクセスする権限がない。
-    /// - 409: 同じ名前の項目が移動先のフォルダに存在する。
+    /// - 409: 同じ名前の項目が移動先のフォルダに存在する（`item_name_in_use`）。
+    ///   または、他の操作がファイルをロックしている（`operation_blocked_temporary`）。
+    ///   後者の場合、クライアントは再試行設定に従って再試行し、再試行回数の上限に達してもロックが解除されない場合に
+    ///   このエラーを返す。
     /// - 412: `options.etag`がファイルの現在の`ETag`と一致しない。
     ///
     /// 再試行できないエラーが発生した場合、または再試行回数の上限に達した場合はエラーを返す。
@@ -417,6 +419,7 @@ impl BoxClient {
     /// - 404: ファイルが存在しない、ファイルが削除済みである、またはファイルにアクセスする権限がない。
     /// - 412: `options.etag`がファイルの現在の`ETag`と一致しない。ファイルが`ETag`の取得後に変更されている。
     ///
+    /// 再試行できないエラーが発生した場合、または再試行回数の上限に達した場合はエラーを返す。
     /// 5xxまたはタイムアウトでエラーを返した場合は、BOXがファイルを削除した可能性があるため、
     /// [`BoxClient::file_information`]でファイルの状態を確認する。
     pub async fn delete_file(

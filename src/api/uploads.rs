@@ -21,7 +21,7 @@ use crate::{
     BoxClient, BoxClientError, BoxClientResult, File, FileId, FolderId,
     api::types::{ParentFolder, RenameBody},
     request::ApiRequest,
-    retry::{AttemptError, Idempotency, read_json, read_poll_response},
+    retry::{AttemptError, Idempotency, classify_body_error, read_json},
 };
 
 /// 内容のハッシュを送信するヘッダー
@@ -270,16 +270,10 @@ async fn read_upload_url(
     response: Response,
     idempotency: Idempotency,
 ) -> Result<UploadUrl, AttemptError> {
-    let body = response.bytes().await.map_err(|error| {
-        if idempotency == Idempotency::Idempotent {
-            AttemptError::Retryable {
-                error: error.into(),
-                retry_after: None,
-            }
-        } else {
-            AttemptError::Fatal(error.into())
-        }
-    })?;
+    let body = response
+        .bytes()
+        .await
+        .map_err(|error| classify_body_error(error, idempotency))?;
     if body.iter().all(u8::is_ascii_whitespace) {
         return Ok(UploadUrl::default());
     }
@@ -427,16 +421,18 @@ impl CommitResponse {
     }
 }
 
-/// コミットのエラーが、BOXがコミットを処理している可能性を残すかどうかを返す。
+/// コミットのエラーが、BOXがコミットを処理している、または処理を終えた可能性を残すかどうかを返す。
 ///
 /// 5xx、タイムアウト、通信エラー、およびBOXが処理を終えないまま再送の上限に達した場合は、
 /// BOXがコミットを処理している可能性がある。
+/// 成功レスポンスのボディを解釈できない場合は、BOXがコミットを終えている。
 fn commit_may_be_processing(error: &BoxClientError) -> bool {
     match error {
         BoxClientError::Api(api_error) => api_error.status.is_server_error(),
         BoxClientError::Http(_)
         | BoxClientError::RetryAfterTooLong { .. }
-        | BoxClientError::UnexpectedResponse(_) => true,
+        | BoxClientError::UnexpectedResponse(_)
+        | BoxClientError::DeserializeResponse(_) => true,
         _ => false,
     }
 }
@@ -857,6 +853,7 @@ impl BoxClient {
     /// コミットに失敗した場合は、BOXがコミットを拒否したことが明らかな場合だけ、アップロードセッションを中止する。
     /// 5xx、タイムアウトおよび通信エラーの場合は、BOXがコミットを処理している可能性があるため、中止しない。
     /// 中止すると、BOXが処理しているコミットを取り消すおそれがあるためである。
+    /// 成功レスポンスのボディを解釈できない場合も、BOXはコミットを終えているため、中止しない。
     async fn upload_file_in_chunks(
         &self,
         path: &Path,
@@ -1017,9 +1014,14 @@ impl BoxClient {
         parts: &[UploadedPart],
         etag: Option<&str>,
     ) -> BoxClientResult<File> {
-        let body = CommitUploadSessionBody { parts };
+        let request = ApiRequest::post(["files", "upload_sessions", &session.id, "commit"])
+            .upload_host()
+            .header(DIGEST, digest)?
+            .json(&CommitUploadSessionBody { parts })?
+            .if_match(etag)?;
         let response: CommitResponse = self
             .poll_until_ready(
+                request,
                 self.max_commit_polls(),
                 "upload session was not committed before reaching max commit polls",
                 |polls, delay| {
@@ -1030,18 +1032,7 @@ impl BoxClient {
                         "upload session is being processed; resending commit"
                     );
                 },
-                || async {
-                    let request =
-                        ApiRequest::post(["files", "upload_sessions", &session.id, "commit"])
-                            .upload_host()
-                            .header(DIGEST, digest)?
-                            .json(&body)?
-                            .if_match(etag)?;
-                    self.send(request, |response, idempotency| {
-                        read_poll_response(response, idempotency, read_json)
-                    })
-                    .await
-                },
+                read_json,
             )
             .await?;
         response.into_file()
@@ -1610,6 +1601,46 @@ mod test_upload_file {
             requests(&server, "DELETE", &session_path).await.len(),
             expected_aborts
         );
+
+        Ok(())
+    }
+
+    /// コミットの成功レスポンスのボディを解釈できない場合は、BOXがコミットを終えているため、
+    /// アップロードセッションを中止せずにデシリアライズエラーを返すことを確認
+    #[tokio::test]
+    async fn test_upload_file_in_chunks_does_not_abort_session_if_commit_response_is_invalid()
+    -> anyhow::Result<()> {
+        let (_dir, file_path) = create_file("big.bin", CHUNKED_CONTENT)?;
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        mount_session_and_parts(&server).await;
+        let session_path = upload_path(&format!("/files/upload_sessions/{SESSION_ID}"));
+        Mock::given(method("POST"))
+            .and(path(format!("{session_path}/commit")))
+            .respond_with(ResponseTemplate::new(201).set_body_string("not json"))
+            .mount(&server)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path(session_path.as_str()))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+        let client = create_client(&server, short_retry(0)?).await?;
+
+        let result = client
+            .upload_file_with_threshold(
+                &file_path,
+                &FolderId::root(),
+                &UploadFileOptions::default(),
+                THRESHOLD,
+            )
+            .await;
+
+        assert!(
+            matches!(&result, Err(BoxClientError::DeserializeResponse(_))),
+            "result: {result:?}"
+        );
+        assert!(requests(&server, "DELETE", &session_path).await.is_empty());
 
         Ok(())
     }

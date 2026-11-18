@@ -88,20 +88,44 @@ box_item_struct!(FolderId, "フォルダ");
 box_item_struct!(FileId, "ファイル");
 box_item_struct!(WebLinkId, "Webリンク");
 
+/// ルートフォルダのID
+///
+/// BOXでは、ルートフォルダ（「すべてのファイル」）のIDは常に`0`である。
+const ROOT_FOLDER_ID: &str = "0";
+
 impl FolderId {
     /// ルートフォルダのIDを返す。
     ///
     /// BOXでは、ルートフォルダ（「すべてのファイル」）のIDは常に`0`である。
     #[must_use]
     pub fn root() -> Self {
-        FolderId::new("0")
+        FolderId::new(ROOT_FOLDER_ID)
     }
 
     /// ルートフォルダのIDであるかを返す。
     #[must_use]
     pub fn is_root(&self) -> bool {
-        self.0 == "0"
+        self.0 == ROOT_FOLDER_ID
     }
+}
+
+/// ルートフォルダを対象にできないAPIで、フォルダIDがルートフォルダでないことを検証する。
+///
+/// BOXはルートフォルダのコピー、移動、削除などを受け付けないため、リクエストを送信する前に検出する。
+///
+/// # Arguments
+///
+/// - `folder_id`: 検証するフォルダID
+/// - `message`: ルートフォルダの場合に返すエラーのメッセージ
+///
+/// # Errors
+///
+/// `folder_id`がルートフォルダの場合は、[`BoxClientError::InvalidArgument`]を返す。
+pub(crate) fn ensure_not_root(folder_id: &FolderId, message: &'static str) -> BoxClientResult<()> {
+    if folder_id.is_root() {
+        return Err(BoxClientError::InvalidArgument(message));
+    }
+    Ok(())
 }
 
 /// フォルダ内の項目
@@ -412,7 +436,8 @@ struct MoveParent<'a> {
     /// 移動先の親フォルダのID
     ///
     /// ユーザーのルートフォルダへ移動する場合は、ルートフォルダのIDを指定する。
-    id: FolderId,
+    /// IDを複製しないように、IDを参照で保持する。
+    id: &'a str,
 
     /// 移動先のルートフォルダを所有するユーザーのID
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -428,7 +453,7 @@ impl<'a> MoveBody<'a> {
     pub(crate) fn new(destination: &'a MoveDestination) -> BoxClientResult<Self> {
         let parent = match destination {
             MoveDestination::Folder(folder_id) => MoveParent {
-                id: folder_id.clone(),
+                id: folder_id.as_ref(),
                 user_id: None,
             },
             MoveDestination::User(user_id) => {
@@ -438,7 +463,7 @@ impl<'a> MoveBody<'a> {
                     return Err(BoxClientError::InvalidArgument("user_id must not be empty"));
                 }
                 MoveParent {
-                    id: FolderId::root(),
+                    id: ROOT_FOLDER_ID,
                     user_id: Some(user_id),
                 }
             }

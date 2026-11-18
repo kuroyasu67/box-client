@@ -1,4 +1,8 @@
 //! Webリンクに関するAPI
+//!
+//! BOXのドキュメントは、Webリンクの更新（`PUT /web_links/{web_link_id}`）が`If-Match`ヘッダーを受け付けることを明記していない。
+//! しかし、Webリンクの`ETag`は`If-Match`ヘッダーで使用すると記載しているため、
+//! Webリンクを更新するメソッドは、ファイルおよびフォルダと同じく、`options.etag`を指定した場合に`If-Match`ヘッダーで送信する。
 
 use garde::Validate;
 use serde::{Deserialize, Serialize};
@@ -10,9 +14,8 @@ use crate::BoxClientError;
 use crate::{
     BoxClient, BoxClientResult, FolderId, FolderItem, Idempotency, ItemStatus,
     MAX_DESCRIPTION_CHARS, MoveDestination, PathCollection, UserMini, WebLinkId,
-    api::types::ParentFolder,
     api::types::{
-        MAX_NAME_CHARS, MoveBody, RenameBody, SetDescriptionBody, UpdateItemOptions,
+        MAX_NAME_CHARS, MoveBody, ParentFolder, RenameBody, SetDescriptionBody, UpdateItemOptions,
         update_item_request, validate_optional_item_name, validated,
     },
     request::ApiRequest,
@@ -194,23 +197,6 @@ impl<'a> UpdateWebLinkUrlBody<'a> {
     }
 }
 
-/// Webリンクの更新リクエスト（`PUT /web_links/{web_link_id}`）を作成する。
-///
-/// BOXのドキュメントは、このAPIが`If-Match`ヘッダーを受け付けることを明記していないが、
-/// Webリンクの`ETag`は`If-Match`ヘッダーで使用すると記載しているため、`options.etag`を指定した場合は送信する。
-///
-/// # Errors
-///
-/// ボディをJSONにシリアライズできない場合は、[`BoxClientError::SerializeBody`]を返す。
-/// `options.etag`に使用できない文字が含まれる場合は、[`BoxClientError::InvalidHeaderValue`]を返す。
-fn update_web_link_request<'a, B: Serialize>(
-    web_link_id: &'a WebLinkId,
-    body: &B,
-    options: &UpdateItemOptions<'_>,
-) -> BoxClientResult<ApiRequest<'a>> {
-    update_item_request("web_links", web_link_id.as_ref(), body, options.etag)
-}
-
 impl BoxClient {
     /// Webリンク情報を取得する。
     ///
@@ -298,7 +284,7 @@ impl BoxClient {
         options: &UpdateItemOptions<'_>,
     ) -> BoxClientResult<WebLink> {
         let body = RenameBody::new(name)?;
-        let request = update_web_link_request(web_link_id, &body, options)?;
+        let request = update_item_request("web_links", web_link_id.as_ref(), &body, options.etag)?;
 
         let web_link: WebLink = self.send_json(request).await?;
 
@@ -341,7 +327,7 @@ impl BoxClient {
         options: &UpdateItemOptions<'_>,
     ) -> BoxClientResult<WebLink> {
         let body = SetDescriptionBody::new(description)?;
-        let request = update_web_link_request(web_link_id, &body, options)?;
+        let request = update_item_request("web_links", web_link_id.as_ref(), &body, options.etag)?;
 
         let web_link = self.send_json(request).await?;
 
@@ -380,7 +366,7 @@ impl BoxClient {
         options: &UpdateItemOptions<'_>,
     ) -> BoxClientResult<WebLink> {
         let body = MoveBody::new(destination)?;
-        let request = update_web_link_request(web_link_id, &body, options)?;
+        let request = update_item_request("web_links", web_link_id.as_ref(), &body, options.etag)?;
 
         let web_link = self.send_json(request).await?;
 
@@ -421,7 +407,7 @@ impl BoxClient {
         options: &UpdateItemOptions<'_>,
     ) -> BoxClientResult<WebLink> {
         let body = UpdateWebLinkUrlBody::new(url)?;
-        let request = update_web_link_request(web_link_id, &body, options)?;
+        let request = update_item_request("web_links", web_link_id.as_ref(), &body, options.etag)?;
 
         let web_link = self.send_json(request).await?;
 

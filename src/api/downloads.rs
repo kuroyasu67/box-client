@@ -13,7 +13,7 @@ use tokio::io::AsyncWriteExt as _;
 use crate::{
     BoxClient, BoxClientError, BoxClientResult, FileId, FileVersionId,
     request::ApiRequest,
-    retry::{AttemptError, Idempotency, classify_body_error, read_poll_response},
+    retry::{AttemptError, Idempotency, classify_body_error},
 };
 
 /// ファイルのダウンロードのオプション
@@ -198,9 +198,14 @@ impl BoxClient {
     ) -> BoxClientResult<u64> {
         let path = path.as_ref();
         let temp_file = TempFile::new(path)?;
+        let mut request = ApiRequest::get(["files", file_id.as_ref(), "content"]).download_client();
+        if let Some(version) = options.version {
+            request = request.query("version", version.as_ref());
+        }
 
         let size = self
             .poll_until_ready(
+                request,
                 self.max_download_polls(),
                 "file was not ready to download before reaching max download polls",
                 |polls, delay| {
@@ -211,18 +216,8 @@ impl BoxClient {
                         "file is not ready to download; resending request"
                     );
                 },
-                || async {
-                    let mut request =
-                        ApiRequest::get(["files", file_id.as_ref(), "content"]).download_client();
-                    if let Some(version) = options.version {
-                        request = request.query("version", version.as_ref());
-                    }
-                    self.send(request, |response, idempotency| {
-                        read_poll_response(response, idempotency, |response, idempotency| {
-                            write_response(response, idempotency, &temp_file.path, path)
-                        })
-                    })
-                    .await
+                |response, idempotency| {
+                    write_response(response, idempotency, &temp_file.path, path)
                 },
             )
             .await?;

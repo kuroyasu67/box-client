@@ -7,24 +7,33 @@ use crate::{
     BoxClient, BoxClientError, BoxClientResult, BoxItem, FileId, Folder, FolderId, WebLink,
     WebLinkId,
     api::files::File,
-    api::folders::{ItemsPage, MAX_ITEMS_LIMIT, collect_all_pages, marker_page_request},
-    api::types::{MAX_NAME_CHARS, ParentFolder, validate_optional_item_name, validated},
+    api::pagination::{
+        ItemSort, ItemsPage, MAX_ITEMS_LIMIT, SortDirection, collect_all_pages, marker_page_request,
+    },
+    api::types::{
+        MAX_NAME_CHARS, ParentFolder, ensure_not_root, validate_optional_item_name, validated,
+    },
     request::ApiRequest,
 };
 
 /// ゴミ箱内の項目をリストするときのオプション
 ///
-/// BOXは、マーカー方式のページ送りで`sort`または`direction`クエリパラメーターを指定すると、
-/// 400（`invalid_parameter`）を返す。BOXクライアントは常にマーカー方式でページを送るため、
-/// 並び替えに使用する属性および並び替えの方向を指定できない。
+/// BOXのAPIリファレンスは、マーカー方式のページ送りで並び替えに使用する属性または並び替えの方向を指定すると、
+/// 400（`invalid_parameter`）を返すと記載している。しかし、2026年11月18日に確認したところ、
+/// BOXは400を返さずに、並び替えに使用する属性と並び替えの方向を反映した。
+/// したがって、BOXクライアントは、常にマーカー方式でページを送るが、並び替えに使用する属性と並び替えの方向を指定できるようにする。
+/// BOXがAPIリファレンスのとおりに拒否するように変更した場合は、APIを呼び出したときに[`BoxClientError::Api`]になる。
 ///
 /// 将来フィールドを追加しても利用者のコードが壊れないように、`#[non_exhaustive]`を付けている。
 /// そのため、クレートの外では構造体リテラルで作成できない。[`Default`]で作成し、`with_*`メソッドで値を設定する。
 ///
 /// ```
-/// use box_client::ListTrashedItemsOptions;
+/// use box_client::{ItemSort, ListTrashedItemsOptions, SortDirection};
 ///
-/// let options = ListTrashedItemsOptions::default().with_limit(500);
+/// let options = ListTrashedItemsOptions::default()
+///     .with_limit(500)
+///     .with_sort(ItemSort::Name)
+///     .with_direction(SortDirection::Asc);
 /// assert_eq!(options.limit, Some(500));
 /// ```
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -34,6 +43,24 @@ pub struct ListTrashedItemsOptions {
     ///
     /// 1以上[`MAX_ITEMS_LIMIT`]以下を指定する。`None`の場合はBOXの既定値を使用する。
     pub limit: Option<u32>,
+
+    /// 並び替えに使用する属性
+    ///
+    /// [`ItemSort::Name`]または[`ItemSort::Size`]を指定する。
+    ///
+    /// - BOXのAPIリファレンスによると、ゴミ箱内の項目は、名前、日時およびサイズで並び替えられる。
+    ///   したがって、[`ItemSort::Id`]は指定できない。
+    /// - 2026年11月18日に確認したところ、BOXは、マーカー方式のページ送りで日時による並び替えを指定すると400を返した。
+    ///   BOXクライアントは常にマーカー方式でページを送るため、[`ItemSort::Date`]も指定できない。
+    ///   なお、オフセット方式のページ送りでは、BOXはゴミ箱に移動した日時で項目を並べた。
+    ///
+    /// `None`の場合、BOXは、ゴミ箱に移動した日時が新しい順に項目を並べる。
+    pub sort: Option<ItemSort>,
+
+    /// 並び替えの方向
+    ///
+    /// `None`の場合は、BOXが方向を決める。並び替えに使用する属性を指定しない場合も、BOXは方向を反映する。
+    pub direction: Option<SortDirection>,
 }
 
 /// ゴミ箱内のフォルダ、ファイルまたはWebリンクを復元するときのオプション
@@ -76,6 +103,23 @@ impl ListTrashedItemsOptions {
     #[must_use]
     pub fn with_limit(mut self, limit: u32) -> Self {
         self.limit = Some(limit);
+        self
+    }
+
+    /// 並び替えに使用する属性を設定する。
+    ///
+    /// [`ItemSort::Name`]または[`ItemSort::Size`]を指定する。
+    /// [`ItemSort::Id`]または[`ItemSort::Date`]を指定した場合は、APIを呼び出したときにエラーになる。
+    #[must_use]
+    pub fn with_sort(mut self, sort: ItemSort) -> Self {
+        self.sort = Some(sort);
+        self
+    }
+
+    /// 並び替えの方向を設定する。
+    #[must_use]
+    pub fn with_direction(mut self, direction: SortDirection) -> Self {
+        self.direction = Some(direction);
         self
     }
 }
@@ -171,11 +215,7 @@ impl BoxClient {
         &self,
         folder_id: &FolderId,
     ) -> BoxClientResult<Folder> {
-        if folder_id.is_root() {
-            return Err(BoxClientError::InvalidArgument(
-                "the root folder cannot be in the trash",
-            ));
-        }
+        ensure_not_root(folder_id, "the root folder cannot be in the trash")?;
 
         self.send_json(ApiRequest::get(["folders", folder_id.as_ref(), "trash"]))
             .await
@@ -276,11 +316,7 @@ impl BoxClient {
         folder_id: &FolderId,
         options: &RestoreItemOptions<'_>,
     ) -> BoxClientResult<Folder> {
-        if folder_id.is_root() {
-            return Err(BoxClientError::InvalidArgument(
-                "the root folder cannot be in the trash",
-            ));
-        }
+        ensure_not_root(folder_id, "the root folder cannot be in the trash")?;
 
         let folder: Folder = self
             .restore_item("folders", folder_id.as_ref(), options)
@@ -413,18 +449,33 @@ impl BoxClient {
     /// # Arguments
     ///
     /// - `marker`: 前のページの[`ItemsPage::next_marker`]。最初のページを取得する場合は`None`
-    /// - `options`: 項目数の上限のオプション
+    /// - `options`: 項目数の上限、並び替えなどのオプション
     ///
     /// # Errors
     ///
-    /// `options.limit`が範囲外の場合は、リクエストを送信せずに[`BoxClientError::InvalidArgument`]を返す。
+    /// `options.limit`が範囲外の場合、または`options.sort`に[`ItemSort::Id`]もしくは[`ItemSort::Date`]を指定した場合は、
+    /// リクエストを送信せずに[`BoxClientError::InvalidArgument`]を返す。
     /// 再試行できないエラーが発生した場合、または再試行回数の上限に達した場合はエラーを返す。
     pub async fn list_trashed_items(
         &self,
         marker: Option<&str>,
         options: &ListTrashedItemsOptions,
     ) -> BoxClientResult<ItemsPage> {
-        let request = marker_page_request(["folders", "trash", "items"], marker, options.limit)?;
+        // BOXのAPIリファレンスは、ゴミ箱内の項目の並び替えに使用する属性として、IDを記載していない。
+        // また、BOXは、マーカー方式のページ送りで日時による並び替えを指定すると400を返す。
+        if matches!(options.sort, Some(ItemSort::Id | ItemSort::Date)) {
+            return Err(BoxClientError::InvalidArgument(
+                "sort by id or date is not supported for trashed items",
+            ));
+        }
+
+        let request = marker_page_request(
+            ["folders", "trash", "items"],
+            marker,
+            options.limit,
+            options.sort,
+            options.direction,
+        )?;
 
         self.send_json(request).await
     }
@@ -437,11 +488,12 @@ impl BoxClient {
     ///
     /// # Arguments
     ///
-    /// - `options`: 項目数の上限のオプション
+    /// - `options`: 項目数の上限、並び替えなどのオプション
     ///
     /// # Errors
     ///
-    /// `options.limit`が範囲外の場合は、リクエストを送信せずに[`BoxClientError::InvalidArgument`]を返す。
+    /// `options.limit`が範囲外の場合、または`options.sort`に[`ItemSort::Id`]もしくは[`ItemSort::Date`]を指定した場合は、
+    /// リクエストを送信せずに[`BoxClientError::InvalidArgument`]を返す。
     /// BOXが以前に返したマーカーを再び返した場合、このメソッドは無限ループを避けるため[`BoxClientError::UnexpectedResponse`]を返す。
     /// いずれかのページの取得に失敗した場合は、取得済みの項目を破棄してエラーを返す。
     pub async fn list_all_trashed_items(
@@ -450,6 +502,7 @@ impl BoxClient {
     ) -> BoxClientResult<Vec<BoxItem>> {
         let options = ListTrashedItemsOptions {
             limit: Some(options.limit.unwrap_or(MAX_ITEMS_LIMIT)),
+            ..*options
         };
         let (items, pages) =
             collect_all_pages(async |marker| self.list_trashed_items(marker, &options).await)
@@ -1230,13 +1283,21 @@ mod test_list_trashed_items {
     #[case::default(None, ListTrashedItemsOptions::default(), "usemarker=true")]
     #[case::min_limit(
         None,
-        ListTrashedItemsOptions { limit: Some(1) },
+        ListTrashedItemsOptions::default().with_limit(1),
         "usemarker=true&limit=1"
+    )]
+    #[case::direction_only(
+        None,
+        ListTrashedItemsOptions::default().with_direction(SortDirection::Asc),
+        "usemarker=true&direction=ASC"
     )]
     #[case::all(
         Some("m1"),
-        ListTrashedItemsOptions { limit: Some(1000) },
-        "usemarker=true&limit=1000&marker=m1"
+        ListTrashedItemsOptions::default()
+            .with_limit(1000)
+            .with_sort(ItemSort::Name)
+            .with_direction(SortDirection::Desc),
+        "usemarker=true&limit=1000&marker=m1&sort=name&direction=DESC"
     )]
     #[tokio::test]
     async fn test_list_trashed_items(
@@ -1278,7 +1339,34 @@ mod test_list_trashed_items {
         let server = MockServer::start().await;
         mount_token(&server).await;
         let client = create_client(&server, short_retry(0)?).await?;
-        let options = ListTrashedItemsOptions { limit: Some(limit) };
+        let options = ListTrashedItemsOptions::default().with_limit(limit);
+
+        let result = client.list_trashed_items(None, &options).await;
+
+        assert!(
+            matches!(result, Err(BoxClientError::InvalidArgument(_))),
+            "result: {result:?}"
+        );
+        assert_eq!(
+            request_queries(&server, TRASH_ITEMS_PATH).await,
+            Vec::<String>::new()
+        );
+
+        Ok(())
+    }
+
+    /// ゴミ箱内の項目をIDまたは日時で並び替えようとした場合は、リクエストを送信せずにエラーを返すことを確認
+    #[rstest]
+    #[case::id(ItemSort::Id)]
+    #[case::date(ItemSort::Date)]
+    #[tokio::test]
+    async fn test_list_trashed_items_rejects_unsupported_sort(
+        #[case] sort: ItemSort,
+    ) -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        let client = create_client(&server, short_retry(0)?).await?;
+        let options = ListTrashedItemsOptions::default().with_sort(sort);
 
         let result = client.list_trashed_items(None, &options).await;
 
@@ -1367,7 +1455,7 @@ mod test_list_all_trashed_items {
         Ok(())
     }
 
-    /// 項目数の上限を指定した場合は、すべてのページの取得に使用することを確認
+    /// 項目数の上限、並び替えに使用する属性および並び替えの方向を指定した場合は、すべてのページの取得に使用することを確認
     #[tokio::test]
     async fn test_list_all_trashed_items_with_options() -> anyhow::Result<()> {
         let server = MockServer::start().await;
@@ -1375,6 +1463,8 @@ mod test_list_all_trashed_items {
         Mock::given(method("GET"))
             .and(path(TRASH_ITEMS_PATH))
             .and(query_param("limit", "1"))
+            .and(query_param("sort", "size"))
+            .and(query_param("direction", "ASC"))
             .and(query_param_is_missing("marker"))
             .respond_with(page_response("first", &json!("m1")))
             .expect(1)
@@ -1383,13 +1473,18 @@ mod test_list_all_trashed_items {
         Mock::given(method("GET"))
             .and(path(TRASH_ITEMS_PATH))
             .and(query_param("limit", "1"))
+            .and(query_param("sort", "size"))
+            .and(query_param("direction", "ASC"))
             .and(query_param("marker", "m1"))
             .respond_with(page_response("second", &Value::Null))
             .expect(1)
             .mount(&server)
             .await;
         let client = create_client(&server, short_retry(0)?).await?;
-        let options = ListTrashedItemsOptions { limit: Some(1) };
+        let options = ListTrashedItemsOptions::default()
+            .with_limit(1)
+            .with_sort(ItemSort::Size)
+            .with_direction(SortDirection::Asc);
 
         let items = client.list_all_trashed_items(&options).await?;
 

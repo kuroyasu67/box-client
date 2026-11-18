@@ -5,6 +5,7 @@
 pub mod downloads;
 pub mod files;
 pub mod folders;
+pub mod pagination;
 pub mod trash;
 pub mod types;
 pub mod uploads;

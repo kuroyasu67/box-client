@@ -193,6 +193,26 @@ impl RetryPolicy {
         }
     }
 
+    /// `Retry-After`ヘッダーが示す待機時間が上限を超えたため、再試行を中止したことを示すエラーを返す。
+    ///
+    /// [`RetryPolicy::retry_delay`]がエラーを返した場合に、呼び出し元が使用する。
+    ///
+    /// # Arguments
+    ///
+    /// - `retry_after`: `Retry-After`ヘッダーが示す待機時間
+    /// - `source`: `Retry-After`ヘッダーを返したリクエストのエラー
+    pub(crate) fn retry_after_too_long(
+        &self,
+        retry_after: Duration,
+        source: BoxClientError,
+    ) -> BoxClientError {
+        BoxClientError::RetryAfterTooLong {
+            retry_after,
+            max_delay: self.max_delay,
+            source: Box::new(source),
+        }
+    }
+
     /// `0`以上`max_jitter`以下の乱数の時間を返す。
     ///
     /// # Arguments
@@ -345,11 +365,7 @@ where
                     error = &error as &(dyn std::error::Error + 'static),
                     "gave up retrying"
                 );
-                return Err(BoxClientError::RetryAfterTooLong {
-                    retry_after,
-                    max_delay: policy.max_delay(),
-                    source: Box::new(error),
-                });
+                return Err(policy.retry_after_too_long(retry_after, error));
             }
         };
         tracing::warn!(

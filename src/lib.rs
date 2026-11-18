@@ -31,10 +31,8 @@ mod test_support;
 
 pub use api::downloads::DownloadFileOptions;
 pub use api::files::{CopyFileOptions, File};
-pub use api::folders::{
-    CopyFolderOptions, DeleteFolderOptions, Folder, ItemSort, ItemsPage, ListItemsOptions,
-    MAX_ITEMS_LIMIT, SortDirection,
-};
+pub use api::folders::{CopyFolderOptions, DeleteFolderOptions, Folder, ListItemsOptions};
+pub use api::pagination::{ItemSort, ItemsPage, MAX_ITEMS_LIMIT, SortDirection};
 pub use api::trash::{ListTrashedItemsOptions, RestoreItemOptions};
 pub use api::types::{
     BoxItem, DeleteItemOptions, FileId, FileItem, FileVersionId, FolderId, FolderItem, ItemStatus,

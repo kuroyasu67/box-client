@@ -15,7 +15,7 @@ use crate::{
     request::{ApiHost, ApiRequest, HttpClientKind},
     retry::{
         AttemptError, Idempotency, PollOutcome, RetryPolicy, classify_error_response,
-        classify_transport_error, read_json, run_with_retry,
+        classify_transport_error, read_json, read_poll_response, run_with_retry,
     },
 };
 
@@ -227,39 +227,47 @@ impl BoxClient {
         self.max_download_polls
     }
 
-    /// BOXが処理を終えるまで、`attempt`でリクエストを送信し直す。
+    /// BOXが処理を終えるまで、リクエストを送信し直す。
     ///
-    /// `attempt`が[`PollOutcome::NotReady`]を返した場合は、`Retry-After`ヘッダーが示す時間だけ待機してから、
-    /// `attempt`を再び呼び出す。`Retry-After`ヘッダーがない場合は、再試行設定の指数バックオフで待機時間を決める。
-    /// 202の後の再送は、再試行設定の最大再試行回数に含めない。
+    /// BOXが202を返した場合は、`Retry-After`ヘッダーが示す時間だけ待機してから、同じリクエストを再送する。
+    /// `Retry-After`ヘッダーがない場合は、再試行設定の指数バックオフで待機時間を決める。
+    /// 202以外の成功レスポンスは、`read`で読み込む。
+    /// 送信のたびに再試行設定に従って再試行するが、202の後の再送は、再試行設定の最大再試行回数に含めない。
     ///
     /// # Arguments
     ///
+    /// - `request`: 送信するリクエスト。送信のたびに複製する。
     /// - `max_polls`: 再送する回数の上限
     /// - `not_ready`: BOXが処理を終えなかった場合に返すエラーのメッセージ
     /// - `on_wait`: 待機する前に、再送の回数と待機時間を受け取ってログを出力するクロージャー
-    /// - `attempt`: リクエストを1回送信するクロージャー
+    /// - `read`: 202以外の成功レスポンスを読み込むクロージャー
     ///
     /// # Errors
     ///
     /// 再送した回数が`max_polls`に達してもBOXが処理を終えない場合は、[`BoxClientError::UnexpectedResponse`]を返す。
     /// `Retry-After`ヘッダーが示す待機時間が、再試行設定の待機時間の上限を超える場合は、
     /// BOXが指定した時刻より早く再送しないように、再送せずに[`BoxClientError::RetryAfterTooLong`]を返す。
-    /// `attempt`がエラーを返した場合は、そのエラーを返す。
+    /// 再試行できないエラーが発生した場合、または再試行回数の上限に達した場合はエラーを返す。
     pub(crate) async fn poll_until_ready<T, F, Fut>(
         &self,
+        request: ApiRequest<'_>,
         max_polls: u32,
         not_ready: &'static str,
         on_wait: impl Fn(u32, Duration),
-        mut attempt: F,
+        read: F,
     ) -> BoxClientResult<T>
     where
-        F: FnMut() -> Fut,
-        Fut: Future<Output = BoxClientResult<PollOutcome<T>>>,
+        F: Fn(Response, Idempotency) -> Fut,
+        Fut: Future<Output = Result<T, AttemptError>>,
     {
         let mut polls = 0;
         loop {
-            let retry_after = match attempt().await? {
+            let outcome = self
+                .send(request.clone(), |response, idempotency| {
+                    read_poll_response(response, idempotency, &read)
+                })
+                .await?;
+            let retry_after = match outcome {
                 PollOutcome::Ready(value) => return Ok(value),
                 PollOutcome::NotReady { retry_after } => retry_after,
             };
@@ -273,10 +281,11 @@ impl BoxClient {
             let delay = self
                 .retry
                 .retry_delay(polls, retry_after, &mut rand::rng())
-                .map_err(|retry_after| BoxClientError::RetryAfterTooLong {
-                    retry_after,
-                    max_delay: self.retry.max_delay(),
-                    source: Box::new(BoxClientError::UnexpectedResponse(not_ready)),
+                .map_err(|retry_after| {
+                    self.retry.retry_after_too_long(
+                        retry_after,
+                        BoxClientError::UnexpectedResponse(not_ready),
+                    )
                 })?;
             on_wait(polls, delay);
             tokio::time::sleep(delay).await;
