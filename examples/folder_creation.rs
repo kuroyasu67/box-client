@@ -7,10 +7,6 @@ use box_client::FolderId;
 const USAGE: &str = "usage: RUST_LOG=info cargo run --quiet --example=folder_creation -- <folder-name> <parent-folder-id>";
 
 /// フォルダを作成する。
-///
-/// ```shell
-/// RUST_LOG=info cargo run --quiet --example=folder_creation -- 作成するフォルダ 438244590250
-/// ```
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // 作成するフォルダ名と親フォルダのIDを取得

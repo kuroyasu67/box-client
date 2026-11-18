@@ -212,6 +212,35 @@ pub struct DeleteFolderOptions<'a> {
     pub etag: Option<&'a str>,
 }
 
+/// フォルダの移動のオプション
+///
+/// # Examples
+///
+/// ```
+/// use box_client::MoveFolderOptions;
+///
+/// let options = MoveFolderOptions::default().with_etag("1");
+/// assert_eq!(options.etag, Some("1"));
+/// ```
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct MoveFolderOptions<'a> {
+    /// 最後に取得したフォルダの`ETag`
+    ///
+    /// 指定した場合は、`If-Match`ヘッダーで送信する。フォルダが`ETag`の取得後に変更されていると、
+    /// BOXはフォルダを移動せずに412を返す。
+    pub etag: Option<&'a str>,
+}
+
+impl<'a> MoveFolderOptions<'a> {
+    /// 最後に取得したフォルダの`ETag`を設定する。
+    #[must_use]
+    pub fn with_etag(mut self, etag: &'a str) -> Self {
+        self.etag = Some(etag);
+        self
+    }
+}
+
 impl ListItemsOptions {
     /// 1ページで取得する項目数の上限を設定する。
     ///
@@ -343,6 +372,16 @@ impl<'a> CreateFolderBody<'a> {
     }
 }
 
+/// フォルダ移動リクエストのボディ
+///
+/// BOXは、移動先の親フォルダと他の属性を同時に指定すると、403（`operation_limit_exceeded`）を返す。
+/// したがって、移動先の親フォルダだけを送信する。
+#[derive(Debug, Clone, Serialize)]
+struct MoveFolderBody {
+    /// 移動先の親フォルダ
+    parent: ParentFolder,
+}
+
 impl BoxClient {
     /// フォルダ情報を取得する。
     ///
@@ -374,8 +413,92 @@ impl BoxClient {
     /// 再試行できないエラーが発生した場合、または再試行回数の上限に達した場合はエラーを返す。
     pub async fn create_folder(&self, name: &str, parent_id: &FolderId) -> BoxClientResult<Folder> {
         let body = CreateFolderBody::new(name, parent_id)?;
-        self.send_json(ApiRequest::post(["folders"]).json(&body)?)
-            .await
+        let folder: Folder = self
+            .send_json(ApiRequest::post(["folders"]).json(&body)?)
+            .await?;
+
+        tracing::debug!(
+            folder_id = folder.id.as_ref(),
+            parent_id = parent_id.as_ref(),
+            "created folder"
+        );
+
+        Ok(folder)
+    }
+
+    /// フォルダを、フォルダ内のすべての項目とともに別のフォルダへ移動する。
+    ///
+    /// 項目の多いフォルダの移動には時間がかかる。BOXは移動に600秒以上かかると503を返すが、移動処理はその後も継続する。
+    /// ただし、[`BoxClientTimeout::request_timeout`](crate::BoxClientTimeout::request_timeout)の既定値は30秒であるため、
+    /// 通常はBOXが503を返す前にクライアントがタイムアウトする。タイムアウトした場合も、BOXは移動処理を継続している可能性がある。
+    ///
+    /// 503を受け取った後、またはタイムアウトの後に再送すると、継続中の移動処理がフォルダをロックしているため409を受け取る。
+    /// また、`options.etag`を指定した場合は、移動によって`ETag`が変わるため412を受け取る。
+    /// その結果、移動の結果を誤って判断するおそれがある。
+    /// したがって、HTTPメソッドがPUTであっても冪等でないリクエストとして送信し、
+    /// 429、エラーコードが`operation_blocked_temporary`の409および接続エラーの後にのみ再試行する。
+    ///
+    /// # Arguments
+    ///
+    /// - `folder_id`: 移動するフォルダのID
+    /// - `parent_id`: 移動先の親フォルダのID。ルートフォルダへ移動する場合は[`FolderId::root`]を指定する。
+    /// - `options`: `ETag`のオプション
+    ///
+    /// # Errors
+    ///
+    /// `folder_id`にルートフォルダを指定した場合は、リクエストを送信せずに[`BoxClientError::InvalidArgument`]を返す。
+    /// `options.etag`に使用できない文字が含まれる場合は、リクエストを送信せずに
+    /// [`BoxClientError::InvalidHeaderValue`]を返す。
+    /// BOXがエラーレスポンスを返した場合は、[`BoxClientError::Api`]を返す。主なステータスは次のとおり。
+    ///
+    /// - 400: パラメーターが不正である、またはフォルダのロックが移動を禁止している。
+    /// - 403: フォルダまたは移動先の親フォルダを操作する権限がない、またはフォルダのロックが移動を禁止している。
+    /// - 404: フォルダまたは移動先の親フォルダが存在しない、またはアクセスする権限がない。
+    /// - 409: 同じ名前の項目が移動先の親フォルダに存在する（`item_name_in_use`）。
+    ///   または、移動、コピーなど、他の操作がフォルダをロックしている（`operation_blocked_temporary`）。
+    ///   後者の場合、クライアントは再試行設定に従って再試行し、再試行回数の上限に達してもロックが解除されない場合に
+    ///   このエラーを返す。
+    /// - 412: `options.etag`がフォルダの現在の`ETag`と一致しない。
+    /// - 503: 移動に600秒以上かかっている。移動処理は継続している。
+    ///
+    /// 再試行できないエラーが発生した場合、または再試行回数の上限に達した場合はエラーを返す。
+    /// タイムアウトした場合は、`is_timeout()`が`true`を返す[`BoxClientError::Http`]を返す。
+    ///
+    /// 5xxまたはタイムアウトでエラーを返した場合は、BOXがフォルダを移動したか、移動処理を継続している可能性がある。
+    /// したがって、[`BoxClient::folder_information`]でフォルダの親フォルダを確認する。
+    pub async fn move_folder(
+        &self,
+        folder_id: &FolderId,
+        parent_id: &FolderId,
+        options: &MoveFolderOptions<'_>,
+    ) -> BoxClientResult<Folder> {
+        if folder_id.is_root() {
+            return Err(BoxClientError::InvalidArgument(
+                "the root folder cannot be moved",
+            ));
+        }
+
+        let body = MoveFolderBody {
+            parent: ParentFolder {
+                id: parent_id.clone(),
+            },
+        };
+        let mut request = ApiRequest::put(["folders", folder_id.as_ref()])
+            .idempotency(Idempotency::NonIdempotent)
+            .json(&body)?;
+        if let Some(etag) = options.etag {
+            request = request.header(IF_MATCH, etag)?;
+        }
+
+        let folder = self.send_json(request).await?;
+
+        tracing::debug!(
+            folder_id = folder_id.as_ref(),
+            parent_id = parent_id.as_ref(),
+            "moved folder"
+        );
+
+        Ok(folder)
     }
 
     /// フォルダを削除する。
@@ -1016,6 +1139,139 @@ mod test_create_folder {
             "result: {result:?}"
         );
         assert_eq!(create_request_count(&server).await, 1);
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod test_move_folder {
+    use rstest::rstest;
+    use serde_json::json;
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{body_json, method, path},
+    };
+
+    use super::*;
+    use crate::test_support::{create_client, mount_token, request_count, short_retry};
+
+    /// フォルダのAPIのパス
+    const FOLDER_PATH: &str = "/2.0/folders/123";
+
+    /// フォルダのAPIへのPUTリクエストのIf-Matchヘッダーを返す。
+    async fn move_requests(server: &MockServer) -> Vec<Option<String>> {
+        server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|r| r.method.as_str() == "PUT" && r.url.path() == FOLDER_PATH)
+            .map(|r| {
+                r.headers
+                    .get("if-match")
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_owned)
+            })
+            .collect()
+    }
+
+    /// 移動先の親フォルダだけをボディで送信し、オプションに応じてIf-Matchヘッダーを送信することを確認
+    #[rstest]
+    #[case::default(MoveFolderOptions::default(), None)]
+    #[case::etag(MoveFolderOptions { etag: Some("1") }, Some("1"))]
+    #[tokio::test]
+    async fn test_move_folder(
+        #[case] options: MoveFolderOptions<'static>,
+        #[case] expected_if_match: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        Mock::given(method("PUT"))
+            .and(path(FOLDER_PATH))
+            .and(body_json(json!({"parent": {"id": "456"}})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "type": "folder",
+                "id": "123",
+                "etag": "2",
+                "name": "Contracts",
+                "parent": {"type": "folder", "id": "456", "etag": "0", "name": "Archive"},
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = create_client(&server, short_retry(0)?).await?;
+
+        let folder = client
+            .move_folder(&FolderId::new("123"), &FolderId::new("456"), &options)
+            .await?;
+
+        assert_eq!(folder.parent.map(|p| p.id), Some(FolderId::new("456")));
+        assert_eq!(
+            move_requests(&server).await,
+            vec![expected_if_match.map(str::to_owned)]
+        );
+
+        Ok(())
+    }
+
+    /// ルートフォルダを移動しようとした場合は、リクエストを送信せずにエラーを返すことを確認
+    #[tokio::test]
+    async fn test_move_folder_rejects_root() -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        let client = create_client(&server, short_retry(0)?).await?;
+        let requests_before = request_count(&server).await;
+
+        let result = client
+            .move_folder(
+                &FolderId::root(),
+                &FolderId::new("456"),
+                &MoveFolderOptions::default(),
+            )
+            .await;
+
+        assert!(
+            matches!(result, Err(BoxClientError::InvalidArgument(_))),
+            "result: {result:?}"
+        );
+        assert_eq!(request_count(&server).await, requests_before);
+
+        Ok(())
+    }
+
+    /// BOXのエラーレスポンスを、再試行せずにそのまま返すことを確認
+    ///
+    /// 503は移動処理が継続していることを示すため、再試行の上限に余裕があっても再送しない。
+    #[rstest]
+    #[case::name_in_use(409)]
+    #[case::etag_mismatch(412)]
+    #[case::internal_server_error(500)]
+    #[case::still_moving(503)]
+    #[tokio::test]
+    async fn test_move_folder_error_is_not_retried(#[case] status: u16) -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        Mock::given(method("PUT"))
+            .and(path(FOLDER_PATH))
+            .respond_with(ResponseTemplate::new(status))
+            .mount(&server)
+            .await;
+        let client = create_client(&server, short_retry(2)?).await?;
+
+        let result = client
+            .move_folder(
+                &FolderId::new("123"),
+                &FolderId::new("456"),
+                &MoveFolderOptions::default(),
+            )
+            .await;
+
+        assert!(
+            matches!(&result, Err(BoxClientError::Api(e)) if e.status == status),
+            "result: {result:?}"
+        );
+        assert_eq!(move_requests(&server).await.len(), 1);
 
         Ok(())
     }
