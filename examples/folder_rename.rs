@@ -1,7 +1,7 @@
 //! フォルダ名を変更するサンプル
 mod common;
 
-use box_client::{FolderId, RenameFolderOptions};
+use box_client::{FolderId, UpdateFolderOptions};
 
 /// 使用方法
 const USAGE: &str =
@@ -21,7 +21,7 @@ async fn main() -> anyhow::Result<()> {
 
     // フォルダの最新のETagを取得し、取得後にフォルダが変更されていた場合は名前を変更しない。
     let folder = client.folder_information(&folder_id).await?;
-    let mut options = RenameFolderOptions::default();
+    let mut options = UpdateFolderOptions::default();
     if let Some(etag) = folder.etag.as_deref() {
         options = options.with_etag(etag);
     }
