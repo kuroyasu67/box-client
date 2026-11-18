@@ -1,9 +1,6 @@
 use std::{future::Future, sync::Arc, time::Duration};
 
-use reqwest::{
-    Response, StatusCode, Url,
-    header::{CONTENT_TYPE, HeaderValue},
-};
+use reqwest::{Response, StatusCode, Url, header::CONTENT_TYPE};
 use serde::de::DeserializeOwned;
 use tracing::Instrument as _;
 
@@ -11,7 +8,7 @@ use crate::{
     auth::{BOX_TOKEN_URL, TokenManager},
     config::BoxConfig,
     errors::{BoxClientError, BoxClientResult},
-    request::ApiRequest,
+    request::{ApiHost, ApiRequest},
     retry::{
         AttemptError, Idempotency, RetryPolicy, classify_error_response, classify_transport_error,
         read_json, run_with_retry,
@@ -20,6 +17,11 @@ use crate::{
 
 /// BOXのREST APIのベースURL
 const BOX_API_BASE_URL: &str = "https://api.box.com/2.0";
+
+/// BOXのアップロードのAPIのベースURL
+///
+/// BOXは、ファイルのアップロードを、REST APIとは別のホストで受け付ける。
+const BOX_UPLOAD_BASE_URL: &str = "https://upload.box.com/api/2.0";
 
 /// アクセストークンを有効期限のどれだけ前に取得し直すかの既定値
 ///
@@ -58,6 +60,9 @@ pub struct BoxClient {
     /// REST APIのベースURL
     api_base_url: Url,
 
+    /// アップロードのAPIのベースURL
+    upload_base_url: Url,
+
     /// 再試行設定
     retry: RetryPolicy,
 
@@ -72,6 +77,7 @@ impl std::fmt::Debug for BoxClient {
         f.debug_struct("BoxClient")
             .field("http_client", &self.http_client)
             .field("api_base_url", &self.api_base_url.as_str())
+            .field("upload_base_url", &self.upload_base_url.as_str())
             .field("retry", &self.retry)
             .finish_non_exhaustive()
     }
@@ -91,8 +97,16 @@ impl BoxClient {
             retry: RetryPolicy::default(),
             refresh_before_expiry: DEFAULT_REFRESH_BEFORE_EXPIRY,
             api_base_url: None,
+            upload_base_url: None,
             token_url: None,
         }
+    }
+
+    /// 再試行設定を返す。
+    ///
+    /// 1回のAPI呼び出しの外側で待機するAPIメソッドが、再試行設定に従って待機時間を決めるために使用する。
+    pub(crate) fn retry_policy(&self) -> &RetryPolicy {
+        &self.retry
     }
 
     /// リクエストを送信し、成功レスポンスのJSONボディをデシリアライズして返す。
@@ -123,12 +137,22 @@ impl BoxClient {
     }
 
     /// 再試行設定に従ってリクエストを送信し、成功レスポンスを`handle`で処理した結果を返す。
-    async fn send<T, F, Fut>(&self, request: ApiRequest<'_>, handle: F) -> BoxClientResult<T>
+    ///
+    /// 202 Acceptedのように、成功レスポンスのステータスによって処理を変えるAPIは、`handle`でステータスを調べる。
+    pub(crate) async fn send<T, F, Fut>(
+        &self,
+        request: ApiRequest<'_>,
+        handle: F,
+    ) -> BoxClientResult<T>
     where
         F: Fn(Response, Idempotency) -> Fut,
         Fut: Future<Output = Result<T, AttemptError>>,
     {
-        let url = request.url(&self.api_base_url)?;
+        let base_url = match request.host {
+            ApiHost::Api => &self.api_base_url,
+            ApiHost::Upload => &self.upload_base_url,
+        };
+        let url = request.url(base_url)?;
         // 成功のイベントはDEBUGで出力するが、スパンはINFOのままにする。
         // スパンをDEBUGにすると、INFOで記録する利用者のWARNおよびERRORのイベントから、メソッドとパスが失われるためである。
         let span = tracing::info_span!(
@@ -172,10 +196,10 @@ impl BoxClient {
             for (name, value) in &request.headers {
                 builder = builder.header(name, value);
             }
-            if let Some(body) = &request.json_body {
+            if let Some(body) = &request.body {
                 builder = builder
-                    .header(CONTENT_TYPE, HeaderValue::from_static("application/json"))
-                    .body(body.clone());
+                    .header(CONTENT_TYPE, body.content_type.clone())
+                    .body(body.bytes.clone());
             }
             // スパンもメソッドとパスを持つが、スパンを出力しない設定のサブスクライバーでも呼び出したAPIを識別できるように、
             // イベントにもメソッドとパスを記録する。クエリ文字列にはページ送りのマーカーなどが含まれ、長くなるため記録しない。
@@ -224,6 +248,9 @@ pub struct BoxClientBuilder {
     /// REST APIのベースURL。`None`の場合はBOXのURLを使用する。
     api_base_url: Option<Url>,
 
+    /// アップロードのAPIのベースURL。`None`の場合はBOXのURLを使用する。
+    upload_base_url: Option<Url>,
+
     /// トークンエンドポイントのURL。`None`の場合はBOXのURLを使用する。
     token_url: Option<String>,
 }
@@ -268,6 +295,13 @@ impl BoxClientBuilder {
         self
     }
 
+    /// テストでモックサーバーに接続できるように、アップロードのAPIのベースURLを指定する。
+    #[cfg(test)]
+    pub(crate) fn upload_base_url(mut self, upload_base_url: Url) -> Self {
+        self.upload_base_url = Some(upload_base_url);
+        self
+    }
+
     /// BOXクライアントを作成する。
     ///
     /// 設定の誤りに起動時に気づけるように、最初のアクセストークンをここで取得する。
@@ -291,6 +325,12 @@ impl BoxClientBuilder {
             None => Url::parse(BOX_API_BASE_URL)
                 .map_err(|e| BoxClientError::InvalidBaseUrl(format!("{BOX_API_BASE_URL}: {e}")))?,
         };
+        let upload_base_url = match self.upload_base_url {
+            Some(url) => url,
+            None => Url::parse(BOX_UPLOAD_BASE_URL).map_err(|e| {
+                BoxClientError::InvalidBaseUrl(format!("{BOX_UPLOAD_BASE_URL}: {e}"))
+            })?,
+        };
         let token_url = self.token_url.unwrap_or_else(|| BOX_TOKEN_URL.to_owned());
         let http_client = reqwest::Client::builder()
             .timeout(self.timeout.request_timeout)
@@ -308,6 +348,7 @@ impl BoxClientBuilder {
         Ok(BoxClient {
             http_client,
             api_base_url,
+            upload_base_url,
             retry: self.retry,
             token_manager,
         })

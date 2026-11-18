@@ -22,8 +22,10 @@ pub async fn setup() -> anyhow::Result<BoxClient> {
         .with_ansi(false)
         .init();
 
+    // ファイルのアップロードでは、1回のリクエストで最大50MiBを送信する。
+    // 上りの通信速度が毎秒2メガビット程度でも送信を終えられるように、リクエストのタイムアウトを5分とする。
     let timeout = BoxClientTimeout::default()
-        .with_request_timeout(Duration::from_secs(10))
+        .with_request_timeout(Duration::from_secs(300))
         .with_connect_timeout(Duration::from_secs(5));
     let retry = RetryPolicy::new(
         10,

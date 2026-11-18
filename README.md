@@ -107,6 +107,34 @@
 - ETagを指定した場合は、`If-Match`ヘッダーで送信する。
 - 冪等でないリクエストとして送信する。理由は「[冪等性の決定](#冪等性の決定)」を参照する。
 
+#### ファイルのアップロード
+
+- メソッド: `BoxClient::upload_file`
+- BOX API
+  - `POST /files/content`
+  - `POST /files/upload_sessions`
+  - `PUT /files/upload_sessions/{upload_session_id}`
+  - `POST /files/upload_sessions/{upload_session_id}/commit`
+  - `DELETE /files/upload_sessions/{upload_session_id}`
+- ローカルのファイルを、指定したフォルダにアップロードする。
+  BOXに保存するファイル名を`UploadFileOptions`で指定しない場合は、パスのファイル名を使用する。
+- BOXは、アップロードをREST APIとは別のホスト（`upload.box.com`）で受け付ける。
+- ファイルサイズが`CHUNKED_UPLOAD_THRESHOLD`（50MiB）以下の場合は、ファイル全体をメモリに読み込み、1回のリクエストでアップロードする。
+  - `attributes`パート（ファイル名と親フォルダ）、`file`パートの順に、multipartで送信する。
+    BOXは、`attributes`パートが`file`パートより後にあるリクエストを拒否する。
+  - ファイルの内容のSHA-1を`Content-MD5`ヘッダーで送信し、BOXに転送中の破損を検出させる。
+- ファイルサイズが`CHUNKED_UPLOAD_THRESHOLD`を超える場合は、分割アップロードのAPIを使用する。
+  1. アップロードセッションを作成する。BOXは、部分のサイズと部分の数を返す。
+  2. ファイルを先頭から部分のサイズごとに読み込み、順にアップロードする。メモリには1つの部分だけを読み込む。
+     部分のSHA-1を`Digest`ヘッダーで、部分の範囲を`Content-Range`ヘッダーで送信する。
+  3. ファイル全体のSHA-1を`Digest`ヘッダーで送信し、アップロードセッションをコミットする。
+     BOXが部分の処理を終えていないことを示す202を返した場合は、`Retry-After`ヘッダーが示す時間だけ待機してから、コミットを再送する。
+  4. 部分のアップロードまたはコミットに失敗した場合は、アップロードセッションを中止してからエラーを返す。
+- ファイル名をBOXが拒否する場合、またはパスからファイル名を取得できない場合は、リクエストを送信せずにエラーを返す。
+- 1回のリクエストでのアップロード、アップロードセッションの作成およびコミットは、HTTPメソッドがPOSTであるため、冪等でないリクエストとして送信する。
+  部分のアップロードは、同じ範囲を同じ内容で送り直すため、冪等なリクエストとして送信する。
+- 1回のリクエストで送信するデータが大きいため、`BoxClientTimeout::request_timeout`は、通信速度に応じて、50MiBまたは部分のサイズを送信できる長さにする。
+
 ### Webリンク
 
 #### Webリンク情報の取得

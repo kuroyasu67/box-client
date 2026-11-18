@@ -6,5 +6,6 @@ pub mod files;
 pub mod folders;
 pub mod trash;
 pub mod types;
+pub mod uploads;
 pub mod users;
 pub mod web_links;

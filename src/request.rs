@@ -40,13 +40,38 @@ pub struct ApiRequest<'a> {
     /// リクエストヘッダー
     pub(crate) headers: Vec<(HeaderName, HeaderValue)>,
 
-    /// JSONにシリアライズしたリクエストボディ
-    ///
-    /// 再試行のたびにシリアライズし直したり、ボディを複製したりしないように、参照カウントで共有する。
-    pub(crate) json_body: Option<Bytes>,
+    /// リクエストボディ
+    pub(crate) body: Option<RequestBody>,
 
     /// 冪等性
     pub(crate) idempotency: Idempotency,
+
+    /// リクエストを送信するホスト
+    pub(crate) host: ApiHost,
+}
+
+/// リクエストボディ
+///
+/// 再試行のたびにシリアライズし直したり、ボディを複製したりしないように、ボディを参照カウントで共有する。
+#[derive(Debug, Clone)]
+pub(crate) struct RequestBody {
+    /// `Content-Type`ヘッダーの値
+    pub(crate) content_type: HeaderValue,
+
+    /// ボディのバイト列
+    pub(crate) bytes: Bytes,
+}
+
+/// リクエストを送信するホスト
+///
+/// BOXは、ファイルのアップロードを、REST APIとは別のホスト（`upload.box.com`）で受け付ける。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ApiHost {
+    /// REST APIのホスト（`api.box.com`）
+    Api,
+
+    /// アップロードのホスト（`upload.box.com`）
+    Upload,
 }
 
 impl<'a> ApiRequest<'a> {
@@ -66,8 +91,9 @@ impl<'a> ApiRequest<'a> {
             path: path.into_iter().collect(),
             query: Vec::new(),
             headers: Vec::new(),
-            json_body: None,
+            body: None,
             idempotency,
+            host: ApiHost::Api,
         }
     }
 
@@ -122,10 +148,29 @@ impl<'a> ApiRequest<'a> {
     /// # Errors
     ///
     /// JSONにシリアライズできない場合は、[`BoxClientError::SerializeBody`]を返す。
-    pub fn json<B: Serialize + ?Sized>(mut self, body: &B) -> BoxClientResult<Self> {
+    pub fn json<B: Serialize + ?Sized>(self, body: &B) -> BoxClientResult<Self> {
         let body = serde_json::to_vec(body).map_err(BoxClientError::SerializeBody)?;
-        self.json_body = Some(Bytes::from(body));
-        Ok(self)
+        Ok(self.body(
+            HeaderValue::from_static("application/json"),
+            Bytes::from(body),
+        ))
+    }
+
+    /// `Content-Type`ヘッダーの値とバイト列で、リクエストボディを設定する。
+    #[must_use]
+    pub(crate) fn body(mut self, content_type: HeaderValue, bytes: Bytes) -> Self {
+        self.body = Some(RequestBody {
+            content_type,
+            bytes,
+        });
+        self
+    }
+
+    /// リクエストを、REST APIのホストではなく、アップロードのホストへ送信する。
+    #[must_use]
+    pub(crate) fn upload_host(mut self) -> Self {
+        self.host = ApiHost::Upload;
+        self
     }
 
     /// HTTPメソッドから決定した冪等性を上書きする。
@@ -320,8 +365,13 @@ mod test_api_request {
     fn test_json() -> anyhow::Result<()> {
         let request = ApiRequest::post(["folders"]).json(&serde_json::json!({"name": "new"}))?;
 
+        let body = request.body.as_ref();
         assert_eq!(
-            request.json_body.as_deref(),
+            body.map(|b| b.content_type.as_bytes()),
+            Some(b"application/json".as_slice())
+        );
+        assert_eq!(
+            body.map(|b| b.bytes.as_ref()),
             Some(br#"{"name":"new"}"#.as_slice())
         );
 

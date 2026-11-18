@@ -482,7 +482,7 @@ pub(crate) fn classify_api_error(
 ///
 /// BOXは`Retry-After`ヘッダーに秒数を設定するため、秒数として解釈できない場合は`None`を返し、
 /// 指数バックオフで待機させる。
-fn parse_retry_after(headers: &HeaderMap) -> Option<Duration> {
+pub(crate) fn parse_retry_after(headers: &HeaderMap) -> Option<Duration> {
     headers
         .get(RETRY_AFTER)?
         .to_str()

@@ -40,6 +40,7 @@ pub use api::types::{
     BoxItem, FileId, FileItem, FolderId, FolderItem, ItemStatus, ParentFolder, PathCollection,
     UserId, WebLinkId, WebLinkItem,
 };
+pub use api::uploads::{CHUNKED_UPLOAD_THRESHOLD, UploadFileOptions};
 pub use api::users::{User, UserMini};
 pub use api::web_links::WebLink;
 pub use client::{BoxClient, BoxClientBuilder, BoxClientTimeout, MAX_REFRESH_BEFORE_EXPIRY};

@@ -17,6 +17,11 @@ use crate::{
 /// トークンエンドポイントのパス
 pub(crate) const TOKEN_PATH: &str = "/oauth2/token";
 
+/// アップロードのAPIのベースURLのパス
+///
+/// REST APIのパス（`/2.0`）と区別できるように、BOXと同じく`/api/2.0`とする。
+pub(crate) const UPLOAD_BASE_PATH: &str = "/api/2.0";
+
 /// テスト用のBOX設定を返す。
 ///
 /// 秘密鍵はテスト専用に生成した鍵である。
@@ -87,6 +92,8 @@ pub(crate) async fn create_client_with_timeout(
 ) -> BoxClientResult<BoxClient> {
     let api_base_url = Url::parse(&format!("{}/2.0", server.uri()))
         .map_err(|e| BoxClientError::InvalidBaseUrl(e.to_string()))?;
+    let upload_base_url = Url::parse(&format!("{}{UPLOAD_BASE_PATH}", server.uri()))
+        .map_err(|e| BoxClientError::InvalidBaseUrl(e.to_string()))?;
     BoxClient::builder(test_config())
         .timeout(BoxClientTimeout {
             request_timeout: timeout,
@@ -94,6 +101,7 @@ pub(crate) async fn create_client_with_timeout(
         })
         .retry(retry)
         .endpoints(api_base_url, format!("{}{TOKEN_PATH}", server.uri()))
+        .upload_base_url(upload_base_url)
         .build()
         .await
 }

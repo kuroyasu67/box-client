@@ -46,6 +46,17 @@ pub enum BoxClientError {
         max: Duration,
     },
 
+    /// アップロードするファイルの読み込みエラー
+    #[error("Failed to read file: {path}")]
+    ReadFile {
+        /// アップロードするファイルのパス
+        path: PathBuf,
+
+        /// 原因となったエラー
+        #[source]
+        source: std::io::Error,
+    },
+
     /// APIメソッドの引数の不正エラー
     #[error("Invalid argument: {0}")]
     InvalidArgument(&'static str),
