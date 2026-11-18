@@ -84,9 +84,6 @@ struct AssertionSigner {
     /// エンタープライズID
     enterprise_id: String,
 
-    /// JWTアサーションの受信者
-    audience: String,
-
     /// JWTアサーションのヘッダー
     header: Header,
 
@@ -100,12 +97,11 @@ impl AssertionSigner {
     /// # Arguments
     ///
     /// - `config`: BOX設定
-    /// - `audience`: JWTアサーションの受信者。トークンエンドポイントのURLを指定する。
     ///
     /// # Errors
     ///
     /// 秘密鍵を復号できない場合、または署名鍵を作成できない場合はエラーを返す。
-    fn new(config: &BoxConfig, audience: &str) -> BoxClientResult<Self> {
+    fn new(config: &BoxConfig) -> BoxClientResult<Self> {
         let app_auth = &config.box_app_settings.app_auth;
         let private_key_info = PrivateKeyInfoOwned::from_pkcs8_encrypted_pem(
             app_auth.private_key.expose_secret(),
@@ -124,7 +120,6 @@ impl AssertionSigner {
         Ok(Self {
             client_id: config.box_app_settings.client_id.clone(),
             enterprise_id: config.enterprise_id.clone(),
-            audience: audience.to_owned(),
             header,
             encoding_key,
         })
@@ -152,7 +147,10 @@ impl AssertionSigner {
             iss: &self.client_id,
             sub: &self.enterprise_id,
             box_sub_type: BOX_SUB_TYPE_ENTERPRISE,
-            aud: &self.audience,
+            // BOXは、`aud`クレームがBOXのトークンエンドポイントのURLと一致することを求める。
+            // 利用者がトークンエンドポイントのURLをプロキシなどに変更しても、BOXが受け付けるように、
+            // トークンエンドポイントのURLの設定によらず、BOXのURLに固定する。
+            aud: BOX_TOKEN_URL,
             jti,
             exp: now + ASSERTION_LIFETIME_SECS,
         };
@@ -271,7 +269,7 @@ impl TokenManager {
         retry: RetryPolicy,
         refresh_before_expiry: Duration,
     ) -> BoxClientResult<Self> {
-        let assertion_signer = AssertionSigner::new(config, &token_url)?;
+        let assertion_signer = AssertionSigner::new(config)?;
 
         Ok(Self {
             http_client,
@@ -557,13 +555,10 @@ mod test_assertion_signer {
     /// テスト用の公開鍵
     const TEST_PUBLIC_KEY: &str = include_str!("../resources/tests/public_key.pem");
 
-    /// JWTアサーションの受信者
-    const AUDIENCE: &str = "https://example.com/oauth2/token";
-
     /// BOXが求めるヘッダーとクレームを持つJWTアサーションに署名することを確認
     #[test]
     fn test_sign() -> anyhow::Result<()> {
-        let assertion_signer = AssertionSigner::new(&test_config(), AUDIENCE)?;
+        let assertion_signer = AssertionSigner::new(&test_config())?;
         let now = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)?
             .as_secs();
@@ -571,7 +566,7 @@ mod test_assertion_signer {
         let assertion = assertion_signer.sign(0)?;
 
         let mut validation = Validation::new(Algorithm::RS512);
-        validation.set_audience(&[AUDIENCE]);
+        validation.set_audience(&[BOX_TOKEN_URL]);
         validation.set_issuer(&["client-id"]);
         let decoded = jsonwebtoken::decode::<serde_json::Value>(
             &assertion,
@@ -596,7 +591,7 @@ mod test_assertion_signer {
     #[case::box_ahead(120)]
     #[case::box_behind(-120)]
     fn test_sign_applies_clock_offset(#[case] clock_offset_secs: i64) -> anyhow::Result<()> {
-        let assertion_signer = AssertionSigner::new(&test_config(), AUDIENCE)?;
+        let assertion_signer = AssertionSigner::new(&test_config())?;
         let now = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)?
             .as_secs();
@@ -619,7 +614,7 @@ mod test_assertion_signer {
     /// 署名するたびに異なるjtiを設定することを確認
     #[test]
     fn test_sign_unique_jti() -> anyhow::Result<()> {
-        let assertion_signer = AssertionSigner::new(&test_config(), AUDIENCE)?;
+        let assertion_signer = AssertionSigner::new(&test_config())?;
 
         let jtis = (0..3)
             .map(|_| {
@@ -641,7 +636,7 @@ mod test_assertion_signer {
         let mut config = test_config();
         config.box_app_settings.app_auth.passphrase = SecretString::from("wrong-passphrase");
 
-        let result = AssertionSigner::new(&config, AUDIENCE);
+        let result = AssertionSigner::new(&config);
 
         assert!(matches!(result, Err(BoxClientError::DecryptPrivateKey(_))));
     }
@@ -1290,17 +1285,46 @@ mod test_token_manager {
         Ok(())
     }
 
-    /// トークンリクエストの本文からJWTアサーションの有効期限を取り出す。
-    fn assertion_exp(request: &wiremock::Request) -> anyhow::Result<u64> {
+    /// トークンリクエストの本文からJWTアサーションのクレームを取り出す。
+    fn assertion_claims(request: &wiremock::Request) -> anyhow::Result<serde_json::Value> {
         let body = String::from_utf8_lossy(&request.body);
         let assertion = body
             .split('&')
             .find_map(|pair| pair.strip_prefix("assertion="))
             .ok_or_else(|| anyhow::anyhow!("assertion was not found: {body}"))?;
-        let claims: serde_json::Value = jsonwebtoken::dangerous::insecure_decode(assertion)?.claims;
+        Ok(jsonwebtoken::dangerous::insecure_decode::<serde_json::Value>(assertion)?.claims)
+    }
+
+    /// トークンリクエストの本文からJWTアサーションの有効期限を取り出す。
+    fn assertion_exp(request: &wiremock::Request) -> anyhow::Result<u64> {
+        let claims = assertion_claims(request)?;
         claims["exp"]
             .as_u64()
             .ok_or_else(|| anyhow::anyhow!("exp was not found: {claims}"))
+    }
+
+    /// トークンエンドポイントのURLを変更しても、JWTアサーションの`aud`クレームにBOXのトークンエンドポイントのURLを設定することを確認
+    #[tokio::test]
+    async fn test_access_token_uses_box_token_url_as_audience() -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_always(&server, token_response()).await;
+        // トークンエンドポイントのURLは、モックサーバーのURLである。
+        let manager = create_manager(
+            &server,
+            Duration::from_secs(2),
+            short_retry(0)?,
+            REFRESH_BEFORE_EXPIRY,
+        )?;
+
+        manager.access_token().await?;
+
+        let requests = server.received_requests().await.unwrap_or_default();
+        let [request] = requests.as_slice() else {
+            anyhow::bail!("expected one request, got {}", requests.len());
+        };
+        assert_eq!(assertion_claims(request)?["aud"], BOX_TOKEN_URL);
+
+        Ok(())
     }
 
     /// JWTアサーションの有効期限を理由に拒否するトークンエンドポイントのレスポンスを返す。

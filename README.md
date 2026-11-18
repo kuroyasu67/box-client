@@ -658,6 +658,50 @@ let client = BoxClient::builder(config)
 
 アクセストークンをバックグラウンドで取得し直すタスクは、リクエストを送信するfutureを破棄しても中断せず、取得の成功または失敗まで実行する。
 
+## 接続先とUser-Agent
+
+### User-Agent
+
+`BoxClient`は、すべてのリクエストで、`User-Agent`ヘッダーにこのクレートの名前とバージョン（`box-client/<version>`）を送信する。
+対象には、アクセストークンの取得とファイルのダウンロードも含む。
+利用者が`BoxClientBuilder::user_agent`でアプリケーションの名前を指定した場合、`BoxClient`は、その後ろに空白とこのクレートの名前とバージョンを続けた`<user_agent> box-client/<version>`を送信する。
+アプリケーションの名前を指定すると、BOXのログで呼び出し元のアプリケーションを識別しやすくなる。
+
+空文字列、空白だけの文字列、およびヘッダーの値に使用できない文字を含む文字列は、`BoxClientBuilder::user_agent`でエラーになる。
+
+### 接続先のURL
+
+利用者は、REST API、アップロードのAPIおよびトークンエンドポイントのURLを、`BoxClientBuilder`で変更できる。
+利用者のテストで、BOXの代わりにモックサーバーへ接続する場合などに使用する。
+
+| メソッド | 既定値 |
+| --- | --- |
+| `BoxClientBuilder::api_base_url` | `https://api.box.com/2.0` |
+| `BoxClientBuilder::upload_base_url` | `https://upload.box.com/api/2.0` |
+| `BoxClientBuilder::token_url` | `https://api.box.com/oauth2/token` |
+
+`BoxClient`は、これらのURLにアクセストークンまたはJWTアサーションを送信する。
+したがって、BOX以外のサーバーや暗号化しない通信で送信しないように、`BoxClient`は次の条件を満たすURLだけを受け付ける。
+条件を満たさないURLは、各メソッドでエラーになる。
+
+- スキームが`https`である。
+  ただし、ホストが`localhost`またはループバックアドレス（`127.0.0.0/8`、`::1`）の場合は、モックサーバーに接続できるように`http`も受け付ける。
+- ユーザー名とパスワード、クエリおよびフラグメントを含まない。
+
+`BoxClient`は、JWTアサーションの`aud`クレームを、トークンエンドポイントのURLの設定によらず、BOXのトークンエンドポイントのURL（`https://api.box.com/oauth2/token`）とする。
+BOXは、`aud`クレームがBOXのトークンエンドポイントのURLと一致することを求めるためである。
+したがって、利用者がBOXに転送するプロキシをトークンエンドポイントに指定しても、BOXはJWTアサーションを受け付ける。
+
+```rust
+let client = BoxClient::builder(config)
+    .user_agent("my-app/1.0")?
+    .api_base_url("http://127.0.0.1:8080/2.0")?
+    .upload_base_url("http://127.0.0.1:8080/api/2.0")?
+    .token_url("http://127.0.0.1:8080/oauth2/token")?
+    .build()
+    .await?;
+```
+
 ## サンプル
 
 `examples`ディレクトリのサンプルは、BOX設定ファイルを読み込んで認証する。

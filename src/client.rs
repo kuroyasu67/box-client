@@ -1,6 +1,9 @@
-use std::{future::Future, sync::Arc, time::Duration};
+use std::{future::Future, net::IpAddr, sync::Arc, time::Duration};
 
-use reqwest::{Response, StatusCode, Url, header::CONTENT_TYPE};
+use reqwest::{
+    Response, StatusCode, Url,
+    header::{CONTENT_TYPE, HeaderValue},
+};
 use serde::de::DeserializeOwned;
 use tracing::Instrument as _;
 
@@ -22,6 +25,11 @@ const BOX_API_BASE_URL: &str = "https://api.box.com/2.0";
 ///
 /// BOXは、ファイルのアップロードを、REST APIとは別のホストで受け付ける。
 const BOX_UPLOAD_BASE_URL: &str = "https://upload.box.com/api/2.0";
+
+/// `User-Agent`ヘッダーで送信する、このクレートの名前とバージョン
+///
+/// 利用者がアプリケーションの名前を指定した場合は、その後ろに続けて送信する。
+const CRATE_USER_AGENT: &str = concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION"));
 
 /// アクセストークンを有効期限のどれだけ前に取得し直すかの既定値
 ///
@@ -188,6 +196,7 @@ impl BoxClient {
             api_base_url: None,
             upload_base_url: None,
             token_url: None,
+            user_agent: HeaderValue::from_static(CRATE_USER_AGENT),
         }
     }
 
@@ -381,6 +390,9 @@ pub struct BoxClientBuilder {
 
     /// トークンエンドポイントのURL。`None`の場合はBOXのURLを使用する。
     token_url: Option<String>,
+
+    /// `User-Agent`ヘッダーの値
+    user_agent: HeaderValue,
 }
 
 impl BoxClientBuilder {
@@ -498,19 +510,78 @@ impl BoxClientBuilder {
         Ok(self)
     }
 
-    /// テストでモックサーバーに接続できるように、REST APIとトークンエンドポイントのURLを指定する。
-    #[cfg(test)]
-    pub(crate) fn endpoints(mut self, api_base_url: Url, token_url: String) -> Self {
-        self.api_base_url = Some(api_base_url);
-        self.token_url = Some(token_url);
-        self
+    /// `User-Agent`ヘッダーで送信するアプリケーションの名前を指定する。
+    ///
+    /// `User-Agent`ヘッダーは、指定した値の後ろに空白とこのクレートの名前とバージョンを続けた
+    /// `<user_agent> box-client/<version>`とする。指定しない場合は、`box-client/<version>`とする。
+    /// BOXのログで呼び出し元のアプリケーションを識別しやすくなるように、`my-app/1.0`のような形式で指定する。
+    ///
+    /// アクセストークンの取得とファイルのダウンロードを含む、すべてのリクエストで送信する。
+    ///
+    /// # Errors
+    ///
+    /// `user_agent`が空文字列または空白だけの場合は、[`BoxClientError::InvalidArgument`]を返す。
+    /// `user_agent`に制御文字など、ヘッダーの値に使用できない文字が含まれる場合は、
+    /// [`BoxClientError::InvalidHeaderValue`]を返す。
+    pub fn user_agent(mut self, user_agent: &str) -> BoxClientResult<Self> {
+        let user_agent = user_agent.trim();
+        if user_agent.is_empty() {
+            return Err(BoxClientError::InvalidArgument(
+                "user agent must not be empty",
+            ));
+        }
+        self.user_agent = HeaderValue::from_str(&format!("{user_agent} {CRATE_USER_AGENT}"))
+            .map_err(BoxClientError::InvalidHeaderValue)?;
+        Ok(self)
     }
 
-    /// テストでモックサーバーに接続できるように、アップロードのAPIのベースURLを指定する。
-    #[cfg(test)]
-    pub(crate) fn upload_base_url(mut self, upload_base_url: Url) -> Self {
-        self.upload_base_url = Some(upload_base_url);
-        self
+    /// REST APIのベースURLを指定する。既定値は`https://api.box.com/2.0`とする。
+    ///
+    /// BOX以外のサーバーにアクセストークンを送信しないように注意する。
+    /// 利用者のテストで、BOXの代わりにモックサーバーへ接続する場合などに使用する。
+    /// ベースURLの後ろに、`folders/0`のようなAPIのパスを続けてリクエストを送信する。
+    ///
+    /// # Errors
+    ///
+    /// URLが[`BoxClientBuilder::token_url`]の条件を満たさない場合は、[`BoxClientError::InvalidEndpointUrl`]を返す。
+    pub fn api_base_url(mut self, api_base_url: &str) -> BoxClientResult<Self> {
+        self.api_base_url = Some(parse_endpoint_url("api_base_url", api_base_url)?);
+        Ok(self)
+    }
+
+    /// アップロードのAPIのベースURLを指定する。既定値は`https://upload.box.com/api/2.0`とする。
+    ///
+    /// BOXは、ファイルのアップロードを、REST APIとは別のホストで受け付ける。
+    /// 用途と注意点は、[`BoxClientBuilder::api_base_url`]と同じである。
+    ///
+    /// # Errors
+    ///
+    /// URLが[`BoxClientBuilder::token_url`]の条件を満たさない場合は、[`BoxClientError::InvalidEndpointUrl`]を返す。
+    pub fn upload_base_url(mut self, upload_base_url: &str) -> BoxClientResult<Self> {
+        self.upload_base_url = Some(parse_endpoint_url("upload_base_url", upload_base_url)?);
+        Ok(self)
+    }
+
+    /// トークンエンドポイントのURLを指定する。既定値は`https://api.box.com/oauth2/token`とする。
+    ///
+    /// JWTアサーションの`aud`クレームは、このURLによらず、BOXのトークンエンドポイントのURLとする。
+    /// BOXは、`aud`クレームがBOXのトークンエンドポイントのURLと一致することを求めるためである。
+    /// したがって、BOXに転送するプロキシをトークンエンドポイントに指定しても、BOXはJWTアサーションを受け付ける。
+    /// 用途と注意点は、[`BoxClientBuilder::api_base_url`]と同じである。
+    ///
+    /// アクセストークンやクライアントシークレットを、BOX以外のサーバーや暗号化しない通信で送信しないように、
+    /// このメソッド、[`BoxClientBuilder::api_base_url`]および[`BoxClientBuilder::upload_base_url`]は、
+    /// 次の条件を満たすURLだけを受け付ける。
+    ///
+    /// - スキームが`https`である。ただし、ホストが`localhost`またはループバックアドレスの場合は、`http`も受け付ける。
+    /// - ユーザー名とパスワード、クエリおよびフラグメントを含まない。
+    ///
+    /// # Errors
+    ///
+    /// URLを解釈できない場合、または上記の条件を満たさない場合は、[`BoxClientError::InvalidEndpointUrl`]を返す。
+    pub fn token_url(mut self, token_url: &str) -> BoxClientResult<Self> {
+        self.token_url = Some(parse_endpoint_url("token_url", token_url)?.into());
+        Ok(self)
     }
 
     /// BOXクライアントを作成する。
@@ -544,10 +615,12 @@ impl BoxClientBuilder {
         };
         let token_url = self.token_url.unwrap_or_else(|| BOX_TOKEN_URL.to_owned());
         let http_client = reqwest::Client::builder()
+            .user_agent(self.user_agent.clone())
             .timeout(self.timeout.request_timeout)
             .connect_timeout(self.timeout.connect_timeout)
             .build()?;
         let download_client = reqwest::Client::builder()
+            .user_agent(self.user_agent)
             .read_timeout(self.timeout.download_read_timeout)
             .connect_timeout(self.timeout.connect_timeout)
             .build()?;
@@ -573,6 +646,53 @@ impl BoxClientBuilder {
             token_manager,
         })
     }
+}
+
+/// BOXクライアントがリクエストを送信するURLを解釈し、[`BoxClientBuilder::token_url`]に記載した条件を検証する。
+///
+/// # Arguments
+///
+/// - `name`: エラーに含める設定の名前
+/// - `value`: URL
+///
+/// # Errors
+///
+/// URLを解釈できない場合、または条件を満たさない場合は、[`BoxClientError::InvalidEndpointUrl`]を返す。
+fn parse_endpoint_url(name: &'static str, value: &str) -> BoxClientResult<Url> {
+    let invalid = |reason: &'static str| BoxClientError::InvalidEndpointUrl {
+        name,
+        url: value.to_owned(),
+        reason,
+    };
+    let url = Url::parse(value).map_err(|_| invalid("the url cannot be parsed"))?;
+    if url.cannot_be_a_base() {
+        return Err(invalid("the url cannot be a base url"));
+    }
+    // IPv6アドレスのホストは`[::1]`のように角括弧で囲まれているため、角括弧を除いてから解釈する。
+    let is_loopback = url.host_str().is_some_and(|host| {
+        host.eq_ignore_ascii_case("localhost")
+            || host
+                .trim_start_matches('[')
+                .trim_end_matches(']')
+                .parse::<IpAddr>()
+                .is_ok_and(|address| address.is_loopback())
+    });
+    match url.scheme() {
+        "https" => {}
+        "http" if is_loopback => {}
+        _ => {
+            return Err(invalid(
+                "the scheme must be https, or http for localhost and loopback addresses",
+            ));
+        }
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(invalid("the url must not contain a username or password"));
+    }
+    if url.query().is_some() || url.fragment().is_some() {
+        return Err(invalid("the url must not contain a query or fragment"));
+    }
+    Ok(url)
 }
 
 /// 202を受け取った場合に再送する回数の上限が、指定できる最大値以下であることを検証する。
@@ -927,10 +1047,8 @@ mod test_box_client {
         let result = BoxClient::builder(test_config())
             .retry(short_retry(0)?)
             .refresh_before_expiry(refresh_before_expiry)
-            .endpoints(
-                Url::parse(&format!("{}/2.0", server.uri()))?,
-                format!("{}{TOKEN_PATH}", server.uri()),
-            )
+            .api_base_url(&format!("{}/2.0", server.uri()))?
+            .token_url(&format!("{}{TOKEN_PATH}", server.uri()))?
             .build()
             .await;
 
@@ -1272,7 +1390,8 @@ mod test_box_client {
         let (api_base_url, connections) = start_truncating_server().await?;
         let client = BoxClient::builder(test_config())
             .retry(short_retry(2)?)
-            .endpoints(api_base_url, format!("{}{TOKEN_PATH}", token_server.uri()))
+            .api_base_url(api_base_url.as_str())?
+            .token_url(&format!("{}{TOKEN_PATH}", token_server.uri()))?
             .build()
             .await?;
 
@@ -1308,7 +1427,8 @@ mod test_box_client {
         drop(listener);
         let client = BoxClient::builder(test_config())
             .retry(RetryPolicy::new(max_retries, DELAY, DELAY, Duration::ZERO)?)
-            .endpoints(api_base_url, format!("{}{TOKEN_PATH}", server.uri()))
+            .api_base_url(api_base_url.as_str())?
+            .token_url(&format!("{}{TOKEN_PATH}", server.uri()))?
             .build()
             .await?;
 
@@ -1350,6 +1470,117 @@ mod test_box_client {
         );
 
         Ok(())
+    }
+
+    /// アクセストークンの取得、REST APIの呼び出しおよびファイルのダウンロードで、`User-Agent`ヘッダーを送信することを確認
+    ///
+    /// アプリケーションの名前を指定した場合は、その後ろにこのクレートの名前とバージョンを続けることも確認する。
+    #[rstest]
+    #[case::default(None, CRATE_USER_AGENT.to_owned())]
+    #[case::specified(Some(" my-app/1.0 "), format!("my-app/1.0 {CRATE_USER_AGENT}"))]
+    #[tokio::test]
+    async fn test_send_user_agent(
+        #[case] user_agent: Option<&str>,
+        #[case] expected: String,
+    ) -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        Mock::given(path(TOKEN_PATH))
+            .and(header("user-agent", expected.as_str()))
+            .respond_with(crate::test_support::token_response())
+            .mount(&server)
+            .await;
+        Mock::given(path(API_PATH))
+            .and(header("user-agent", expected.as_str()))
+            .respond_with(ok_response())
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(path("/2.0/files/11/content"))
+            .and(header("user-agent", expected.as_str()))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"content".as_slice()))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let mut builder = client_builder(&server, short_retry(0)?)?;
+        if let Some(user_agent) = user_agent {
+            builder = builder.user_agent(user_agent)?;
+        }
+        // `User-Agent`ヘッダーが一致しない場合は、トークンエンドポイントが404を返すため、構築に失敗する。
+        let client = builder.build().await?;
+        let dir = tempfile::tempdir()?;
+
+        let _: serde_json::Value = client.send_json(request("GET")?).await?;
+        client
+            .download_file(
+                &crate::FileId::new("11"),
+                dir.path().join("content.txt"),
+                &crate::DownloadFileOptions::default(),
+            )
+            .await?;
+
+        Ok(())
+    }
+
+    /// 空のアプリケーションの名前、またはヘッダーの値に使用できない文字を含むアプリケーションの名前を拒否することを確認
+    #[rstest]
+    #[case::empty("", "InvalidArgument")]
+    #[case::whitespace("  ", "InvalidArgument")]
+    #[case::control_character("my-app\n1.0", "InvalidHeaderValue")]
+    fn test_builder_rejects_invalid_user_agent(#[case] user_agent: &str, #[case] expected: &str) {
+        let result = BoxClient::builder(test_config()).user_agent(user_agent);
+
+        let actual = match &result {
+            Err(BoxClientError::InvalidArgument(_)) => "InvalidArgument",
+            Err(BoxClientError::InvalidHeaderValue(_)) => "InvalidHeaderValue",
+            _ => "other",
+        };
+        assert_eq!(actual, expected, "result: {result:?}");
+    }
+
+    /// httpsのURLと、ローカルホストまたはループバックアドレスのhttpのURLだけを受け付けることを確認
+    #[rstest]
+    #[case::https("https://api.box.com/2.0", true)]
+    #[case::https_with_port("https://box.example.com:8443/api", true)]
+    #[case::http_localhost("http://localhost:8080/2.0", true)]
+    #[case::http_localhost_uppercase("http://LOCALHOST/2.0", true)]
+    #[case::http_ipv4_loopback("http://127.0.0.1:8080/2.0", true)]
+    #[case::http_ipv4_loopback_range("http://127.1.2.3/2.0", true)]
+    #[case::http_ipv6_loopback("http://[::1]:8080/2.0", true)]
+    #[case::http_remote("http://api.box.com/2.0", false)]
+    #[case::http_localhost_subdomain("http://localhost.example.com/2.0", false)]
+    #[case::other_scheme("ftp://api.box.com/2.0", false)]
+    #[case::not_base("mailto:user@example.com", false)]
+    #[case::credentials("https://user:password@api.box.com/2.0", false)]
+    #[case::username("https://user@api.box.com/2.0", false)]
+    #[case::query("https://api.box.com/2.0?key=value", false)]
+    #[case::fragment("https://api.box.com/2.0#top", false)]
+    #[case::unparsable("not a url", false)]
+    #[case::relative("/2.0", false)]
+    fn test_builder_validates_endpoint_urls(#[case] url: &str, #[case] valid: bool) {
+        type Setter = fn(BoxClientBuilder, &str) -> BoxClientResult<BoxClientBuilder>;
+        let setters: [(&str, Setter); 3] = [
+            ("api_base_url", BoxClientBuilder::api_base_url),
+            ("upload_base_url", BoxClientBuilder::upload_base_url),
+            ("token_url", BoxClientBuilder::token_url),
+        ];
+
+        for (expected_name, setter) in setters {
+            let result = setter(BoxClient::builder(test_config()), url);
+
+            if valid {
+                assert!(result.is_ok(), "{expected_name}: {:?}", result.err());
+            } else {
+                assert!(
+                    matches!(
+                        &result,
+                        Err(BoxClientError::InvalidEndpointUrl { name, url: u, .. })
+                            if *name == expected_name && u == url
+                    ),
+                    "{expected_name}: {:?}",
+                    result.err()
+                );
+            }
+        }
     }
 
     /// Debug出力にクライアントシークレット、秘密鍵、パスフレーズおよびアクセストークンを含めないことを確認

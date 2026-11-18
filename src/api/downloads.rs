@@ -642,7 +642,8 @@ mod test_download_file {
                     .with_download_read_timeout(download_read_timeout),
             )
             .retry(short_retry(0)?)
-            .endpoints(api_base_url, format!("{}{TOKEN_PATH}", token_server.uri()))
+            .api_base_url(api_base_url.as_str())?
+            .token_url(&format!("{}{TOKEN_PATH}", token_server.uri()))?
             .build()
             .await?)
     }
@@ -726,7 +727,8 @@ mod test_download_file {
         let (api_base_url, connections) = start_truncating_once_server().await?;
         let client = BoxClient::builder(test_config())
             .retry(short_retry(1)?)
-            .endpoints(api_base_url, format!("{}{TOKEN_PATH}", token_server.uri()))
+            .api_base_url(api_base_url.as_str())?
+            .token_url(&format!("{}{TOKEN_PATH}", token_server.uri()))?
             .build()
             .await?;
 

@@ -115,6 +115,21 @@ pub enum BoxClientError {
     #[error("Unexpected response: {0}")]
     UnexpectedResponse(&'static str),
 
+    /// BOXクライアントがリクエストを送信するURLの不正エラー
+    ///
+    /// アクセストークンを送信する先であるため、BOXクライアントは条件を満たさないURLを拒否する。
+    #[error("Invalid {name}: {url:?} ({reason})")]
+    InvalidEndpointUrl {
+        /// 設定の名前（`api_base_url`、`upload_base_url`または`token_url`）
+        name: &'static str,
+
+        /// 指定されたURL
+        url: String,
+
+        /// URLを拒否した理由
+        reason: &'static str,
+    },
+
     /// ベースURLの不正エラー
     #[error("Invalid base URL: {0}")]
     InvalidBaseUrl(String),

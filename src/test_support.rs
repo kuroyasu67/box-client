@@ -2,7 +2,6 @@
 
 use std::time::Duration;
 
-use reqwest::Url;
 use secrecy::SecretString;
 use serde_json::json;
 use wiremock::{Mock, MockServer, ResponseTemplate, matchers::path};
@@ -10,7 +9,7 @@ use wiremock::{Mock, MockServer, ResponseTemplate, matchers::path};
 use crate::{
     client::{BoxClient, BoxClientBuilder, BoxClientTimeout},
     config::{BoxAppAuth, BoxAppSettings, BoxConfig},
-    errors::{BoxClientError, BoxClientResult},
+    errors::BoxClientResult,
     retry::RetryPolicy,
 };
 
@@ -91,19 +90,16 @@ pub(crate) fn client_builder(
     server: &MockServer,
     retry: RetryPolicy,
 ) -> BoxClientResult<BoxClientBuilder> {
-    let api_base_url = Url::parse(&format!("{}/2.0", server.uri()))
-        .map_err(|e| BoxClientError::InvalidBaseUrl(e.to_string()))?;
-    let upload_base_url = Url::parse(&format!("{}{UPLOAD_BASE_PATH}", server.uri()))
-        .map_err(|e| BoxClientError::InvalidBaseUrl(e.to_string()))?;
-    Ok(BoxClient::builder(test_config())
+    BoxClient::builder(test_config())
         .timeout(BoxClientTimeout {
             request_timeout: Duration::from_secs(2),
             connect_timeout: Duration::from_secs(1),
             download_read_timeout: Duration::from_secs(2),
         })
         .retry(retry)
-        .endpoints(api_base_url, format!("{}{TOKEN_PATH}", server.uri()))
-        .upload_base_url(upload_base_url))
+        .api_base_url(&format!("{}/2.0", server.uri()))?
+        .upload_base_url(&format!("{}{UPLOAD_BASE_PATH}", server.uri()))?
+        .token_url(&format!("{}{TOKEN_PATH}", server.uri()))
 }
 
 /// タイムアウトを指定して、モックサーバーに接続するBOXクライアントを作成する。
