@@ -51,6 +51,11 @@ pub use api::versions::{
     FileVersion, FileVersionsPage, ListFileVersionsOptions, MAX_FILE_VERSIONS_OFFSET,
 };
 pub use api::web_links::{CreateWebLinkOptions, WebLink, WebLinkUpdate};
+pub use api::zip_downloads::{
+    CreateZipDownloadOptions, MAX_ZIP_DOWNLOAD_ITEMS, ZipDownload, ZipDownloadItem,
+    ZipDownloadItemType, ZipDownloadNameConflict, ZipDownloadState, ZipDownloadStatus,
+    ZipDownloadSummary,
+};
 pub use client::{
     BoxClient, BoxClientBuilder, BoxClientTimeout, DEFAULT_CHUNKED_UPLOAD_THRESHOLD,
     DEFAULT_MAX_COMMIT_POLLS, DEFAULT_MAX_DOWNLOAD_POLLS, DEFAULT_REFRESH_BEFORE_EXPIRY,

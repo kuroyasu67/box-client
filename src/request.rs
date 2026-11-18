@@ -51,6 +51,11 @@ pub struct ApiRequest<'a> {
 
     /// リクエストを送信するHTTPクライアントの種類
     pub(crate) client: HttpClientKind,
+
+    /// ベースURLとパス要素の代わりに使用する、BOXが返した絶対URL
+    ///
+    /// 指定した場合は、パス要素とクエリパラメーターを使用せず、アクセストークンも送信しない。
+    absolute_url: Option<Url>,
 }
 
 /// リクエストボディ
@@ -112,7 +117,24 @@ impl<'a> ApiRequest<'a> {
             idempotency,
             host: ApiHost::Api,
             client: HttpClientKind::Default,
+            absolute_url: None,
         }
+    }
+
+    /// BOXが返した絶対URLへ、アクセストークンを送信せずにGETリクエストを送信するリクエストを作成する。
+    ///
+    /// ZIPダウンロードの`download_url`のように、BOXが認証を求めないURLに使用する。
+    /// アクセストークンを送信しないため、BOX以外のホストのURLでもアクセストークンは漏れない。
+    pub(crate) fn unauthenticated_get(url: Url) -> Self {
+        Self {
+            absolute_url: Some(url),
+            ..Self::new(Method::GET, [])
+        }
+    }
+
+    /// アクセストークンを`Authorization`ヘッダーで送信するかどうかを返す。
+    pub(crate) fn is_authenticated(&self) -> bool {
+        self.absolute_url.is_none()
     }
 
     /// GETリクエストを作成する。
@@ -230,11 +252,16 @@ impl<'a> ApiRequest<'a> {
 
     /// ベースURLにパス要素とクエリパラメーターを結合したURLを返す。
     ///
+    /// 絶対URLを指定したリクエストでは、その絶対URLを返す。
+    ///
     /// # Errors
     ///
     /// パス要素が空文字列、`.`または`..`の場合は、[`BoxClientError::InvalidPathSegment`]を返す。
     /// ベースURLにパスを結合できない場合は、[`BoxClientError::InvalidBaseUrl`]を返す。
     pub(crate) fn url(&self, base_url: &Url) -> BoxClientResult<Url> {
+        if let Some(url) = &self.absolute_url {
+            return Ok(url.clone());
+        }
         if let Some(segment) = self
             .path
             .iter()

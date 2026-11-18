@@ -156,6 +156,24 @@
   - メソッド: `BoxClient::restore_web_link`
   - BOX API: `POST /web_links/{web_link_id}`
 
+### ZIPダウンロード
+
+- ZIPファイルのダウンロード（作成、ダウンロードおよび状態の取得をまとめて実行）
+  - メソッド: `BoxClient::download_zip`
+  - BOX API
+    - `POST /zip_downloads`
+    - `GET /zip_downloads/{zip_download_id}/content`
+    - `GET /zip_downloads/{zip_download_id}/status`
+- ZIPダウンロードの作成
+  - メソッド: `BoxClient::create_zip_download`
+  - BOX API: `POST /zip_downloads`
+- ZIPファイルのダウンロード
+  - メソッド: `BoxClient::download_zip_content`
+  - BOX API: `GET /zip_downloads/{zip_download_id}/content`
+- ZIPダウンロードの状態の取得
+  - メソッド: `BoxClient::zip_download_status`
+  - BOX API: `GET /zip_downloads/{zip_download_id}/status`
+
 ## アクセストークンの管理
 
 `BoxClient`は、JWT認証で取得したアクセストークンをキャッシュし、アクセストークンの有効期限が近づくと、アクセストークンを自動で取得し直す。
@@ -303,6 +321,14 @@ BOXがアクセストークンを拒否して401を返した場合、`BoxClient`
   - HTTPメソッド: POST
   - 冪等性: 冪等
   - 理由: アクセストークンを二重に発行しても害はない。また、JWTアサーションは試行ごとに作り直す。
+- ZIPダウンロードの作成（`BoxClient::create_zip_download`）
+  - HTTPメソッド: POST
+  - 冪等性: 冪等
+  - 理由: ZIPダウンロードを重複して作成しても、BOXに項目は作成されず、使用しなかったZIPダウンロードは期限が切れて無効になる。
+- ZIPファイルのダウンロード（`BoxClient::download_zip_content`）
+  - HTTPメソッド: GET
+  - 冪等性: 冪等でない
+  - 理由: ダウンロード用のURLは一度しか使用できず、BOXは2回目以降のリクエストに404を返す。
 - フォルダの削除（`BoxClient::delete_folder`）
   - HTTPメソッド: DELETE
   - 冪等性: 冪等でない

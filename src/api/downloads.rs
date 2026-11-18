@@ -49,13 +49,15 @@ impl<'a> DownloadFileOptions<'a> {
 
 /// ダウンロードしている内容を書き込む一時ファイル
 ///
+/// ファイルのダウンロードとZIPダウンロードで共有する。
+///
 /// `TempFile`は、[`TempFile::persist`]を呼び出さずに破棄されると、一時ファイルを削除する。
 /// これにより、ダウンロードに失敗した場合、またはダウンロードしているfutureが破棄された場合に、
 /// 書きかけの一時ファイルを残さない。
 #[derive(Debug)]
-struct TempFile {
+pub(crate) struct TempFile {
     /// 一時ファイルのパス
-    path: PathBuf,
+    pub(crate) path: PathBuf,
 
     /// 一時ファイルを保存先に移動したかどうか
     persisted: bool,
@@ -74,7 +76,7 @@ impl TempFile {
     /// # Errors
     ///
     /// 保存先のパスからファイル名を取得できない場合は、[`BoxClientError::InvalidArgument`]を返す。
-    fn new(path: &Path) -> BoxClientResult<Self> {
+    pub(crate) fn new(path: &Path) -> BoxClientResult<Self> {
         if path.file_name().is_none() {
             return Err(BoxClientError::InvalidArgument(
                 "the file name cannot be taken from the path",
@@ -93,7 +95,7 @@ impl TempFile {
     /// 保存先にファイルが存在する場合は、そのファイルを置き換える。
     /// ただし、Windowsでは、保存先のファイルが読み取り専用の場合、または他のプロセスが削除を許可せずに開いている場合に、
     /// 置き換えに失敗する。
-    async fn persist(mut self, path: &Path) -> std::io::Result<()> {
+    pub(crate) async fn persist(mut self, path: &Path) -> std::io::Result<()> {
         tokio::fs::rename(&self.path, path).await?;
         self.persisted = true;
         Ok(())
@@ -120,7 +122,7 @@ impl Drop for TempFile {
 /// - `idempotency`: リクエストの冪等性
 /// - `temp_path`: 一時ファイルのパス
 /// - `path`: エラーに含める保存先のパス
-async fn write_response(
+pub(crate) async fn write_response(
     mut response: Response,
     idempotency: Idempotency,
     temp_path: &Path,

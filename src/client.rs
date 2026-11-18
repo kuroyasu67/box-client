@@ -367,18 +367,25 @@ impl BoxClient {
         let idempotency = request.idempotency;
         let mut token_refreshed = false;
         loop {
-            let token = self
-                .token_manager
-                .access_token()
-                .await
-                .map_err(AttemptError::Fatal)?;
+            // 認証を求めないURLには、アクセストークンを取得せず、送信もしない。
+            let token = if request.is_authenticated() {
+                Some(
+                    self.token_manager
+                        .access_token()
+                        .await
+                        .map_err(AttemptError::Fatal)?,
+                )
+            } else {
+                None
+            };
             let http_client = match request.client {
                 HttpClientKind::Default => &self.http_client,
                 HttpClientKind::Download => &self.download_client,
             };
-            let mut builder = http_client
-                .request(request.method.clone(), url.clone())
-                .bearer_auth(token.secret());
+            let mut builder = http_client.request(request.method.clone(), url.clone());
+            if let Some(token) = &token {
+                builder = builder.bearer_auth(token.secret());
+            }
             for (name, value) in &request.headers {
                 builder = builder.header(name, value);
             }
@@ -401,9 +408,12 @@ impl BoxClient {
                 .map_err(|e| classify_transport_error(e, idempotency))?;
 
             let status = response.status();
-            if status == StatusCode::UNAUTHORIZED && !token_refreshed {
+            if let Some(token) = &token
+                && status == StatusCode::UNAUTHORIZED
+                && !token_refreshed
+            {
                 tracing::warn!("access token was rejected; fetching a new one and resending");
-                self.token_manager.invalidate(&token).await;
+                self.token_manager.invalidate(token).await;
                 token_refreshed = true;
                 continue;
             }
@@ -836,6 +846,25 @@ fn parse_endpoint_url(name: &'static str, value: &str) -> BoxClientResult<Url> {
     if url.cannot_be_a_base() {
         return Err(invalid("the url cannot be a base url"));
     }
+    if !has_secure_scheme(&url) {
+        return Err(invalid(
+            "the scheme must be https, or http for localhost and loopback addresses",
+        ));
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(invalid("the url must not contain a username or password"));
+    }
+    if url.query().is_some() || url.fragment().is_some() {
+        return Err(invalid("the url must not contain a query or fragment"));
+    }
+    Ok(url)
+}
+
+/// URLのスキームが`https`、またはホストが`localhost`もしくはループバックアドレスで、スキームが`http`であるかを返す。
+///
+/// 暗号化しない通信でBOXの情報を送受信しないように使用する。
+/// ループバックアドレスの`http`は、テストでモックサーバーに接続できるように受け付ける。
+pub(crate) fn has_secure_scheme(url: &Url) -> bool {
     // IPv6アドレスのホストは`[::1]`のように角括弧で囲まれているため、角括弧を除いてから解釈する。
     let is_loopback = url.host_str().is_some_and(|host| {
         host.eq_ignore_ascii_case("localhost")
@@ -846,21 +875,10 @@ fn parse_endpoint_url(name: &'static str, value: &str) -> BoxClientResult<Url> {
                 .is_ok_and(|address| address.is_loopback())
     });
     match url.scheme() {
-        "https" => {}
-        "http" if is_loopback => {}
-        _ => {
-            return Err(invalid(
-                "the scheme must be https, or http for localhost and loopback addresses",
-            ));
-        }
+        "https" => true,
+        "http" => is_loopback,
+        _ => false,
     }
-    if !url.username().is_empty() || url.password().is_some() {
-        return Err(invalid("the url must not contain a username or password"));
-    }
-    if url.query().is_some() || url.fragment().is_some() {
-        return Err(invalid("the url must not contain a query or fragment"));
-    }
-    Ok(url)
 }
 
 /// BOXのURLの定数を解釈する。
