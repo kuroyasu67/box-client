@@ -38,8 +38,8 @@ pub use api::folders::{
 pub use api::trash::{ListTrashedItemsOptions, RestoreItemOptions};
 pub use api::types::{
     BoxItem, DeleteItemOptions, FileId, FileItem, FileVersionId, FolderId, FolderItem, ItemStatus,
-    MAX_DESCRIPTION_CHARS, MAX_NAME_CHARS, MoveDestination, ParentFolder, PathCollection,
-    UpdateItemOptions, UserId, WebLinkId, WebLinkItem,
+    MAX_DESCRIPTION_CHARS, MAX_NAME_CHARS, MoveDestination, PathCollection, UpdateItemOptions,
+    UserId, WebLinkId, WebLinkItem,
 };
 pub use api::uploads::{UpdateFileContentOptions, UploadFileOptions, UploadUrl};
 pub use api::users::{User, UserMini};

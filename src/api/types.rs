@@ -199,11 +199,21 @@ pub enum ItemStatus {
     Unknown,
 }
 
-/// 親フォルダ
-#[derive(Debug, Clone, Serialize)]
-pub struct ParentFolder {
+/// リクエストボディで指定する親フォルダ
+///
+/// BOXは、作成、コピー、アップロードおよび復元で、親フォルダを`{"id": "..."}`の形式で受け付けるため、
+/// これらのリクエストボディで共有する。IDを複製しないように、IDを参照で保持する。
+#[derive(Debug, Clone, Copy, Serialize)]
+pub(crate) struct ParentFolder<'a> {
     /// 親フォルダのID
-    pub id: FolderId,
+    id: &'a FolderId,
+}
+
+impl<'a> ParentFolder<'a> {
+    /// 親フォルダのIDから作成する。
+    pub(crate) fn new(id: &'a FolderId) -> Self {
+        Self { id }
+    }
 }
 
 /// ファイル、フォルダまたはWebリンクの名前に使用できない文字が含まれていないか検証する。

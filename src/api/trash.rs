@@ -8,7 +8,7 @@ use crate::{
     WebLinkId,
     api::files::File,
     api::folders::{ItemsPage, MAX_ITEMS_LIMIT, collect_all_pages, validate_limit},
-    api::types::{MAX_NAME_CHARS, validate_optional_item_name, validated},
+    api::types::{MAX_NAME_CHARS, ParentFolder, validate_optional_item_name, validated},
     request::ApiRequest,
 };
 
@@ -110,14 +110,7 @@ struct RestoreItemBody<'a> {
     /// 元の親フォルダが存在しない場合の復元先の親フォルダ
     #[serde(skip_serializing_if = "Option::is_none")]
     #[garde(skip)]
-    parent: Option<ParentReference<'a>>,
-}
-
-/// リクエストボディで親フォルダを指定する参照
-#[derive(Debug, Serialize)]
-struct ParentReference<'a> {
-    /// 親フォルダのID
-    id: &'a str,
+    parent: Option<ParentFolder<'a>>,
 }
 
 impl<'a> RestoreItemBody<'a> {
@@ -129,9 +122,7 @@ impl<'a> RestoreItemBody<'a> {
     fn new(options: &RestoreItemOptions<'a>) -> BoxClientResult<Self> {
         validated(Self {
             name: options.name,
-            parent: options
-                .parent_id
-                .map(|id| ParentReference { id: id.as_ref() }),
+            parent: options.parent_id.map(ParentFolder::new),
         })
     }
 }

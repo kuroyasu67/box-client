@@ -18,8 +18,8 @@ use sha1::{Digest as _, Sha1};
 use tokio::io::AsyncReadExt as _;
 
 use crate::{
-    BoxClient, BoxClientError, BoxClientResult, File, FileId, FolderId, ParentFolder,
-    api::types::RenameBody,
+    BoxClient, BoxClientError, BoxClientResult, File, FileId, FolderId,
+    api::types::{ParentFolder, RenameBody},
     request::ApiRequest,
     retry::{AttemptError, Idempotency, read_json, read_poll_response},
 };
@@ -149,9 +149,7 @@ impl UploadTarget<'_> {
         match *self {
             Self::NewFile { parent_id, name } => serde_json::to_vec(&UploadAttributes {
                 name,
-                parent: ParentFolder {
-                    id: parent_id.clone(),
-                },
+                parent: ParentFolder::new(parent_id),
             }),
             Self::NewVersion { name, .. } => serde_json::to_vec(&UploadVersionAttributes { name }),
         }
@@ -210,7 +208,7 @@ struct UploadAttributes<'a> {
     name: &'a str,
 
     /// アップロード先の親フォルダ
-    parent: ParentFolder,
+    parent: ParentFolder<'a>,
 }
 
 /// 1回のリクエストで新しいバージョンをアップロードする場合の、ファイルの属性
@@ -233,7 +231,7 @@ struct PreflightUploadBody<'a> {
     size: u64,
 
     /// アップロード先の親フォルダ
-    parent: ParentFolder,
+    parent: ParentFolder<'a>,
 }
 
 /// 既存のファイルの新しいバージョンのプリフライトチェックのリクエストのボディ
@@ -604,9 +602,7 @@ impl BoxClient {
             ApiRequest::new(Method::OPTIONS, ["files", "content"]).json(&PreflightUploadBody {
                 name,
                 size,
-                parent: ParentFolder {
-                    id: parent_id.clone(),
-                },
+                parent: ParentFolder::new(parent_id),
             })?;
         let upload_url = self.send(request, read_upload_url).await?;
 

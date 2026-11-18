@@ -9,7 +9,8 @@ use time::OffsetDateTime;
 use crate::BoxClientError;
 use crate::{
     BoxClient, BoxClientResult, FolderId, FolderItem, Idempotency, ItemStatus,
-    MAX_DESCRIPTION_CHARS, MoveDestination, ParentFolder, PathCollection, UserMini, WebLinkId,
+    MAX_DESCRIPTION_CHARS, MoveDestination, PathCollection, UserMini, WebLinkId,
+    api::types::ParentFolder,
     api::types::{
         MAX_NAME_CHARS, MoveBody, RenameBody, SetDescriptionBody, UpdateItemOptions,
         update_item_request, validate_optional_item_name, validated,
@@ -133,7 +134,7 @@ struct CreateWebLinkBody<'a> {
 
     /// Webリンクを作成する親フォルダ
     #[garde(skip)]
-    parent: ParentFolder,
+    parent: ParentFolder<'a>,
 
     /// Webリンク名
     ///
@@ -159,14 +160,12 @@ impl<'a> CreateWebLinkBody<'a> {
     /// URL、Webリンク名または説明をBOXが拒否する場合は、[`BoxClientError::InvalidRequestBody`]を返す。
     fn new(
         url: &'a str,
-        parent_id: &FolderId,
+        parent_id: &'a FolderId,
         options: &CreateWebLinkOptions<'a>,
     ) -> BoxClientResult<Self> {
         validated(Self {
             url,
-            parent: ParentFolder {
-                id: parent_id.clone(),
-            },
+            parent: ParentFolder::new(parent_id),
             name: options.name,
             description: options.description,
         })

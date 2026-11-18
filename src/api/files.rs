@@ -9,7 +9,8 @@ use time::OffsetDateTime;
 use crate::BoxClientError;
 use crate::{
     BoxClient, BoxClientResult, FileId, FileVersion, FileVersionId, FolderId, FolderItem,
-    Idempotency, ItemStatus, MoveDestination, ParentFolder, PathCollection, UserMini,
+    Idempotency, ItemStatus, MoveDestination, PathCollection, UserMini,
+    api::types::ParentFolder,
     api::types::{
         DeleteItemOptions, MAX_NAME_CHARS, MoveBody, RenameBody, SetDescriptionBody,
         UpdateItemOptions, update_item_request, validate_optional_item_name, validated,
@@ -143,7 +144,7 @@ impl<'a> CopyFileOptions<'a> {
 struct CopyFileBody<'a> {
     /// コピー先の親フォルダ
     #[garde(skip)]
-    parent: ParentFolder,
+    parent: ParentFolder<'a>,
 
     /// コピーしたファイルの名前
     ///
@@ -167,11 +168,9 @@ impl<'a> CopyFileBody<'a> {
     /// # Errors
     ///
     /// ファイル名をBOXが拒否する場合は、[`BoxClientError::InvalidRequestBody`]を返す。
-    fn new(parent_id: &FolderId, options: &CopyFileOptions<'a>) -> BoxClientResult<Self> {
+    fn new(parent_id: &'a FolderId, options: &CopyFileOptions<'a>) -> BoxClientResult<Self> {
         validated(Self {
-            parent: ParentFolder {
-                id: parent_id.clone(),
-            },
+            parent: ParentFolder::new(parent_id),
             name: options.name,
             version: options.version,
         })

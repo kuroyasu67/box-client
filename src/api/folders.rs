@@ -8,7 +8,8 @@ use time::OffsetDateTime;
 
 use crate::{
     BoxClient, BoxClientError, BoxClientResult, BoxItem, FolderId, FolderItem, Idempotency,
-    ItemStatus, MoveDestination, ParentFolder, UserMini,
+    ItemStatus, MoveDestination, UserMini,
+    api::types::ParentFolder,
     api::types::{
         MAX_NAME_CHARS, MoveBody, PathCollection, RenameBody, SetDescriptionBody,
         UpdateItemOptions, update_item_request, validate_item_name, validate_optional_item_name,
@@ -279,7 +280,7 @@ struct CreateFolderBody<'a> {
 
     /// 親フォルダ
     #[garde(skip)]
-    parent: ParentFolder,
+    parent: ParentFolder<'a>,
 }
 
 impl<'a> CreateFolderBody<'a> {
@@ -288,12 +289,10 @@ impl<'a> CreateFolderBody<'a> {
     /// # Errors
     ///
     /// フォルダ名をBOXが拒否する場合は、[`BoxClientError::InvalidRequestBody`]を返す。
-    fn new(name: &'a str, parent_id: &FolderId) -> BoxClientResult<Self> {
+    fn new(name: &'a str, parent_id: &'a FolderId) -> BoxClientResult<Self> {
         validated(Self {
             name,
-            parent: ParentFolder {
-                id: parent_id.clone(),
-            },
+            parent: ParentFolder::new(parent_id),
         })
     }
 }
@@ -331,7 +330,7 @@ impl<'a> CopyFolderOptions<'a> {
 struct CopyFolderBody<'a> {
     /// コピー先の親フォルダ
     #[garde(skip)]
-    parent: ParentFolder,
+    parent: ParentFolder<'a>,
 
     /// コピーしたフォルダの名前
     ///
@@ -348,11 +347,9 @@ impl<'a> CopyFolderBody<'a> {
     /// # Errors
     ///
     /// フォルダ名をBOXが拒否する場合は、[`BoxClientError::InvalidRequestBody`]を返す。
-    fn new(parent_id: &FolderId, name: Option<&'a str>) -> BoxClientResult<Self> {
+    fn new(parent_id: &'a FolderId, name: Option<&'a str>) -> BoxClientResult<Self> {
         validated(Self {
-            parent: ParentFolder {
-                id: parent_id.clone(),
-            },
+            parent: ParentFolder::new(parent_id),
             name,
         })
     }
@@ -1509,7 +1506,8 @@ mod test_create_folder_body {
     #[case::max_ascii(&"a".repeat(255))]
     #[case::max_japanese(&"あ".repeat(255))]
     fn test_valid_name(#[case] name: &str) -> anyhow::Result<()> {
-        let body = CreateFolderBody::new(name, &FolderId::new("0"))?;
+        let parent_id = FolderId::new("0");
+        let body = CreateFolderBody::new(name, &parent_id)?;
 
         assert_eq!(body.name, name);
 
@@ -1526,7 +1524,8 @@ mod test_create_folder_body {
     #[case::too_long_japanese(&"あ".repeat(256))]
     #[case::invalid_char("a/b")]
     fn test_invalid_name(#[case] name: &str) {
-        let result = CreateFolderBody::new(name, &FolderId::new("0"));
+        let parent_id = FolderId::new("0");
+        let result = CreateFolderBody::new(name, &parent_id);
 
         assert!(
             matches!(result, Err(BoxClientError::InvalidRequestBody(_))),
@@ -1552,7 +1551,8 @@ mod test_create_folder_body {
     /// BOXが求める形式のJSONにシリアライズすることを確認
     #[test]
     fn test_serialize() -> anyhow::Result<()> {
-        let body = CreateFolderBody::new("folder", &FolderId::new("123"))?;
+        let parent_id = FolderId::new("123");
+        let body = CreateFolderBody::new("folder", &parent_id)?;
 
         assert_eq!(
             serde_json::to_value(&body)?,
