@@ -32,7 +32,7 @@ mod test_support;
 pub use api::files::{File, FileVersion};
 pub use api::folders::{
     DeleteFolderOptions, Folder, ItemSort, ItemsPage, ListItemsOptions, MAX_ITEMS_LIMIT,
-    MoveFolderOptions, SortDirection,
+    MoveFolderOptions, RenameFolderOptions, SortDirection,
 };
 pub use api::trash::{ListTrashedItemsOptions, RestoreItemOptions};
 pub use api::types::{
