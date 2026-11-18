@@ -425,19 +425,27 @@ pub(crate) async fn read_json<T: DeserializeOwned>(
     response: Response,
     idempotency: Idempotency,
 ) -> Result<T, AttemptError> {
-    let body = response.bytes().await.map_err(|error| {
-        if idempotency == Idempotency::Idempotent {
-            AttemptError::Retryable {
-                error: error.into(),
-                retry_after: None,
-            }
-        } else {
-            AttemptError::Fatal(error.into())
-        }
-    })?;
+    let body = response
+        .bytes()
+        .await
+        .map_err(|error| classify_body_error(error, idempotency))?;
 
     serde_json::from_slice(&body)
         .map_err(|e| AttemptError::Fatal(BoxClientError::DeserializeResponse(e)))
+}
+
+/// 成功レスポンスのボディの受信中に発生した通信エラーを、再試行できるエラーと再試行できないエラーに分類する。
+///
+/// ボディの受信中の通信エラーは、サーバーが処理した可能性があるため、冪等なリクエストのみ再試行する。
+pub(crate) fn classify_body_error(error: reqwest::Error, idempotency: Idempotency) -> AttemptError {
+    if idempotency == Idempotency::Idempotent {
+        AttemptError::Retryable {
+            error: error.into(),
+            retry_after: None,
+        }
+    } else {
+        AttemptError::Fatal(error.into())
+    }
 }
 
 /// 成功以外のレスポンスを、再試行できるエラーと再試行できないエラーに分類する。

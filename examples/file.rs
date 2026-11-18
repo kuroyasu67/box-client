@@ -2,7 +2,7 @@
 //!
 //! サンプルは、次の順にファイルを操作する。
 //!
-//! 1. ファイルをアップロードし、情報を取得する。
+//! 1. ファイルをアップロードし、情報を取得してから、ダウンロードする。
 //! 2. ファイル名を変更し、説明を設定する。
 //! 3. ファイルをコピーする。
 //! 4. 移動先の親フォルダを指定した場合は、ファイルを移動する。
@@ -16,9 +16,11 @@ mod common;
 
 use std::path::Path;
 
+use tokio::io::{AsyncBufReadExt as _, BufReader};
+
 use box_client::{
-    BoxClient, CopyFileOptions, File, FolderId, ListFileVersionsOptions, MoveDestination,
-    RestoreItemOptions, UpdateFileContentOptions, UploadFileOptions,
+    BoxClient, CopyFileOptions, DownloadFileOptions, File, FolderId, ListFileVersionsOptions,
+    MoveDestination, RestoreItemOptions, UpdateFileContentOptions, UploadFileOptions,
 };
 
 /// 使用方法
@@ -70,6 +72,22 @@ async fn main() -> anyhow::Result<()> {
     // ファイルの情報を取得
     let file = client.file_information(&file_id).await?;
     tracing::info!("file information: {file:?}");
+
+    // 一時ディレクトリにファイルをダウンロードし、アップロードしたファイルと内容がバイト単位で一致することを確認
+    // 一時ディレクトリは、サンプルの終了時に削除する。
+    let download_dir = tempfile::tempdir()?;
+    let download_path = download_dir.path().join(file_name);
+    let size = client
+        .download_file(&file_id, &download_path, &DownloadFileOptions::default())
+        .await?;
+    tracing::info!(
+        "downloaded file: path={}, size={size}",
+        download_path.display()
+    );
+    if let Some(offset) = first_difference(file_path, &download_path).await? {
+        anyhow::bail!("the downloaded file differs from the uploaded file at byte {offset}");
+    }
+    tracing::info!("the downloaded file is identical to the uploaded file");
 
     // ファイル名を変更
     // 直前に取得した`ETag`を指定し、取得後にファイルが変更されていた場合は名前を変更しない。
@@ -207,4 +225,36 @@ async fn operate_versions(client: &BoxClient, file: &File, file_path: &Path) -> 
     tracing::info!("restored file version: {version:?}");
 
     Ok(())
+}
+
+/// 2つのファイルの内容を先頭からバイト単位で比較し、最初に異なるバイトの位置を返す。
+///
+/// 大きいファイルでもメモリを使い切らないように、ファイル全体を読み込まずに、バッファに読み込んだ範囲ごとに比較する。
+/// 一方のファイルが他方のファイルの先頭部分と一致する場合は、短い方のファイルの長さを異なる位置として返す。
+/// 内容が完全に一致する場合は`None`を返す。
+async fn first_difference(left: &Path, right: &Path) -> std::io::Result<Option<u64>> {
+    let mut left = BufReader::new(tokio::fs::File::open(left).await?);
+    let mut right = BufReader::new(tokio::fs::File::open(right).await?);
+    let mut offset: u64 = 0;
+    loop {
+        let left_buf = left.fill_buf().await?;
+        let right_buf = right.fill_buf().await?;
+        if left_buf.is_empty() || right_buf.is_empty() {
+            // 両方のファイルを最後まで読んだ場合のみ、内容が一致する。
+            return Ok((left_buf.len() != right_buf.len()).then_some(offset));
+        }
+
+        // 2つのバッファに読み込まれた長さは異なりうるため、短い方の長さだけ比較する。
+        let len = left_buf.len().min(right_buf.len());
+        if let Some(index) = left_buf[..len]
+            .iter()
+            .zip(&right_buf[..len])
+            .position(|(l, r)| l != r)
+        {
+            return Ok(Some(offset + index as u64));
+        }
+        left.consume(len);
+        right.consume(len);
+        offset += len as u64;
+    }
 }

@@ -57,6 +57,17 @@ pub enum BoxClientError {
         source: std::io::Error,
     },
 
+    /// ダウンロードしたファイルの書き込みエラー
+    #[error("Failed to write file: {path}")]
+    WriteFile {
+        /// ダウンロードしたファイルを保存するパス
+        path: PathBuf,
+
+        /// 原因となったエラー
+        #[source]
+        source: std::io::Error,
+    },
+
     /// 分割アップロードで並列にアップロードする部分の数が範囲外であるエラー
     #[error("upload_concurrency {upload_concurrency} is out of range {min}..={max}")]
     InvalidUploadConcurrency {

@@ -29,6 +29,7 @@ mod retry;
 #[cfg(test)]
 mod test_support;
 
+pub use api::downloads::DownloadFileOptions;
 pub use api::files::{CopyFileOptions, File};
 pub use api::folders::{
     CopyFolderOptions, DeleteFolderOptions, Folder, ItemSort, ItemsPage, ListItemsOptions,
