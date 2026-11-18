@@ -37,8 +37,8 @@ pub use api::folders::{
 };
 pub use api::trash::{ListTrashedItemsOptions, RestoreItemOptions};
 pub use api::types::{
-    BoxItem, FileId, FileItem, FolderId, FolderItem, ItemStatus, ParentFolder, PathCollection,
-    UserId, WebLinkId, WebLinkItem,
+    BoxItem, FileId, FileItem, FileVersionId, FolderId, FolderItem, ItemStatus, ParentFolder,
+    PathCollection, UserId, WebLinkId, WebLinkItem,
 };
 pub use api::uploads::{
     CHUNKED_UPLOAD_THRESHOLD, UpdateFileContentOptions, UploadFileOptions, UploadUrl,

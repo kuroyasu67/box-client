@@ -6,8 +6,8 @@ use time::OffsetDateTime;
 use reqwest::header::IF_MATCH;
 
 use crate::{
-    BoxClient, BoxClientResult, FileId, FolderItem, Idempotency, ItemStatus, PathCollection,
-    UserMini, request::ApiRequest,
+    BoxClient, BoxClientResult, FileId, FileVersionId, FolderItem, Idempotency, ItemStatus,
+    PathCollection, UserMini, request::ApiRequest,
 };
 
 /// ファイル情報
@@ -89,14 +89,64 @@ pub struct File {
 }
 
 /// ファイルのバージョン
+///
+/// ファイル情報に含まれるバージョンは、IDとSHA-1ハッシュ値だけを持つ。
+/// [`BoxClient::file_version`]で取得したバージョンは、それ以外の属性も持つ。
+/// どちらも同じ型で受け取れるように、IDおよびSHA-1ハッシュ値以外の属性を`Option`で受け取る。
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[non_exhaustive]
 pub struct FileVersion {
     /// ファイルバージョンID
-    pub id: String,
+    pub id: FileVersionId,
 
     /// このバージョンのファイルの内容のSHA-1ハッシュ値
     pub sha1: Option<String>,
+
+    /// このバージョンのファイル名
+    pub name: Option<String>,
+
+    /// このバージョンのファイルのバイト数
+    pub size: Option<u64>,
+
+    /// バージョン番号
+    ///
+    /// BOXは、バージョン番号を数字の文字列で返す。
+    pub version_number: Option<String>,
+
+    /// バージョンを作成した日時
+    #[serde(default, with = "time::serde::rfc3339::option")]
+    pub created_at: Option<OffsetDateTime>,
+
+    /// バージョンを最後に更新した日時
+    #[serde(default, with = "time::serde::rfc3339::option")]
+    pub modified_at: Option<OffsetDateTime>,
+
+    /// バージョンを最後に更新したユーザー
+    pub modified_by: Option<UserMini>,
+
+    /// バージョンをゴミ箱に移動した日時
+    #[serde(default, with = "time::serde::rfc3339::option")]
+    pub trashed_at: Option<OffsetDateTime>,
+
+    /// バージョンをゴミ箱に移動したユーザー
+    pub trashed_by: Option<UserMini>,
+
+    /// バージョンをゴミ箱から復元した日時
+    #[serde(default, with = "time::serde::rfc3339::option")]
+    pub restored_at: Option<OffsetDateTime>,
+
+    /// バージョンをゴミ箱から復元したユーザー
+    pub restored_by: Option<UserMini>,
+
+    /// ゴミ箱に移動したバージョンを完全に削除する予定の日時
+    #[serde(default, with = "time::serde::rfc3339::option")]
+    pub purged_at: Option<OffsetDateTime>,
+
+    /// バージョンをアップロードしたユーザーの表示名
+    ///
+    /// 通常は、アップロードしたときのユーザー名である。
+    /// ファイルリクエストで匿名のユーザーがアップロードした場合は、メールアドレス、`File Request`または`Someone`になる。
+    pub uploader_display_name: Option<String>,
 }
 
 impl BoxClient {
@@ -114,6 +164,35 @@ impl BoxClient {
     pub async fn file_information(&self, file_id: &FileId) -> BoxClientResult<File> {
         self.send_json(ApiRequest::get(["files", file_id.as_ref()]))
             .await
+    }
+
+    /// ファイルの特定のバージョンの情報を取得する。
+    ///
+    /// BOXは、プレミアムアカウントのユーザーのファイルだけにバージョンを記録する。
+    ///
+    /// # Arguments
+    ///
+    /// - `file_id`: ファイルのID
+    /// - `file_version_id`: 情報を取得するバージョンのID。
+    ///   ファイルの現在のバージョンのIDは、[`BoxClient::file_information`]で取得した[`File::file_version`]で確認できる。
+    ///
+    /// # Errors
+    ///
+    /// ファイルまたはバージョンが存在しない場合、またはファイルにアクセスする権限がない場合は、
+    /// [`BoxClientError::Api`](crate::BoxClientError::Api)を返す。
+    /// 再試行できないエラーが発生した場合、または再試行回数の上限に達した場合はエラーを返す。
+    pub async fn file_version(
+        &self,
+        file_id: &FileId,
+        file_version_id: &FileVersionId,
+    ) -> BoxClientResult<FileVersion> {
+        self.send_json(ApiRequest::get([
+            "files",
+            file_id.as_ref(),
+            "versions",
+            file_version_id.as_ref(),
+        ]))
+        .await
     }
 
     /// ファイルを削除する。
@@ -228,8 +307,20 @@ mod test_file {
                 name: "Contract.pdf".to_owned(),
                 sha1: Some("85136c79cbf9fe36bb9d05d0639c70c265c18d37".to_owned()),
                 file_version: Some(FileVersion {
-                    id: "67890".to_owned(),
+                    id: FileVersionId::new("67890"),
                     sha1: Some("85136c79cbf9fe36bb9d05d0639c70c265c18d37".to_owned()),
+                    name: None,
+                    size: None,
+                    version_number: None,
+                    created_at: None,
+                    modified_at: None,
+                    modified_by: None,
+                    trashed_at: None,
+                    trashed_by: None,
+                    restored_at: None,
+                    restored_by: None,
+                    purged_at: None,
+                    uploader_display_name: None,
                 }),
                 description: Some("Contract for the project".to_owned()),
                 size: Some(629_644),
@@ -496,6 +587,113 @@ mod test_delete_file {
         client.delete_file(&FileId::new("123"), None).await?;
 
         assert_eq!(delete_requests(&server).await.len(), 2);
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod test_file_version {
+    use serde_json::json;
+    use time::macros::datetime;
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{method, path},
+    };
+
+    use super::*;
+    use crate::{
+        BoxClientError, UserId,
+        test_support::{create_client, mount_token, short_retry},
+    };
+
+    /// `GET /files/{file_id}/versions/{file_version_id}`を呼び出し、バージョンの属性をデシリアライズすることを確認
+    #[tokio::test]
+    async fn test_file_version() -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        let user = json!({"type": "user", "id": "33224", "name": "Test User", "login": "user@example.com"});
+        Mock::given(method("GET"))
+            .and(path("/2.0/files/12345/versions/67890"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "type": "file_version",
+                "id": "67890",
+                "sha1": "85136c79cbf9fe36bb9d05d0639c70c265c18d37",
+                "name": "Contract.pdf",
+                "size": 629_644,
+                "version_number": "2",
+                "created_at": "2012-12-12T10:53:43-08:00",
+                "modified_at": "2012-12-12T11:15:04-08:00",
+                "modified_by": user,
+                "trashed_at": null,
+                "trashed_by": null,
+                "restored_at": null,
+                "restored_by": null,
+                "purged_at": null,
+                "uploader_display_name": "Test User",
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = create_client(&server, short_retry(0)?).await?;
+
+        let version = client
+            .file_version(&FileId::new("12345"), &FileVersionId::new("67890"))
+            .await?;
+
+        assert_eq!(
+            version,
+            FileVersion {
+                id: FileVersionId::new("67890"),
+                sha1: Some("85136c79cbf9fe36bb9d05d0639c70c265c18d37".to_owned()),
+                name: Some("Contract.pdf".to_owned()),
+                size: Some(629_644),
+                version_number: Some("2".to_owned()),
+                created_at: Some(datetime!(2012-12-12 10:53:43 -08:00)),
+                modified_at: Some(datetime!(2012-12-12 11:15:04 -08:00)),
+                modified_by: Some(UserMini {
+                    id: UserId::new("33224"),
+                    user_type: "user".to_owned(),
+                    name: Some("Test User".to_owned()),
+                    login: Some("user@example.com".to_owned()),
+                }),
+                trashed_at: None,
+                trashed_by: None,
+                restored_at: None,
+                restored_by: None,
+                purged_at: None,
+                uploader_display_name: Some("Test User".to_owned()),
+            }
+        );
+
+        Ok(())
+    }
+
+    /// バージョンが存在しない場合は、BOXのエラーレスポンスを返すことを確認
+    #[tokio::test]
+    async fn test_file_version_not_found() -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        Mock::given(method("GET"))
+            .and(path("/2.0/files/12345/versions/999"))
+            .respond_with(ResponseTemplate::new(404).set_body_json(json!({
+                "type": "error",
+                "status": 404,
+                "code": "not_found",
+                "message": "Not Found",
+            })))
+            .mount(&server)
+            .await;
+        let client = create_client(&server, short_retry(0)?).await?;
+
+        let result = client
+            .file_version(&FileId::new("12345"), &FileVersionId::new("999"))
+            .await;
+
+        assert!(
+            matches!(&result, Err(BoxClientError::Api(e)) if e.status == 404),
+            "result: {result:?}"
+        );
 
         Ok(())
     }

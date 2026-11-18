@@ -98,6 +98,15 @@
 - BOX API: `GET /files/{file_id}`
 - ファイル情報を取得する。
 
+#### ファイルのバージョン情報の取得
+
+- メソッド: `BoxClient::file_version`
+- BOX API: `GET /files/{file_id}/versions/{file_version_id}`
+- ファイルの特定のバージョンの情報を取得する。
+  BOXは、プレミアムアカウントのユーザーのファイルだけにバージョンを記録する。
+- ファイル情報に含まれるバージョン（`File::file_version`）と同じ`FileVersion`型で返す。
+  ファイル情報に含まれるバージョンはIDとSHA-1ハッシュ値だけを持つため、それ以外の属性は`Option`で受け取る。
+
 #### ファイルの削除
 
 - メソッド: `BoxClient::delete_file`
