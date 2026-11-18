@@ -29,7 +29,9 @@ mod retry;
 #[cfg(test)]
 mod test_support;
 
-pub use api::files::{File, FileVersion};
+pub use api::files::{
+    File, FileVersion, FileVersionsPage, ListFileVersionsOptions, MAX_FILE_VERSIONS_OFFSET,
+};
 pub use api::folders::{
     CopyFolderOptions, DeleteFolderOptions, Folder, ItemSort, ItemsPage, ListItemsOptions,
     MAX_FOLDER_DESCRIPTION_CHARS, MAX_ITEMS_LIMIT, MoveFolderDestination, SortDirection,

@@ -107,6 +107,21 @@
 - ファイル情報に含まれるバージョン（`File::file_version`）と同じ`FileVersion`型で返す。
   ファイル情報に含まれるバージョンはIDとSHA-1ハッシュ値だけを持つため、それ以外の属性は`Option`で受け取る。
 
+#### ファイルのバージョンのリスト
+
+- メソッド: `BoxClient::list_file_versions`および`BoxClient::list_all_file_versions`
+- BOX API: `GET /files/{file_id}/versions`
+- ファイルの過去のバージョンをリストする。
+  BOXは、プレミアムアカウントのユーザーのファイルだけにバージョンを記録する。
+  現在のバージョンのIDは、`BoxClient::file_information`で取得したファイル情報の`file_version`で確認できる。
+- BOXは、バージョンのリストをオフセット方式でページ送りする。
+  - `list_file_versions`は、指定したオフセットから1ページ分のバージョンを返す。
+  - `list_all_file_versions`は、取得したバージョンの数が`total_count`に達するまでページを送り、すべてのバージョンを返す。
+- 1ページで取得するバージョン数の上限を、`ListFileVersionsOptions`で指定する。
+  範囲外の値を指定した場合は、リクエストを送信せずにエラーを返す。
+- BOXはオフセットが10000（`MAX_FILE_VERSIONS_OFFSET`）を超えるリクエストを拒否するため、範囲外のオフセットを指定した場合は、リクエストを送信せずにエラーを返す。
+  `list_all_file_versions`で次のページのオフセットが10000を超える場合は、一部のバージョンだけを返さないようにエラーを返す。
+
 #### ファイルの削除
 
 - メソッド: `BoxClient::delete_file`
