@@ -11,14 +11,15 @@ use futures_util::stream::{FuturesUnordered, StreamExt as _};
 use garde::Validate;
 use reqwest::{
     Response, StatusCode,
-    header::{CONTENT_RANGE, HeaderName, HeaderValue},
+    header::{CONTENT_RANGE, HeaderName, HeaderValue, IF_MATCH},
 };
 use serde::{Deserialize, Serialize};
 use sha1::{Digest as _, Sha1};
 use tokio::io::AsyncReadExt as _;
 
 use crate::{
-    BoxClient, BoxClientError, BoxClientResult, File, FolderId, ParentFolder, ValidationError,
+    BoxClient, BoxClientError, BoxClientResult, File, FileId, FolderId, ParentFolder,
+    ValidationError,
     api::types::validate_item_name,
     request::ApiRequest,
     retry::{AttemptError, Idempotency, parse_retry_after, read_json},
@@ -70,6 +71,138 @@ impl<'a> UploadFileOptions<'a> {
     }
 }
 
+/// ファイルの内容の更新のオプション
+///
+/// # Examples
+///
+/// ```
+/// use box_client::UpdateFileContentOptions;
+///
+/// let options = UpdateFileContentOptions::default()
+///     .with_name("report-v2.pdf")
+///     .with_etag("1");
+/// assert_eq!(options.name, Some("report-v2.pdf"));
+/// assert_eq!(options.etag, Some("1"));
+/// ```
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct UpdateFileContentOptions<'a> {
+    /// 新しいファイル名
+    ///
+    /// 指定した場合、BOXは内容の更新とともにファイル名を変更する。`None`の場合はファイル名を変更しない。
+    pub name: Option<&'a str>,
+
+    /// 最後に取得したファイルの`ETag`
+    ///
+    /// 指定した場合は、`If-Match`ヘッダーで送信する。ファイルが`ETag`の取得後に変更されていると、
+    /// BOXはファイルの内容を更新せずに412を返す。
+    pub etag: Option<&'a str>,
+}
+
+impl<'a> UpdateFileContentOptions<'a> {
+    /// 新しいファイル名を設定する。
+    #[must_use]
+    pub fn with_name(mut self, name: &'a str) -> Self {
+        self.name = Some(name);
+        self
+    }
+
+    /// 最後に取得したファイルの`ETag`を設定する。
+    #[must_use]
+    pub fn with_etag(mut self, etag: &'a str) -> Self {
+        self.etag = Some(etag);
+        self
+    }
+}
+
+/// アップロードの対象
+///
+/// 新しいファイルのアップロードと、既存のファイルの内容の更新では、呼び出すAPIと送信する属性だけが異なる。
+#[derive(Debug, Clone, Copy)]
+enum UploadTarget<'a> {
+    /// 新しいファイル
+    NewFile {
+        /// アップロード先の親フォルダのID
+        parent_id: &'a FolderId,
+
+        /// ファイル名
+        name: &'a str,
+    },
+
+    /// 既存のファイルの新しいバージョン
+    NewVersion {
+        /// 内容を更新するファイルのID
+        file_id: &'a FileId,
+
+        /// 新しいファイル名。`None`の場合はファイル名を変更しない。
+        name: Option<&'a str>,
+
+        /// 最後に取得したファイルの`ETag`
+        etag: Option<&'a str>,
+    },
+}
+
+impl UploadTarget<'_> {
+    /// 1回のリクエストでアップロードするAPIのパス要素を返す。
+    fn direct_upload_path(&self) -> Vec<&str> {
+        match self {
+            Self::NewFile { .. } => vec!["files", "content"],
+            Self::NewVersion { file_id, .. } => vec!["files", file_id.as_ref(), "content"],
+        }
+    }
+
+    /// 1回のリクエストでアップロードする場合の、`attributes`パートのJSONを返す。
+    ///
+    /// # Errors
+    ///
+    /// JSONにシリアライズできない場合は、[`BoxClientError::SerializeBody`]を返す。
+    fn direct_upload_attributes(&self) -> BoxClientResult<Vec<u8>> {
+        match *self {
+            Self::NewFile { parent_id, name } => serde_json::to_vec(&UploadAttributes {
+                name,
+                parent: ParentFolder {
+                    id: parent_id.clone(),
+                },
+            }),
+            Self::NewVersion { name, .. } => serde_json::to_vec(&UploadVersionAttributes { name }),
+        }
+        .map_err(BoxClientError::SerializeBody)
+    }
+
+    /// アップロードセッションの作成リクエストを返す。
+    ///
+    /// # Errors
+    ///
+    /// ボディをJSONにシリアライズできない場合は、[`BoxClientError::SerializeBody`]を返す。
+    fn create_upload_session_request(&self, file_size: u64) -> BoxClientResult<ApiRequest<'_>> {
+        match *self {
+            Self::NewFile { parent_id, name } => ApiRequest::post(["files", "upload_sessions"])
+                .upload_host()
+                .json(&CreateUploadSessionBody {
+                    folder_id: parent_id,
+                    file_size,
+                    file_name: name,
+                }),
+            Self::NewVersion { file_id, name, .. } => {
+                ApiRequest::post(["files", file_id.as_ref(), "upload_sessions"])
+                    .upload_host()
+                    .json(&CreateVersionUploadSessionBody {
+                        file_size,
+                        file_name: name,
+                    })
+            }
+        }
+    }
+
+    /// `If-Match`ヘッダーで送信する`ETag`を返す。
+    fn etag(&self) -> Option<&str> {
+        match *self {
+            Self::NewFile { .. } => None,
+            Self::NewVersion { etag, .. } => etag,
+        }
+    }
+}
+
 /// BOXに保存するファイル名
 #[derive(Debug, Validate)]
 struct FileName<'a> {
@@ -99,6 +232,16 @@ struct UploadAttributes<'a> {
 
     /// アップロード先の親フォルダ
     parent: ParentFolder,
+}
+
+/// 1回のリクエストで新しいバージョンをアップロードする場合の、ファイルの属性
+#[derive(Debug, Serialize)]
+struct UploadVersionAttributes<'a> {
+    /// 新しいファイル名
+    ///
+    /// `None`の場合は送信せず、BOXはファイル名を変更しない。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<&'a str>,
 }
 
 /// アップロードしたファイルのリスト
@@ -135,6 +278,19 @@ struct CreateUploadSessionBody<'a> {
 
     /// ファイル名
     file_name: &'a str,
+}
+
+/// 既存のファイルの新しいバージョンをアップロードする、アップロードセッションの作成リクエストのボディ
+#[derive(Debug, Serialize)]
+struct CreateVersionUploadSessionBody<'a> {
+    /// ファイルのバイト数
+    file_size: u64,
+
+    /// 新しいファイル名
+    ///
+    /// `None`の場合は送信せず、BOXはファイル名を変更しない。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    file_name: Option<&'a str>,
 }
 
 /// アップロードセッション
@@ -343,23 +499,106 @@ impl BoxClient {
         };
         validate_file_name(name)?;
 
+        self.upload(path, UploadTarget::NewFile { parent_id, name }, threshold)
+            .await
+    }
+
+    /// ファイルの内容を更新する。
+    ///
+    /// BOXは、ファイルの新しいバージョンとして内容を保存し、以前の内容をバージョン履歴に残す。
+    ///
+    /// ファイルサイズが[`CHUNKED_UPLOAD_THRESHOLD`]以下の場合は、ファイル全体をメモリに読み込み、
+    /// 1回のリクエストでアップロードする（`POST /files/{file_id}/content`）。
+    /// [`CHUNKED_UPLOAD_THRESHOLD`]を超える場合は、分割アップロードのAPIを使用する
+    /// （`POST /files/{file_id}/upload_sessions`で作成したアップロードセッションに部分をアップロードしてコミットする）。
+    /// 分割アップロードの進め方、冪等性および失敗した場合の扱いは、[`BoxClient::upload_file`]と同じである。
+    ///
+    /// `options.etag`を指定した場合は、1回のリクエストでのアップロード、または分割アップロードのコミットで、
+    /// `If-Match`ヘッダーとして送信する。
+    ///
+    /// # Arguments
+    ///
+    /// - `file_id`: 内容を更新するファイルのID
+    /// - `path`: 新しい内容のファイルのパス
+    /// - `options`: 新しいファイル名および`ETag`のオプション
+    ///
+    /// # Errors
+    ///
+    /// `options.name`をBOXが拒否する場合は、リクエストを送信せずに[`BoxClientError::InvalidRequestBody`]を返す。
+    /// `options.etag`に使用できない文字が含まれる場合は、[`BoxClientError::InvalidHeaderValue`]を返す。
+    /// ファイルを読み込めない場合は、[`BoxClientError::ReadFile`]を返す。
+    /// BOXがエラーレスポンスを返した場合は、[`BoxClientError::Api`]を返す。主なステータスは次のとおり。
+    ///
+    /// - 404: ファイルが存在しない、またはアクセスする権限がない。
+    /// - 409: `options.name`と同じ名前の項目が親フォルダに存在する、またはストレージの空き容量がない。
+    /// - 412: `options.etag`がファイルの現在の`ETag`と一致しない。
+    ///
+    /// 分割アップロードのコミットで、BOXが部分の処理を終えないまま、コミットの再送の上限に達した場合は、
+    /// [`BoxClientError::UnexpectedResponse`]を返す。
+    ///
+    /// 再試行できないエラーが発生した場合、または再試行回数の上限に達した場合はエラーを返す。
+    /// 5xxまたはタイムアウトでエラーを返した場合は、BOXがファイルの内容を更新した可能性がある。
+    /// したがって、[`BoxClient::file_information`]でファイルのバージョンを確認する。
+    pub async fn update_file_content(
+        &self,
+        file_id: &FileId,
+        path: impl AsRef<Path>,
+        options: &UpdateFileContentOptions<'_>,
+    ) -> BoxClientResult<File> {
+        self.update_file_content_with_threshold(
+            file_id,
+            path.as_ref(),
+            options,
+            CHUNKED_UPLOAD_THRESHOLD,
+        )
+        .await
+    }
+
+    /// 分割アップロードに切り替えるファイルサイズを指定して、ファイルの内容を更新する。
+    ///
+    /// テストで大きなファイルを作成せずに分割アップロードを確認できるように、閾値を引数で受け取る。
+    async fn update_file_content_with_threshold(
+        &self,
+        file_id: &FileId,
+        path: &Path,
+        options: &UpdateFileContentOptions<'_>,
+        threshold: u64,
+    ) -> BoxClientResult<File> {
+        if let Some(name) = options.name {
+            validate_file_name(name)?;
+        }
+
+        let target = UploadTarget::NewVersion {
+            file_id,
+            name: options.name,
+            etag: options.etag,
+        };
+        self.upload(path, target, threshold).await
+    }
+
+    /// ファイルサイズに応じて、1回のリクエストまたは分割アップロードのAPIでアップロードする。
+    async fn upload(
+        &self,
+        path: &Path,
+        target: UploadTarget<'_>,
+        threshold: u64,
+    ) -> BoxClientResult<File> {
         let mut file = tokio::fs::File::open(path)
             .await
             .map_err(read_file_error(path))?;
         let size = file.metadata().await.map_err(read_file_error(path))?.len();
 
         let uploaded = if size <= threshold {
-            self.upload_file_directly(path, &mut file, name, parent_id)
-                .await?
+            self.upload_file_directly(path, &mut file, &target).await?
         } else {
-            self.upload_file_in_chunks(path, &mut file, size, name, parent_id)
+            self.upload_file_in_chunks(path, &mut file, size, &target)
                 .await?
         };
 
         tracing::debug!(
             path = %path.display(),
             size,
-            parent_id = parent_id.as_ref(),
+            ?target,
             file_id = uploaded.id.as_ref(),
             chunked = threshold < size,
             "uploaded file"
@@ -377,16 +616,9 @@ impl BoxClient {
         &self,
         path: &Path,
         file: &mut tokio::fs::File,
-        name: &str,
-        parent_id: &FolderId,
+        target: &UploadTarget<'_>,
     ) -> BoxClientResult<File> {
-        let attributes = serde_json::to_vec(&UploadAttributes {
-            name,
-            parent: ParentFolder {
-                id: parent_id.clone(),
-            },
-        })
-        .map_err(BoxClientError::SerializeBody)?;
+        let attributes = target.direct_upload_attributes()?;
         let boundary = format!("box-client-{}", uuid::Uuid::new_v4().simple());
 
         let mut body = Vec::new();
@@ -419,10 +651,13 @@ impl BoxClient {
         let content_type =
             HeaderValue::from_str(&format!("multipart/form-data; boundary={boundary}"))
                 .map_err(BoxClientError::InvalidHeaderValue)?;
-        let request = ApiRequest::post(["files", "content"])
+        let mut request = ApiRequest::post(target.direct_upload_path())
             .upload_host()
             .header(CONTENT_MD5, &content_sha1)?
             .body(content_type, Bytes::from(body));
+        if let Some(etag) = target.etag() {
+            request = request.header(IF_MATCH, etag)?;
+        }
 
         let files: FileCollection = self.send_json(request).await?;
         files.into_first()
@@ -436,16 +671,9 @@ impl BoxClient {
         path: &Path,
         file: &mut tokio::fs::File,
         size: u64,
-        name: &str,
-        parent_id: &FolderId,
+        target: &UploadTarget<'_>,
     ) -> BoxClientResult<File> {
-        let request = ApiRequest::post(["files", "upload_sessions"])
-            .upload_host()
-            .json(&CreateUploadSessionBody {
-                folder_id: parent_id,
-                file_size: size,
-                file_name: name,
-            })?;
+        let request = target.create_upload_session_request(size)?;
         let session: UploadSession = self.send_json(request).await?;
         tracing::debug!(
             upload_session_id = session.id,
@@ -455,7 +683,7 @@ impl BoxClient {
         );
 
         let result = self
-            .upload_parts_and_commit(path, file, size, &session)
+            .upload_parts_and_commit(path, file, size, &session, target.etag())
             .await;
         if result.is_err() {
             self.abort_upload_session(&session.id).await;
@@ -473,6 +701,7 @@ impl BoxClient {
         file: &mut tokio::fs::File,
         size: u64,
         session: &UploadSession,
+        etag: Option<&str>,
     ) -> BoxClientResult<File> {
         // 部分のサイズが0の場合は、ファイルを読み進められず無限ループになるため、BOXの応答を不正として扱う。
         if session.part_size == 0 {
@@ -526,7 +755,8 @@ impl BoxClient {
         // 部分は完了した順に並ぶため、コミットの前にファイルの先頭からの位置の順に並べ替える。
         parts.sort_by_key(|part| part.offset);
         let digest = sha1_digest_header(&file_hasher.finalize());
-        self.commit_upload_session(session, &digest, &parts).await
+        self.commit_upload_session(session, &digest, &parts, etag)
+            .await
     }
 
     /// 部分をアップロードする。
@@ -561,19 +791,25 @@ impl BoxClient {
     /// BOXが部分の処理を終えていないことを示す202を返した場合は、`Retry-After`ヘッダーが示す時間だけ待機してから、
     /// コミットを再送する。`Retry-After`ヘッダーがない場合、または待機時間の上限を超える場合は、
     /// 再試行設定に従って待機時間を決める。
+    ///
+    /// `etag`を指定した場合は、`If-Match`ヘッダーで送信する。
     async fn commit_upload_session(
         &self,
         session: &UploadSession,
         digest: &str,
         parts: &[UploadedPart],
+        etag: Option<&str>,
     ) -> BoxClientResult<File> {
         let body = CommitUploadSessionBody { parts };
         let mut polls = 0;
         loop {
-            let request = ApiRequest::post(["files", "upload_sessions", &session.id, "commit"])
+            let mut request = ApiRequest::post(["files", "upload_sessions", &session.id, "commit"])
                 .upload_host()
                 .header(DIGEST, digest)?
                 .json(&body)?;
+            if let Some(etag) = etag {
+                request = request.header(IF_MATCH, etag)?;
+            }
             let retry_after = match self.send(request, read_commit_response).await? {
                 CommitOutcome::Committed(response) => return response.into_file(),
                 CommitOutcome::Processing { retry_after } => retry_after,
@@ -1068,6 +1304,254 @@ mod test_upload_file {
             "result: {result:?}"
         );
         assert_eq!(requests(&server, "DELETE", &session_path).await.len(), 1);
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod test_update_file_content {
+    use std::path::PathBuf;
+
+    use rstest::rstest;
+    use serde_json::json;
+    use tempfile::TempDir;
+    use wiremock::{
+        Mock, MockServer, Request, ResponseTemplate,
+        matchers::{body_json, header, method, path},
+    };
+
+    use super::*;
+    use crate::test_support::{
+        UPLOAD_BASE_PATH, create_client, mount_token, request_count, short_retry,
+    };
+
+    /// 分割アップロードに切り替えるファイルサイズ
+    const THRESHOLD: u64 = 20;
+
+    /// 分割アップロードでアップロードするファイルの内容
+    const CHUNKED_CONTENT: &[u8] = b"abcdefghijklmnopqrstuvwxy";
+
+    /// 分割アップロードの部分のサイズ
+    const PART_SIZE: usize = 10;
+
+    /// アップロードセッションのID
+    const SESSION_ID: &str = "S1";
+
+    /// アップロードのAPIのパスを返す。
+    fn upload_path(suffix: &str) -> String {
+        format!("{UPLOAD_BASE_PATH}{suffix}")
+    }
+
+    /// 一時ディレクトリに、指定した内容のファイルを作成する。
+    fn create_file(content: &[u8]) -> anyhow::Result<(TempDir, PathBuf)> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("report.txt");
+        std::fs::write(&path, content)?;
+        Ok((dir, path))
+    }
+
+    /// ファイル情報のJSONを返す。
+    fn file_json(name: &str) -> serde_json::Value {
+        json!({"type": "file", "id": "123", "etag": "2", "name": name})
+    }
+
+    /// 指定したメソッドとパスのリクエストを返す。
+    async fn requests(server: &MockServer, http_method: &str, request_path: &str) -> Vec<Request> {
+        server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|r| r.method.as_str() == http_method && r.url.path() == request_path)
+            .collect()
+    }
+
+    /// リクエストの`If-Match`ヘッダーを返す。
+    fn if_match(request: &Request) -> Option<String> {
+        request
+            .headers
+            .get("if-match")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned)
+    }
+
+    /// 1回のリクエストで、`POST /files/{file_id}/content`に新しい内容を送信することを確認
+    ///
+    /// 新しいファイル名を指定した場合だけ`attributes`パートに名前を含め、`ETag`を指定した場合だけ
+    /// `If-Match`ヘッダーを送信することも確認する。
+    #[rstest]
+    #[case::default(UpdateFileContentOptions::default(), "{}", None)]
+    #[case::name_and_etag(
+        UpdateFileContentOptions::default().with_name("report-v2.txt").with_etag("1"),
+        r#"{"name":"report-v2.txt"}"#,
+        Some("1")
+    )]
+    #[tokio::test]
+    async fn test_update_file_content_directly(
+        #[case] options: UpdateFileContentOptions<'static>,
+        #[case] expected_attributes: &str,
+        #[case] expected_if_match: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let (_dir, file_path) = create_file(b"hello")?;
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        let content_path = upload_path("/files/123/content");
+        Mock::given(method("POST"))
+            .and(path(content_path.as_str()))
+            // "hello"のSHA-1
+            .and(header(
+                "content-md5",
+                "aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "total_count": 1,
+                "entries": [file_json("report.txt")],
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = create_client(&server, short_retry(0)?).await?;
+
+        let file = client
+            .update_file_content_with_threshold(
+                &FileId::new("123"),
+                &file_path,
+                &options,
+                THRESHOLD,
+            )
+            .await?;
+
+        assert_eq!(file.id, FileId::new("123"));
+        let requests = requests(&server, "POST", &content_path).await;
+        let [request] = requests.as_slice() else {
+            anyhow::bail!("expected one request, got {}", requests.len());
+        };
+        assert_eq!(if_match(request).as_deref(), expected_if_match);
+        let body = String::from_utf8_lossy(&request.body);
+        let attributes = format!("\r\n\r\n{expected_attributes}\r\n");
+        let attributes_at = body.find(&attributes);
+        let content_at = body.find("\r\n\r\nhello\r\n");
+        assert!(
+            matches!((attributes_at, content_at), (Some(a), Some(c)) if a < c),
+            "body: {body}"
+        );
+
+        Ok(())
+    }
+
+    /// BOXが拒否する新しいファイル名を指定した場合は、リクエストを送信せずにエラーを返すことを確認
+    #[tokio::test]
+    async fn test_update_file_content_rejects_invalid_name() -> anyhow::Result<()> {
+        let (_dir, file_path) = create_file(b"hello")?;
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        let client = create_client(&server, short_retry(0)?).await?;
+        let requests_before = request_count(&server).await;
+
+        let result = client
+            .update_file_content(
+                &FileId::new("123"),
+                &file_path,
+                &UpdateFileContentOptions::default().with_name("a/b"),
+            )
+            .await;
+
+        assert!(
+            matches!(result, Err(BoxClientError::InvalidRequestBody(_))),
+            "result: {result:?}"
+        );
+        assert_eq!(request_count(&server).await, requests_before);
+
+        Ok(())
+    }
+
+    /// 閾値を超える場合は、`POST /files/{file_id}/upload_sessions`でアップロードセッションを作成し、
+    /// 部分をアップロードしてから、`If-Match`ヘッダーを付けてコミットすることを確認
+    #[tokio::test]
+    async fn test_update_file_content_in_chunks() -> anyhow::Result<()> {
+        let (_dir, file_path) = create_file(CHUNKED_CONTENT)?;
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        Mock::given(method("POST"))
+            .and(path(upload_path("/files/123/upload_sessions")))
+            .and(body_json(json!({
+                "file_size": CHUNKED_CONTENT.len(),
+                "file_name": "report-v2.txt",
+            })))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+                "type": "upload_session",
+                "id": SESSION_ID,
+                "part_size": PART_SIZE,
+                "total_parts": 3,
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path(upload_path(&format!(
+                "/files/upload_sessions/{SESSION_ID}"
+            ))))
+            .respond_with(|request: &Request| {
+                // `Content-Range`ヘッダーから部分の位置とサイズを取り出し、アップロードした部分として返す。
+                let range = request
+                    .headers
+                    .get("content-range")
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or_default();
+                let (start, end) = range
+                    .trim_start_matches("bytes ")
+                    .split_once('/')
+                    .and_then(|(r, _)| r.split_once('-'))
+                    .and_then(|(s, e)| Some((s.parse::<u64>().ok()?, e.parse::<u64>().ok()?)))
+                    .unwrap_or_default();
+                ResponseTemplate::new(200).set_body_json(json!({"part": {
+                    "part_id": format!("P{start}"),
+                    "offset": start,
+                    "size": end - start + 1,
+                }}))
+            })
+            .expect(3)
+            .mount(&server)
+            .await;
+        let commit_path = upload_path(&format!("/files/upload_sessions/{SESSION_ID}/commit"));
+        Mock::given(method("POST"))
+            .and(path(commit_path.as_str()))
+            .and(header("if-match", "1"))
+            .and(header(
+                "digest",
+                sha1_digest_header(&Sha1::digest(CHUNKED_CONTENT)).as_str(),
+            ))
+            .and(body_json(json!({"parts": [
+                {"part_id": "P0", "offset": 0, "size": 10},
+                {"part_id": "P10", "offset": 10, "size": 10},
+                {"part_id": "P20", "offset": 20, "size": 5},
+            ]})))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+                "total_count": 1,
+                "entries": [file_json("report-v2.txt")],
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = create_client(&server, short_retry(0)?).await?;
+        let options = UpdateFileContentOptions::default()
+            .with_name("report-v2.txt")
+            .with_etag("1");
+
+        let file = client
+            .update_file_content_with_threshold(
+                &FileId::new("123"),
+                &file_path,
+                &options,
+                THRESHOLD,
+            )
+            .await?;
+
+        assert_eq!(file.name, "report-v2.txt");
+        // アップロードセッションの作成では、`If-Match`ヘッダーを送信しない。
+        let sessions = requests(&server, "POST", &upload_path("/files/123/upload_sessions")).await;
+        assert!(sessions.iter().all(|r| if_match(r).is_none()));
 
         Ok(())
     }

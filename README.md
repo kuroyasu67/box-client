@@ -141,6 +141,25 @@
   部分のアップロードは、同じ範囲を同じ内容で送り直すため、冪等なリクエストとして送信する。
 - 1回のリクエストで送信するデータが大きいため、`BoxClientTimeout::request_timeout`は、通信速度に応じて、50MiBまたは部分のサイズを送信できる長さにする。
 
+#### ファイルの内容の更新
+
+- メソッド: `BoxClient::update_file_content`
+- BOX API
+  - `POST /files/{file_id}/content`
+  - `POST /files/{file_id}/upload_sessions`
+  - `PUT /files/upload_sessions/{upload_session_id}`
+  - `POST /files/upload_sessions/{upload_session_id}/commit`
+  - `DELETE /files/upload_sessions/{upload_session_id}`
+- ローカルのファイルの内容で、BOXのファイルの内容を更新する。
+  BOXは、ファイルの新しいバージョンとして内容を保存し、以前の内容をバージョン履歴に残す。
+- 新しいファイル名とETagを、`UpdateFileContentOptions`で指定できる。
+  - 新しいファイル名を指定した場合、BOXは内容の更新とともにファイル名を変更する。
+    指定しない場合は、ファイル名を変更しない。
+  - ETagを指定した場合は、1回のリクエストでのアップロード、または分割アップロードのコミットで、`If-Match`ヘッダーとして送信する。
+- ファイルサイズによるアップロード方法の切り替え、分割アップロードの進め方、および冪等性は、「[ファイルのアップロード](#ファイルのアップロード)」と同じである。
+  分割アップロードでは、アップロードセッションを`POST /files/{file_id}/upload_sessions`で作成する。
+- 新しいファイル名をBOXが拒否する場合は、リクエストを送信せずにエラーを返す。
+
 ### Webリンク
 
 #### Webリンク情報の取得
