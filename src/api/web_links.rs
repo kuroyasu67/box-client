@@ -227,7 +227,7 @@ impl BoxClient {
     ///
     /// # Errors
     ///
-    /// URLが`http://`または`https://`で始まらない場合、Webリンク名をBOXが拒否する場合、
+    /// URLを解釈できない場合、URLが`http://`または`https://`で始まらない場合、Webリンク名をBOXが拒否する場合、
     /// または説明が[`MAX_DESCRIPTION_CHARS`]文字より長い場合は、
     /// リクエストを送信せずに[`BoxClientError::InvalidRequestBody`]を返す。
     /// BOXがエラーレスポンスを返した場合は、[`BoxClientError::Api`]を返す。
@@ -391,7 +391,7 @@ impl BoxClient {
     ///
     /// # Errors
     ///
-    /// URLが`http://`または`https://`で始まらない場合は、リクエストを送信せずに
+    /// URLを解釈できない場合、またはURLが`http://`もしくは`https://`で始まらない場合は、リクエストを送信せずに
     /// [`BoxClientError::InvalidRequestBody`]を返す。
     /// `options.etag`に使用できない文字が含まれる場合は、リクエストを送信せずに
     /// [`BoxClientError::InvalidHeaderValue`]を返す。
