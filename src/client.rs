@@ -8,7 +8,7 @@ use crate::{
     auth::{BOX_TOKEN_URL, TokenManager},
     config::BoxConfig,
     errors::{BoxClientError, BoxClientResult},
-    request::{ApiHost, ApiRequest},
+    request::{ApiHost, ApiRequest, HttpClientKind},
     retry::{
         AttemptError, Idempotency, RetryPolicy, classify_error_response, classify_transport_error,
         read_json, run_with_retry,
@@ -64,6 +64,24 @@ pub const MIN_UPLOAD_CONCURRENCY: usize = 1;
 /// 並列にアップロードする部分はそれぞれメモリに読み込むため、上限を設けてメモリの使用量も抑える。
 pub const MAX_UPLOAD_CONCURRENCY: usize = 5;
 
+/// 分割アップロードに切り替えるファイルサイズ（バイト）の既定値
+///
+/// この値を超えるファイルは、分割アップロードのAPIでアップロードする。
+/// BOXは、50MBを超えるファイルに分割アップロードを推奨しているため、指定できる最大値と同じ50MiBとする。
+pub const DEFAULT_CHUNKED_UPLOAD_THRESHOLD: u64 = MAX_CHUNKED_UPLOAD_THRESHOLD;
+
+/// 分割アップロードに切り替えるファイルサイズ（バイト）に指定できる最小値
+///
+/// 分割アップロードのAPIは20MB未満のファイルを拒否する。
+/// 分割アップロードするファイルが必ず20MB以上になるように、20MBより大きい20MiBを最小値とする。
+pub const MIN_CHUNKED_UPLOAD_THRESHOLD: u64 = 20 * 1024 * 1024;
+
+/// 分割アップロードに切り替えるファイルサイズ（バイト）に指定できる最大値
+///
+/// この値以下のファイルは、ファイル全体をメモリに読み込んで、1回のリクエストでアップロードする。
+/// BOXは、50MBを超えるファイルに分割アップロードを推奨しているため、50MiBを最大値とする。
+pub const MAX_CHUNKED_UPLOAD_THRESHOLD: u64 = 50 * 1024 * 1024;
+
 /// 分割アップロードのコミットで、BOXが処理中を示す202を返した場合に、コミットを再送する回数の上限の既定値
 ///
 /// BOXは、部分の処理を終えるまで202を返し続ける。大きいファイルでは処理に時間がかかるため、
@@ -97,7 +115,15 @@ pub const MAX_DOWNLOAD_POLLS_LIMIT: u32 = 100;
 /// [`BoxClient::send_empty`]に渡す。
 pub struct BoxClient {
     /// HTTPクライアント
+    ///
+    /// リクエスト全体に[`BoxClientTimeout::request_timeout`]を適用する。
     http_client: reqwest::Client,
+
+    /// ファイルのダウンロードに使用するHTTPクライアント
+    ///
+    /// ダウンロードはファイルサイズによって時間が大きく変わるため、リクエスト全体のタイムアウトを適用せずに、
+    /// 無通信の時間に[`BoxClientTimeout::download_read_timeout`]を適用する。
+    download_client: reqwest::Client,
 
     /// REST APIのベースURL
     api_base_url: Url,
@@ -110,6 +136,9 @@ pub struct BoxClient {
 
     /// 分割アップロードで、並列にアップロードする部分の数
     upload_concurrency: usize,
+
+    /// 分割アップロードに切り替えるファイルサイズ（バイト）
+    chunked_upload_threshold: u64,
 
     /// 分割アップロードのコミットで、BOXが202を返した場合にコミットを再送する回数の上限
     max_commit_polls: u32,
@@ -127,10 +156,12 @@ impl std::fmt::Debug for BoxClient {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("BoxClient")
             .field("http_client", &self.http_client)
+            .field("download_client", &self.download_client)
             .field("api_base_url", &self.api_base_url.as_str())
             .field("upload_base_url", &self.upload_base_url.as_str())
             .field("retry", &self.retry)
             .field("upload_concurrency", &self.upload_concurrency)
+            .field("chunked_upload_threshold", &self.chunked_upload_threshold)
             .field("max_commit_polls", &self.max_commit_polls)
             .field("max_download_polls", &self.max_download_polls)
             .finish_non_exhaustive()
@@ -151,6 +182,7 @@ impl BoxClient {
             retry: RetryPolicy::default(),
             refresh_before_expiry: DEFAULT_REFRESH_BEFORE_EXPIRY,
             upload_concurrency: DEFAULT_UPLOAD_CONCURRENCY,
+            chunked_upload_threshold: DEFAULT_CHUNKED_UPLOAD_THRESHOLD,
             max_commit_polls: DEFAULT_MAX_COMMIT_POLLS,
             max_download_polls: DEFAULT_MAX_DOWNLOAD_POLLS,
             api_base_url: None,
@@ -170,6 +202,12 @@ impl BoxClient {
     #[must_use]
     pub fn upload_concurrency(&self) -> usize {
         self.upload_concurrency
+    }
+
+    /// 分割アップロードに切り替えるファイルサイズ（バイト）を返す。
+    #[must_use]
+    pub fn chunked_upload_threshold(&self) -> u64 {
+        self.chunked_upload_threshold
     }
 
     /// 分割アップロードのコミットで、BOXが202を返した場合にコミットを再送する回数の上限を返す。
@@ -264,8 +302,11 @@ impl BoxClient {
                 .access_token()
                 .await
                 .map_err(AttemptError::Fatal)?;
-            let mut builder = self
-                .http_client
+            let http_client = match request.client {
+                HttpClientKind::Default => &self.http_client,
+                HttpClientKind::Download => &self.download_client,
+            };
+            let mut builder = http_client
                 .request(request.method.clone(), url.clone())
                 .bearer_auth(token.secret());
             for (name, value) in &request.headers {
@@ -322,6 +363,9 @@ pub struct BoxClientBuilder {
 
     /// 分割アップロードで、並列にアップロードする部分の数
     upload_concurrency: usize,
+
+    /// 分割アップロードに切り替えるファイルサイズ（バイト）
+    chunked_upload_threshold: u64,
 
     /// 分割アップロードのコミットで、BOXが202を返した場合にコミットを再送する回数の上限
     max_commit_polls: u32,
@@ -390,6 +434,34 @@ impl BoxClientBuilder {
             });
         }
         self.upload_concurrency = upload_concurrency;
+        Ok(self)
+    }
+
+    /// 分割アップロードに切り替えるファイルサイズ（バイト）を指定する。
+    /// 既定値は[`DEFAULT_CHUNKED_UPLOAD_THRESHOLD`]とする。
+    ///
+    /// この値以下のファイルは、ファイル全体をメモリに読み込んで、1回のリクエストでアップロードする。
+    /// この値を超えるファイルは、分割アップロードのAPIでアップロードする。
+    /// 値を小さくすると、1回のリクエストでアップロードするときに使用するメモリと、1回のリクエストで送信するデータを減らせる。
+    ///
+    /// # Errors
+    ///
+    /// `chunked_upload_threshold`が[`MIN_CHUNKED_UPLOAD_THRESHOLD`]以上[`MAX_CHUNKED_UPLOAD_THRESHOLD`]以下でない場合は、
+    /// [`BoxClientError::InvalidChunkedUploadThreshold`]を返す。
+    pub fn chunked_upload_threshold(
+        mut self,
+        chunked_upload_threshold: u64,
+    ) -> BoxClientResult<Self> {
+        if !(MIN_CHUNKED_UPLOAD_THRESHOLD..=MAX_CHUNKED_UPLOAD_THRESHOLD)
+            .contains(&chunked_upload_threshold)
+        {
+            return Err(BoxClientError::InvalidChunkedUploadThreshold {
+                chunked_upload_threshold,
+                min: MIN_CHUNKED_UPLOAD_THRESHOLD,
+                max: MAX_CHUNKED_UPLOAD_THRESHOLD,
+            });
+        }
+        self.chunked_upload_threshold = chunked_upload_threshold;
         Ok(self)
     }
 
@@ -475,6 +547,10 @@ impl BoxClientBuilder {
             .timeout(self.timeout.request_timeout)
             .connect_timeout(self.timeout.connect_timeout)
             .build()?;
+        let download_client = reqwest::Client::builder()
+            .read_timeout(self.timeout.download_read_timeout)
+            .connect_timeout(self.timeout.connect_timeout)
+            .build()?;
         let token_manager = Arc::new(TokenManager::new(
             http_client.clone(),
             &self.config,
@@ -486,10 +562,12 @@ impl BoxClientBuilder {
 
         Ok(BoxClient {
             http_client,
+            download_client,
             api_base_url,
             upload_base_url,
             retry: self.retry,
             upload_concurrency: self.upload_concurrency,
+            chunked_upload_threshold: self.chunked_upload_threshold,
             max_commit_polls: self.max_commit_polls,
             max_download_polls: self.max_download_polls,
             token_manager,
@@ -532,18 +610,34 @@ fn validate_max_polls(name: &'static str, max_polls: u32, limit: u32) -> BoxClie
 #[non_exhaustive]
 pub struct BoxClientTimeout {
     /// 接続の開始からレスポンスボディの受信完了までのタイムアウト
+    ///
+    /// ファイルのダウンロード以外のリクエストに適用する。
+    /// ファイルのアップロードでは、1回のリクエストで送信するデータを送信し終えられる長さにする。
     pub request_timeout: Duration,
 
     /// 接続が確立するまでのタイムアウト
+    ///
+    /// ファイルのダウンロードを含む、すべてのリクエストに適用する。
     pub connect_timeout: Duration,
+
+    /// ファイルのダウンロードで、データを受信しない状態が続いた場合のタイムアウト
+    ///
+    /// リクエストを送信してからレスポンスヘッダーを受信するまでの時間と、レスポンスボディのデータを受信する間隔に適用し、
+    /// データを受信するたびに計測をやり直す。
+    /// ダウンロードの時間はファイルサイズによって大きく変わるため、ダウンロードには
+    /// [`BoxClientTimeout::request_timeout`]を適用せず、このタイムアウトで通信が止まったことを検出する。
+    /// ダウンロード全体の時間を制限する場合は、呼び出し元が`tokio::time::timeout`などで制限する。
+    pub download_read_timeout: Duration,
 }
 
 impl Default for BoxClientTimeout {
-    /// レスポンスボディの受信完了までを30秒、接続の確立までを10秒でタイムアウトさせる設定を返す。
+    /// レスポンスボディの受信完了までを30秒、接続の確立までを10秒、
+    /// ダウンロードでデータを受信しない状態が30秒続いた場合にタイムアウトさせる設定を返す。
     fn default() -> Self {
         Self {
             request_timeout: Duration::from_secs(30),
             connect_timeout: Duration::from_secs(10),
+            download_read_timeout: Duration::from_secs(30),
         }
     }
 }
@@ -560,6 +654,13 @@ impl BoxClientTimeout {
     #[must_use]
     pub fn with_connect_timeout(mut self, connect_timeout: Duration) -> Self {
         self.connect_timeout = connect_timeout;
+        self
+    }
+
+    /// ファイルのダウンロードで、データを受信しない状態が続いた場合のタイムアウトを設定する。
+    #[must_use]
+    pub fn with_download_read_timeout(mut self, download_read_timeout: Duration) -> Self {
+        self.download_read_timeout = download_read_timeout;
         self
     }
 }
@@ -680,6 +781,63 @@ mod test_box_client {
                 "result: {result:?}"
             );
         }
+    }
+
+    /// 分割アップロードに切り替えるファイルサイズが最小値以上最大値以下の場合のみ、ビルダーに設定することを確認
+    #[rstest]
+    #[case::below_min(MIN_CHUNKED_UPLOAD_THRESHOLD - 1, false)]
+    #[case::min(MIN_CHUNKED_UPLOAD_THRESHOLD, true)]
+    #[case::max(MAX_CHUNKED_UPLOAD_THRESHOLD, true)]
+    #[case::above_max(MAX_CHUNKED_UPLOAD_THRESHOLD + 1, false)]
+    fn test_builder_validates_chunked_upload_threshold(
+        #[case] threshold: u64,
+        #[case] valid: bool,
+    ) {
+        let result = BoxClient::builder(test_config()).chunked_upload_threshold(threshold);
+
+        if valid {
+            assert!(
+                matches!(&result, Ok(builder) if builder.chunked_upload_threshold == threshold),
+                "result: {result:?}"
+            );
+        } else {
+            assert!(
+                matches!(
+                    &result,
+                    Err(BoxClientError::InvalidChunkedUploadThreshold {
+                        chunked_upload_threshold: t,
+                        min,
+                        max,
+                    }) if *t == threshold
+                        && *min == MIN_CHUNKED_UPLOAD_THRESHOLD
+                        && *max == MAX_CHUNKED_UPLOAD_THRESHOLD
+                ),
+                "result: {result:?}"
+            );
+        }
+    }
+
+    /// 分割アップロードに切り替えるファイルサイズを指定しない場合は既定値を、指定した場合はその値をBOXクライアントが返すことを確認
+    #[rstest]
+    #[case::default(None, DEFAULT_CHUNKED_UPLOAD_THRESHOLD)]
+    #[case::specified(Some(MIN_CHUNKED_UPLOAD_THRESHOLD), MIN_CHUNKED_UPLOAD_THRESHOLD)]
+    #[tokio::test]
+    async fn test_build_sets_chunked_upload_threshold(
+        #[case] specified: Option<u64>,
+        #[case] expected: u64,
+    ) -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        let mut builder = client_builder(&server, short_retry(0)?)?;
+        if let Some(threshold) = specified {
+            builder = builder.chunked_upload_threshold(threshold)?;
+        }
+
+        let client = builder.build().await?;
+
+        assert_eq!(client.chunked_upload_threshold(), expected);
+
+        Ok(())
     }
 
     /// 202を受け取った場合に再送する回数の上限が、指定できる最大値以下の場合のみ、ビルダーに設定することを確認

@@ -182,8 +182,12 @@ impl BoxClient {
     /// `Retry-After`ヘッダーがない場合、または待機時間の上限を超える場合は、
     /// 再試行設定に従って待機時間を決める。
     ///
-    /// [`BoxClientTimeout::request_timeout`](crate::BoxClientTimeout::request_timeout)は、内容の受信の完了までに適用される。
-    /// したがって、大きいファイルをダウンロードする場合は、通信速度に応じて、ファイル全体を受信できる長さにする。
+    /// ダウンロードの時間はファイルサイズによって大きく変わるため、
+    /// [`BoxClientTimeout::request_timeout`](crate::BoxClientTimeout::request_timeout)を適用しない。
+    /// 代わりに、データを受信しない状態が
+    /// [`BoxClientTimeout::download_read_timeout`](crate::BoxClientTimeout::download_read_timeout)だけ続いた場合にタイムアウトさせる。
+    /// ダウンロード全体の時間を制限する場合は、呼び出し元が`tokio::time::timeout`などで制限する。
+    /// futureを破棄した場合も、一時ファイルを削除する。
     ///
     /// # Arguments
     ///
@@ -215,7 +219,8 @@ impl BoxClient {
 
         let mut polls = 0;
         let size = loop {
-            let mut request = ApiRequest::get(["files", file_id.as_ref(), "content"]);
+            let mut request =
+                ApiRequest::get(["files", file_id.as_ref(), "content"]).download_client();
             if let Some(version) = options.version {
                 request = request.query("version", version.as_ref());
             }
@@ -265,9 +270,12 @@ impl BoxClient {
 
 #[cfg(test)]
 mod test_download_file {
-    use std::sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
+    use std::{
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+        time::Duration,
     };
 
     use reqwest::Url;
@@ -281,8 +289,11 @@ mod test_download_file {
     };
 
     use super::*;
-    use crate::test_support::{
-        TOKEN_PATH, client_builder, create_client, mount_token, short_retry, test_config,
+    use crate::{
+        BoxClientTimeout,
+        test_support::{
+            TOKEN_PATH, client_builder, create_client, mount_token, short_retry, test_config,
+        },
     };
 
     /// ダウンロードするファイルのID
@@ -573,6 +584,137 @@ mod test_download_file {
         });
 
         Ok((api_base_url, connections))
+    }
+
+    /// レスポンスヘッダーを返した後、`interval`ごとに内容を1バイトずつ返すHTTPサーバーを起動する。
+    ///
+    /// `stall`を指定した場合は、内容の半分を返した後に、その時間だけ何も返さずに待機する。
+    /// 戻り値は、サーバーを指すREST APIのベースURLである。
+    async fn start_paced_server(
+        interval: Duration,
+        stall: Option<Duration>,
+    ) -> anyhow::Result<Url> {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let api_base_url = Url::parse(&format!("http://{}/2.0", listener.local_addr()?))?;
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let mut buffer = Vec::new();
+                let mut chunk = [0u8; 1024];
+                while !buffer.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match stream.read(&mut chunk).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => buffer.extend_from_slice(&chunk[..n]),
+                    }
+                }
+                let header = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-length: {}\r\n\r\n",
+                    CONTENT.len()
+                );
+                let _ = stream.write_all(header.as_bytes()).await;
+                for (i, byte) in CONTENT.iter().enumerate() {
+                    if i == CONTENT.len() / 2
+                        && let Some(stall) = stall
+                    {
+                        tokio::time::sleep(stall).await;
+                    }
+                    tokio::time::sleep(interval).await;
+                    if stream.write_all(&[*byte]).await.is_err() {
+                        break;
+                    }
+                }
+            }
+        });
+
+        Ok(api_base_url)
+    }
+
+    /// テスト用のタイムアウト設定で、`api_base_url`のサーバーに接続するBOXクライアントを作成する。
+    async fn create_client_with_download_timeout(
+        token_server: &MockServer,
+        api_base_url: Url,
+        request_timeout: Duration,
+        download_read_timeout: Duration,
+    ) -> anyhow::Result<BoxClient> {
+        Ok(BoxClient::builder(test_config())
+            .timeout(
+                BoxClientTimeout::default()
+                    .with_request_timeout(request_timeout)
+                    .with_download_read_timeout(download_read_timeout),
+            )
+            .retry(short_retry(0)?)
+            .endpoints(api_base_url, format!("{}{TOKEN_PATH}", token_server.uri()))
+            .build()
+            .await?)
+    }
+
+    /// データを受信し続けている間は、ダウンロード全体の時間が`request_timeout`を超えてもタイムアウトしないことを確認
+    #[tokio::test]
+    async fn test_download_file_ignores_request_timeout() -> anyhow::Result<()> {
+        // 10バイトの内容を50ミリ秒ごとに返すため、受信には約500ミリ秒かかる。
+        const INTERVAL: Duration = Duration::from_millis(50);
+        let (_dir, file_path) = destination()?;
+        let token_server = MockServer::start().await;
+        mount_token(&token_server).await;
+        let api_base_url = start_paced_server(INTERVAL, None).await?;
+        let client = create_client_with_download_timeout(
+            &token_server,
+            api_base_url,
+            Duration::from_millis(200),
+            Duration::from_secs(1),
+        )
+        .await?;
+
+        let size = client
+            .download_file(
+                &FileId::new(FILE_ID),
+                &file_path,
+                &DownloadFileOptions::default(),
+            )
+            .await?;
+
+        assert_eq!(size, CONTENT.len() as u64);
+        assert_eq!(std::fs::read(&file_path)?, CONTENT);
+
+        Ok(())
+    }
+
+    /// データを受信しない状態が`download_read_timeout`を超えて続いた場合は、タイムアウトすることを確認
+    #[tokio::test]
+    async fn test_download_file_times_out_when_stalled() -> anyhow::Result<()> {
+        let (dir, file_path) = destination()?;
+        let token_server = MockServer::start().await;
+        mount_token(&token_server).await;
+        let api_base_url = start_paced_server(Duration::ZERO, Some(Duration::from_secs(2))).await?;
+        let client = create_client_with_download_timeout(
+            &token_server,
+            api_base_url,
+            Duration::from_secs(10),
+            Duration::from_millis(200),
+        )
+        .await?;
+
+        let started_at = std::time::Instant::now();
+        let result = client
+            .download_file(
+                &FileId::new(FILE_ID),
+                &file_path,
+                &DownloadFileOptions::default(),
+            )
+            .await;
+
+        assert!(
+            matches!(&result, Err(BoxClientError::Http(e)) if e.is_timeout()),
+            "result: {result:?}"
+        );
+        // サーバーが送信を再開するのを待たずに、タイムアウトしている。
+        assert!(
+            started_at.elapsed() < Duration::from_secs(2),
+            "elapsed: {:?}",
+            started_at.elapsed()
+        );
+        assert_eq!(file_names(&dir)?, Vec::<String>::new());
+
+        Ok(())
     }
 
     /// ボディの受信の途中で接続が切れた場合は、内容を先頭から受信し直して保存することを確認

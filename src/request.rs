@@ -48,6 +48,9 @@ pub struct ApiRequest<'a> {
 
     /// リクエストを送信するホスト
     pub(crate) host: ApiHost,
+
+    /// リクエストを送信するHTTPクライアントの種類
+    pub(crate) client: HttpClientKind,
 }
 
 /// リクエストボディ
@@ -60,6 +63,19 @@ pub(crate) struct RequestBody {
 
     /// ボディのバイト列
     pub(crate) bytes: Bytes,
+}
+
+/// リクエストを送信するHTTPクライアントの種類
+///
+/// HTTPクライアントによって、適用するタイムアウトが異なる。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HttpClientKind {
+    /// リクエスト全体に[`BoxClientTimeout::request_timeout`](crate::BoxClientTimeout::request_timeout)を適用するHTTPクライアント
+    Default,
+
+    /// 無通信の時間に[`BoxClientTimeout::download_read_timeout`](crate::BoxClientTimeout::download_read_timeout)を適用する、
+    /// ファイルのダウンロード用のHTTPクライアント
+    Download,
 }
 
 /// リクエストを送信するホスト
@@ -94,6 +110,7 @@ impl<'a> ApiRequest<'a> {
             body: None,
             idempotency,
             host: ApiHost::Api,
+            client: HttpClientKind::Default,
         }
     }
 
@@ -170,6 +187,13 @@ impl<'a> ApiRequest<'a> {
     #[must_use]
     pub(crate) fn upload_host(mut self) -> Self {
         self.host = ApiHost::Upload;
+        self
+    }
+
+    /// リクエストを、ファイルのダウンロード用のHTTPクライアントで送信する。
+    #[must_use]
+    pub(crate) fn download_client(mut self) -> Self {
+        self.client = HttpClientKind::Download;
         self
     }
 

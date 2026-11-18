@@ -214,11 +214,16 @@
 - ローカルのファイルを、指定したフォルダにアップロードする。
   BOXに保存するファイル名を`UploadFileOptions`で指定しない場合は、パスのファイル名を使用する。
 - BOXは、アップロードをREST APIとは別のホスト（`upload.box.com`）で受け付ける。
-- ファイルサイズが`CHUNKED_UPLOAD_THRESHOLD`（50MiB）以下の場合は、ファイル全体をメモリに読み込み、1回のリクエストでアップロードする。
+- 分割アップロードに切り替えるファイルサイズは、`BoxClientBuilder::chunked_upload_threshold`で指定する（既定値は`DEFAULT_CHUNKED_UPLOAD_THRESHOLD`の50MiB）。
+  20MiB（`MIN_CHUNKED_UPLOAD_THRESHOLD`）以上50MiB（`MAX_CHUNKED_UPLOAD_THRESHOLD`）以下で指定し、範囲外の値は`BoxClientBuilder::chunked_upload_threshold`でエラーになる。
+  分割アップロードのAPIは20MB未満のファイルを拒否するため、最小値を20MiBとする。
+  また、BOXは50MBを超えるファイルに分割アップロードを推奨しているため、最大値を50MiBとする。
+- ファイルサイズが分割アップロードに切り替えるファイルサイズ以下の場合は、ファイル全体をメモリに読み込み、1回のリクエストでアップロードする。
+  メモリの使用量を抑える場合、利用者は、分割アップロードに切り替えるファイルサイズを小さくする。
   - `attributes`パート（ファイル名と親フォルダ）、`file`パートの順に、multipartで送信する。
     BOXは、`attributes`パートが`file`パートより後にあるリクエストを拒否する。
   - ファイルの内容のSHA-1を`Content-MD5`ヘッダーで送信し、BOXに転送中の破損を検出させる。
-- ファイルサイズが`CHUNKED_UPLOAD_THRESHOLD`を超える場合は、分割アップロードのAPIを使用する。
+- ファイルサイズが分割アップロードに切り替えるファイルサイズを超える場合は、分割アップロードのAPIを使用する。
   1. アップロードセッションを作成する。BOXは、部分のサイズと部分の数を返す。
   2. ファイルを先頭から部分のサイズごとに読み込み、アップロードする。
      部分は、`BoxClientBuilder::upload_concurrency`で指定した数（既定値は`DEFAULT_UPLOAD_CONCURRENCY`の4）まで並列にアップロードする。
@@ -236,7 +241,7 @@
 - ファイル名をBOXが拒否する場合、またはパスからファイル名を取得できない場合は、リクエストを送信せずにエラーを返す。
 - 1回のリクエストでのアップロード、アップロードセッションの作成およびコミットは、HTTPメソッドがPOSTであるため、冪等でないリクエストとして送信する。
   部分のアップロードは、同じ範囲を同じ内容で送り直すため、冪等なリクエストとして送信する。
-- 1回のリクエストで送信するデータが大きいため、`BoxClientTimeout::request_timeout`は、通信速度に応じて、50MiBまたは部分のサイズを送信できる長さにする。
+- 1回のリクエストで送信するデータが大きいため、利用者は、`BoxClientTimeout::request_timeout`を、通信速度に応じて、分割アップロードに切り替えるファイルサイズまたは部分のサイズを送信できる長さにする。
 
 #### アップロードのプリフライトチェック
 
@@ -307,8 +312,13 @@
   `BoxClient`は、上限に達した場合にエラーを返す。
 - HTTPメソッドがGETであるため、冪等なリクエストとして送信する。
   受信の途中で失敗して再試行した場合、`BoxClient`は一時ファイルを作成し直し、内容を先頭から書き込む。
-- `BoxClientTimeout::request_timeout`は、内容の受信の完了までに適用される。
-  大きいファイルをダウンロードする場合、利用者は、通信速度に応じて、ファイル全体を受信できる長さにする。
+- ダウンロードの時間はファイルサイズによって大きく変わるため、`BoxClient`は、ダウンロードに`BoxClientTimeout::request_timeout`を適用しない。
+  代わりに、データを受信しない状態が`BoxClientTimeout::download_read_timeout`（既定値は30秒）だけ続いた場合に、`BoxClient`はタイムアウトさせる。
+  - このタイムアウトは、リクエストを送信してからレスポンスヘッダーを受信するまでの時間と、レスポンスボディのデータを受信する間隔に適用し、データを受信するたびに計測をやり直す。
+  - `BoxClient`は、ダウンロードに、ほかのAPIとは別のHTTPクライアントを使用する。
+    reqwestのタイムアウトはHTTPクライアントごとに設定するためである。
+  - ダウンロード全体の時間を制限する場合、利用者は`tokio::time::timeout`などで制限する。
+    futureを破棄した場合も、`BoxClient`は一時ファイルを削除する。
 
 ### Webリンク
 
@@ -609,7 +619,8 @@ let client = BoxClient::builder(config)
     .timeout(
         BoxClientTimeout::default()
             .with_request_timeout(Duration::from_secs(30))
-            .with_connect_timeout(Duration::from_secs(10)),
+            .with_connect_timeout(Duration::from_secs(10))
+            .with_download_read_timeout(Duration::from_secs(30)),
     )
     .build()
     .await?;

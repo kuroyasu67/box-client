@@ -4,8 +4,8 @@ use std::{
 };
 
 use box_client::{
-    BoxClient, BoxClientTimeout, BoxConfig, BoxItem, ListTrashedItemsOptions, RetryPolicy,
-    UpdateItemOptions,
+    BoxClient, BoxClientTimeout, BoxConfig, BoxItem, ListTrashedItemsOptions,
+    MIN_CHUNKED_UPLOAD_THRESHOLD, RetryPolicy, UpdateItemOptions,
 };
 
 /// BOX設定ファイルのパスを指定する環境変数の名前
@@ -26,11 +26,13 @@ pub async fn setup() -> anyhow::Result<BoxClient> {
         .with_ansi(false)
         .init();
 
-    // ファイルのアップロードでは、1回のリクエストで最大50MiBを送信する。
-    // 上りの通信速度が毎秒2メガビット程度でも送信を終えられるように、リクエストのタイムアウトを5分とする。
+    // 分割アップロードに切り替えるファイルサイズを最小値の20MiBとし、1回のリクエストで送信するデータを20MiB以下にする。
+    // 上りの通信速度が毎秒2メガビット程度でも送信を終えられるように、リクエストのタイムアウトを2分とする。
+    // ダウンロードにはリクエストのタイムアウトを適用しないため、データを30秒受信しない場合にタイムアウトさせる。
     let timeout = BoxClientTimeout::default()
-        .with_request_timeout(Duration::from_secs(300))
-        .with_connect_timeout(Duration::from_secs(5));
+        .with_request_timeout(Duration::from_secs(120))
+        .with_connect_timeout(Duration::from_secs(5))
+        .with_download_read_timeout(Duration::from_secs(30));
     let retry = RetryPolicy::new(
         10,
         Duration::from_millis(200),
@@ -43,6 +45,7 @@ pub async fn setup() -> anyhow::Result<BoxClient> {
     let client = BoxClient::builder(BoxConfig::from_file(config_file)?)
         .timeout(timeout)
         .retry(retry)
+        .chunked_upload_threshold(MIN_CHUNKED_UPLOAD_THRESHOLD)?
         .build()
         .await?;
 

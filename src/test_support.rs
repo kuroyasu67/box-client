@@ -99,6 +99,7 @@ pub(crate) fn client_builder(
         .timeout(BoxClientTimeout {
             request_timeout: Duration::from_secs(2),
             connect_timeout: Duration::from_secs(1),
+            download_read_timeout: Duration::from_secs(2),
         })
         .retry(retry)
         .endpoints(api_base_url, format!("{}{TOKEN_PATH}", server.uri()))
@@ -115,6 +116,7 @@ pub(crate) async fn create_client_with_timeout(
         .timeout(BoxClientTimeout {
             request_timeout: timeout,
             connect_timeout: Duration::from_secs(1),
+            download_read_timeout: Duration::from_secs(2),
         })
         .build()
         .await

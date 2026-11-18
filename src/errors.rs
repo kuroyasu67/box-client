@@ -81,6 +81,19 @@ pub enum BoxClientError {
         max: usize,
     },
 
+    /// 分割アップロードに切り替えるファイルサイズが範囲外であるエラー
+    #[error("chunked_upload_threshold {chunked_upload_threshold} is out of range {min}..={max}")]
+    InvalidChunkedUploadThreshold {
+        /// 指定された値
+        chunked_upload_threshold: u64,
+
+        /// 最小値
+        min: u64,
+
+        /// 最大値
+        max: u64,
+    },
+
     /// 202を受け取った場合に再送する回数の上限が、指定できる最大値を超えているエラー
     #[error("{name} {max_polls} exceeds limit {limit}")]
     InvalidMaxPolls {

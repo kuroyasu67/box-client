@@ -26,13 +26,6 @@ use crate::{
     retry::{AttemptError, Idempotency, parse_retry_after, read_json},
 };
 
-/// 分割アップロードに切り替えるファイルサイズ（バイト）
-///
-/// この値を超えるファイルは、分割アップロードのAPIでアップロードする。
-/// BOXは、50MBを超えるファイルに分割アップロードを推奨している。
-/// また、分割アップロードのAPIは20MB未満のファイルを拒否するため、この値は20MB以上である必要がある。
-pub const CHUNKED_UPLOAD_THRESHOLD: u64 = 50 * 1024 * 1024;
-
 /// 内容のハッシュを送信するヘッダー
 ///
 /// BOXは、ヘッダー名に反して、MD5ではなくSHA-1のハッシュを16進数で受け取る。
@@ -516,9 +509,9 @@ fn sha1_digest_header(digest: &[u8]) -> String {
 impl BoxClient {
     /// ファイルをアップロードする。
     ///
-    /// ファイルサイズが[`CHUNKED_UPLOAD_THRESHOLD`]以下の場合は、ファイル全体をメモリに読み込み、
+    /// ファイルサイズが[`BoxClient::chunked_upload_threshold`]以下の場合は、ファイル全体をメモリに読み込み、
     /// 1回のリクエストでアップロードする（`POST /files/content`）。
-    /// [`CHUNKED_UPLOAD_THRESHOLD`]を超える場合は、分割アップロードのAPIを使用する。
+    /// [`BoxClient::chunked_upload_threshold`]を超える場合は、分割アップロードのAPIを使用する。
     /// 分割アップロードでは、アップロードセッションを作成し、BOXが指定したサイズの部分をアップロードしてから、
     /// アップロードセッションをコミットする。部分は、[`BoxClient::upload_concurrency`]個まで並列にアップロードする。
     /// メモリには、並列にアップロードしている部分だけを読み込む。
@@ -530,7 +523,7 @@ impl BoxClient {
     ///
     /// 1回のリクエストで送信するデータが大きいため、
     /// [`BoxClientTimeout::request_timeout`](crate::BoxClientTimeout::request_timeout)は、
-    /// 通信速度に応じて、[`CHUNKED_UPLOAD_THRESHOLD`]または部分のサイズを送信できる長さにする。
+    /// 通信速度に応じて、[`BoxClient::chunked_upload_threshold`]または部分のサイズを送信できる長さにする。
     ///
     /// # Arguments
     ///
@@ -563,8 +556,13 @@ impl BoxClient {
         parent_id: &FolderId,
         options: &UploadFileOptions<'_>,
     ) -> BoxClientResult<File> {
-        self.upload_file_with_threshold(path.as_ref(), parent_id, options, CHUNKED_UPLOAD_THRESHOLD)
-            .await
+        self.upload_file_with_threshold(
+            path.as_ref(),
+            parent_id,
+            options,
+            self.chunked_upload_threshold(),
+        )
+        .await
     }
 
     /// 分割アップロードに切り替えるファイルサイズを指定して、ファイルをアップロードする。
@@ -716,9 +714,9 @@ impl BoxClient {
     ///
     /// BOXは、ファイルの新しいバージョンとして内容を保存し、以前の内容をバージョン履歴に残す。
     ///
-    /// ファイルサイズが[`CHUNKED_UPLOAD_THRESHOLD`]以下の場合は、ファイル全体をメモリに読み込み、
+    /// ファイルサイズが[`BoxClient::chunked_upload_threshold`]以下の場合は、ファイル全体をメモリに読み込み、
     /// 1回のリクエストでアップロードする（`POST /files/{file_id}/content`）。
-    /// [`CHUNKED_UPLOAD_THRESHOLD`]を超える場合は、分割アップロードのAPIを使用する
+    /// [`BoxClient::chunked_upload_threshold`]を超える場合は、分割アップロードのAPIを使用する
     /// （`POST /files/{file_id}/upload_sessions`で作成したアップロードセッションに部分をアップロードしてコミットする）。
     /// 分割アップロードの進め方、冪等性および失敗した場合の扱いは、[`BoxClient::upload_file`]と同じである。
     ///
@@ -758,7 +756,7 @@ impl BoxClient {
             file_id,
             path.as_ref(),
             options,
-            CHUNKED_UPLOAD_THRESHOLD,
+            self.chunked_upload_threshold(),
         )
         .await
     }
@@ -1076,9 +1074,12 @@ mod test_upload_file {
     };
 
     use super::*;
-    use crate::test_support::{
-        UPLOAD_BASE_PATH, client_builder, create_client, create_client_with_upload_concurrency,
-        mount_token, request_count, short_retry,
+    use crate::{
+        MIN_CHUNKED_UPLOAD_THRESHOLD,
+        test_support::{
+            UPLOAD_BASE_PATH, client_builder, create_client, create_client_with_upload_concurrency,
+            mount_token, request_count, short_retry,
+        },
     };
 
     /// 分割アップロードに切り替えるファイルサイズ
@@ -1565,6 +1566,60 @@ mod test_upload_file {
             "result: {result:?}"
         );
         assert_eq!(requests(&server, "DELETE", &session_path).await.len(), 1);
+
+        Ok(())
+    }
+
+    /// BOXクライアントに設定した、分割アップロードに切り替えるファイルサイズに従って、アップロードの方法を選ぶことを確認
+    ///
+    /// アップロードの方法だけを確かめるため、BOXはどちらのアップロードにもエラーを返す。
+    #[rstest]
+    // 既定値（50MiB）以下のファイルは、1回のリクエストでアップロードする。
+    #[case::default_threshold(None, "/files/content")]
+    // 最小値を指定した場合は、最小値を超えるファイルを分割アップロードする。
+    #[case::min_threshold(Some(MIN_CHUNKED_UPLOAD_THRESHOLD), "/files/upload_sessions")]
+    #[tokio::test]
+    async fn test_upload_file_uses_chunked_upload_threshold(
+        #[case] threshold: Option<u64>,
+        #[case] expected_path: &str,
+    ) -> anyhow::Result<()> {
+        // 内容を書き込まずにサイズだけを設定し、大きいファイルをすばやく作成する。
+        let dir = tempfile::tempdir()?;
+        let file_path = dir.path().join("big.bin");
+        std::fs::File::create(&file_path)?.set_len(MIN_CHUNKED_UPLOAD_THRESHOLD + 1)?;
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        for request_path in ["/files/content", "/files/upload_sessions"] {
+            Mock::given(method("POST"))
+                .and(path(upload_path(request_path)))
+                .respond_with(ResponseTemplate::new(400))
+                .mount(&server)
+                .await;
+        }
+        let mut builder = client_builder(&server, short_retry(0)?)?;
+        if let Some(threshold) = threshold {
+            builder = builder.chunked_upload_threshold(threshold)?;
+        }
+        let client = builder.build().await?;
+
+        let result = client
+            .upload_file(&file_path, &FolderId::root(), &UploadFileOptions::default())
+            .await;
+
+        assert!(
+            matches!(&result, Err(BoxClientError::Api(e)) if e.status == 400),
+            "result: {result:?}"
+        );
+        for request_path in ["/files/content", "/files/upload_sessions"] {
+            let expected = usize::from(request_path == expected_path);
+            assert_eq!(
+                requests(&server, "POST", &upload_path(request_path))
+                    .await
+                    .len(),
+                expected,
+                "path: {request_path}"
+            );
+        }
 
         Ok(())
     }
