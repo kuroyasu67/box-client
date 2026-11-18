@@ -32,12 +32,13 @@ mod test_support;
 pub use api::files::{File, FileVersion};
 pub use api::folders::{
     DeleteFolderOptions, Folder, ItemSort, ItemsPage, ListItemsOptions,
-    MAX_FOLDER_DESCRIPTION_CHARS, MAX_ITEMS_LIMIT, SortDirection, UpdateFolderOptions,
+    MAX_FOLDER_DESCRIPTION_CHARS, MAX_ITEMS_LIMIT, MoveFolderDestination, SortDirection,
+    UpdateFolderOptions,
 };
 pub use api::trash::{ListTrashedItemsOptions, RestoreItemOptions};
 pub use api::types::{
     BoxItem, FileId, FileItem, FolderId, FolderItem, ItemStatus, ParentFolder, PathCollection,
-    WebLinkId, WebLinkItem,
+    UserId, WebLinkId, WebLinkItem,
 };
 pub use api::users::{User, UserMini};
 pub use api::web_links::WebLink;

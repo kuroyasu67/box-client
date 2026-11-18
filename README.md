@@ -47,7 +47,12 @@
 - メソッド: `BoxClient::move_folder`
 - BOX API: `PUT /folders/{folder_id}`
 - フォルダを、フォルダ内のすべての項目とともに別のフォルダへ移動する。
-  ルートフォルダへ移動する場合は、移動先の親フォルダのIDに`FolderId::root()`を指定する。
+- 移動先は`MoveFolderDestination`で指定する。
+  - `MoveFolderDestination::Folder`: フォルダIDで指定したフォルダへ移動する。
+    認証中のユーザーのルートフォルダへ移動する場合は、`FolderId::root()`を指定する。
+  - `MoveFolderDestination::User`: ユーザーIDで指定したユーザーのルートフォルダへ移動する。
+    BOXはユーザーIDを指定した場合にルートフォルダ以外への移動を受け付けないため、ルートフォルダのIDとユーザーIDを送信する。
+    ユーザーIDが空文字列の場合は、リクエストを送信せずにエラーを返す。
 - ETagを`UpdateFolderOptions`で指定した場合は、`If-Match`ヘッダーで送信する。
 - BOXは移動先の親フォルダと他の属性を同時に指定すると拒否するため、ボディでは移動先の親フォルダだけを送信する。
 - ルートフォルダを移動しようとした場合は、リクエストを送信せずにエラーを返す。

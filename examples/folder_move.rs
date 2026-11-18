@@ -1,18 +1,27 @@
 //! フォルダを移動するサンプル
 mod common;
 
-use box_client::{FolderId, UpdateFolderOptions};
+use box_client::{FolderId, MoveFolderDestination, UpdateFolderOptions, UserId};
 
 /// 使用方法
-const USAGE: &str = "usage: RUST_LOG=info cargo run --quiet --example=folder_move -- <folder-id> <parent-folder-id>";
+const USAGE: &str = "usage: RUST_LOG=info cargo run --quiet --example=folder_move -- <folder-id> (<parent-folder-id> | --user <user-id>)";
 
 /// フォルダを移動する。
+///
+/// 移動先には、親フォルダのID、または`--user`に続けてルートフォルダへ移動するユーザーのIDを指定する。
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // 移動するフォルダのIDと移動先の親フォルダのIDを取得
+    // 移動するフォルダのIDと移動先を取得
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let (folder_id, parent_id) = match args.as_slice() {
-        [folder_id, parent_id] => (FolderId::new(folder_id), FolderId::new(parent_id)),
+    let (folder_id, destination) = match args.as_slice() {
+        [folder_id, flag, user_id] if flag == "--user" => (
+            FolderId::new(folder_id),
+            MoveFolderDestination::User(UserId::new(user_id)),
+        ),
+        [folder_id, parent_id] => (
+            FolderId::new(folder_id),
+            MoveFolderDestination::Folder(FolderId::new(parent_id)),
+        ),
         _ => anyhow::bail!(USAGE),
     };
 
@@ -25,7 +34,9 @@ async fn main() -> anyhow::Result<()> {
         options = options.with_etag(etag);
     }
 
-    let folder = client.move_folder(&folder_id, &parent_id, &options).await?;
+    let folder = client
+        .move_folder(&folder_id, &destination, &options)
+        .await?;
     tracing::info!("moved folder: {folder:?}");
 
     Ok(())

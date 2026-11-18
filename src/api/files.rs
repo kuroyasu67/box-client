@@ -209,7 +209,7 @@ mod test_file {
         }))?;
 
         let user = UserMini {
-            id: "33224".to_owned(),
+            id: crate::UserId::new("33224"),
             user_type: "user".to_owned(),
             name: Some("Test User".to_owned()),
             login: Some("user@example.com".to_owned()),

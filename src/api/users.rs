@@ -3,7 +3,7 @@
 use serde::Deserialize;
 use time::OffsetDateTime;
 
-use crate::{BoxClient, BoxClientResult, request::ApiRequest};
+use crate::{BoxClient, BoxClientResult, UserId, request::ApiRequest};
 
 /// BOXのユーザー
 ///
@@ -13,7 +13,7 @@ use crate::{BoxClient, BoxClientResult, request::ApiRequest};
 #[non_exhaustive]
 pub struct User {
     /// ユーザーID
-    pub id: String,
+    pub id: UserId,
 
     /// タイプ
     #[serde(rename = "type")]
@@ -44,7 +44,7 @@ pub struct User {
 #[non_exhaustive]
 pub struct UserMini {
     /// ユーザーID
-    pub id: String,
+    pub id: UserId,
 
     /// タイプ
     #[serde(rename = "type")]
@@ -99,7 +99,7 @@ mod test_get_current_user {
 
         let user = client.me().await?;
 
-        assert_eq!(user.id, "11446498");
+        assert_eq!(user.id, crate::UserId::new("11446498"));
         assert_eq!(user.name.as_deref(), Some("Service Account"));
         assert_eq!(
             user.login.as_deref(),
@@ -133,7 +133,7 @@ mod test_user_mini {
     ) -> anyhow::Result<()> {
         let user: UserMini = serde_json::from_value(value)?;
 
-        assert_eq!(user.id, "1");
+        assert_eq!(user.id, crate::UserId::new("1"));
         assert_eq!(user.name.as_deref(), name);
         assert_eq!(user.login.as_deref(), login);
 

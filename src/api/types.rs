@@ -36,6 +36,7 @@ macro_rules! box_item_struct {
     };
 }
 
+box_item_struct!(UserId, "ユーザー");
 box_item_struct!(FolderId, "フォルダ");
 box_item_struct!(FileId, "ファイル");
 box_item_struct!(WebLinkId, "Webリンク");
