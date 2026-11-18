@@ -118,27 +118,15 @@ impl<'a> CreateWebLinkOptions<'a> {
     }
 }
 
-/// WebリンクのURLが`http://`または`https://`で始まるか検証する。
-///
-/// BOXは、それ以外で始まるURLを受け付けない。
-/// `garde`の`custom`バリデーターとして、`#[garde(custom(validate_web_link_url))]`のように使用する。
-#[expect(
-    clippy::trivially_copy_pass_by_ref,
-    reason = "gardeのcustomバリデーターは、コンテキストを参照で受け取るシグネチャを要求するため"
-)]
-fn validate_web_link_url(url: &str, _context: &()) -> garde::Result {
-    if url.starts_with("http://") || url.starts_with("https://") {
-        Ok(())
-    } else {
-        Err(garde::Error::new("must start with `http://` or `https://`"))
-    }
-}
-
 /// Webリンク作成リクエストのボディ
 #[derive(Debug, Clone, Serialize, Validate)]
 struct CreateWebLinkBody<'a> {
     /// WebリンクのURL
-    #[garde(custom(validate_web_link_url))]
+    ///
+    /// `url`ルールでURLを解釈できることを検証する。
+    /// `url`ルールはすべてのスキームを受け付けるが、BOXは`http://`または`https://`で始まるURLだけを受け付けるため、
+    /// `pattern`ルールでスキームも検証する。
+    #[garde(url, pattern(r"^https?://"))]
     url: &'a str,
 
     /// Webリンクを作成する親フォルダ
@@ -190,7 +178,9 @@ impl<'a> CreateWebLinkBody<'a> {
 #[derive(Debug, Clone, Serialize, Validate)]
 struct UpdateWebLinkUrlBody<'a> {
     /// 新しいURL
-    #[garde(custom(validate_web_link_url))]
+    ///
+    /// [`CreateWebLinkBody::url`]と同じ規則で検証する。
+    #[garde(url, pattern(r"^https?://"))]
     url: &'a str,
 }
 
@@ -199,7 +189,8 @@ impl<'a> UpdateWebLinkUrlBody<'a> {
     ///
     /// # Errors
     ///
-    /// URLが`http://`または`https://`で始まらない場合は、[`BoxClientError::InvalidRequestBody`]を返す。
+    /// URLを解釈できない場合、またはURLが`http://`もしくは`https://`で始まらない場合は、
+    /// [`BoxClientError::InvalidRequestBody`]を返す。
     fn new(url: &'a str) -> BoxClientResult<Self> {
         let body = Self { url };
         body.validate()
@@ -739,6 +730,9 @@ mod test_create_web_link {
     #[rstest]
     #[case::ftp_url("ftp://example.com", None, None)]
     #[case::no_scheme("example.com", None, None)]
+    #[case::no_host("https://", None, None)]
+    #[case::space_in_host("https://exa mple.com", None, None)]
+    #[case::invalid_port("https://example.com:99999", None, None)]
     #[case::empty_name("https://example.com", Some(""), None)]
     #[case::invalid_name("https://example.com", Some("a/b"), None)]
     #[case::too_long_description(
@@ -935,6 +929,7 @@ mod test_update_web_link {
     #[case::too_long_description(Update::Description("あ".repeat(MAX_DESCRIPTION_CHARS + 1)))]
     #[case::empty_user_id(Update::Move(MoveDestination::User(UserId::new(""))))]
     #[case::invalid_url(Update::Url("ftp://example.com"))]
+    #[case::unparsable_url(Update::Url("https://exa mple.com"))]
     #[tokio::test]
     async fn test_update_web_link_rejects_without_request(
         #[case] update: Update,

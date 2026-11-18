@@ -335,7 +335,7 @@
 - 指定したURLを指すWebリンクを、指定したフォルダに作成する。
 - Webリンク名と説明を`CreateWebLinkOptions`で指定できる。
   Webリンク名を指定しない場合、BOXはURLをWebリンク名にする。
-- URLが`http://`または`https://`で始まらない場合、Webリンク名をBOXが拒否する場合、または説明が256文字（`MAX_DESCRIPTION_CHARS`）より長い場合は、リクエストを送信せずにエラーを返す。
+- URLを解釈できない場合、URLが`http://`または`https://`で始まらない場合、Webリンク名をBOXが拒否する場合、または説明が256文字（`MAX_DESCRIPTION_CHARS`）より長い場合は、リクエストを送信せずにエラーを返す。
   Webリンク名の制限は、ファイル名およびフォルダ名と同じ検証を共有する。
 - HTTPメソッドがPOSTであるため、冪等でないリクエストとして送信する。
 
@@ -348,7 +348,7 @@
   - `BoxClient::update_web_link_url`: WebリンクのURLを変更する。
 - BOX API: `PUT /web_links/{web_link_id}`
 - 名前、説明および移動先の検証とリクエストのボディは、ファイルおよびフォルダの同じ操作と共有する。
-  URLは、`http://`または`https://`で始まることを検証する。
+  URLは、解釈できること、および`http://`または`https://`で始まることを検証する。
 - ETagを`UpdateItemOptions`で指定した場合は、`If-Match`ヘッダーで送信する。
   BOXのドキュメントは、このAPIが`If-Match`ヘッダーを受け付けることを明記していないが、WebリンクのETagを`If-Match`ヘッダーで使用すると記載している。
 - 冪等でないリクエストとして送信する。理由は「[冪等性の決定](#冪等性の決定)」を参照する。
