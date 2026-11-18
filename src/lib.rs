@@ -31,7 +31,7 @@ mod test_support;
 
 pub use api::files::{File, FileVersion};
 pub use api::folders::{
-    DeleteFolderOptions, Folder, ItemSort, ItemsPage, ListItemsOptions,
+    CopyFolderOptions, DeleteFolderOptions, Folder, ItemSort, ItemsPage, ListItemsOptions,
     MAX_FOLDER_DESCRIPTION_CHARS, MAX_ITEMS_LIMIT, MoveFolderDestination, SortDirection,
     UpdateFolderOptions,
 };
