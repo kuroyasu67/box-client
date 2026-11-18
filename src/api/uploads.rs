@@ -537,7 +537,7 @@ impl BoxClient {
 
     /// 分割アップロードに切り替えるファイルサイズを指定して、ファイルをアップロードする。
     ///
-    /// テストで大きなファイルを作成せずに分割アップロードを確認できるように、閾値を引数で受け取る。
+    /// テストで大きなファイルを作成せずに分割アップロードを確認できるように、分割アップロードに切り替えるファイルサイズを引数で受け取る。
     async fn upload_file_with_threshold(
         &self,
         path: &Path,
@@ -731,7 +731,7 @@ impl BoxClient {
 
     /// 分割アップロードに切り替えるファイルサイズを指定して、ファイルの内容を更新する。
     ///
-    /// テストで大きなファイルを作成せずに分割アップロードを確認できるように、閾値を引数で受け取る。
+    /// テストで大きなファイルを作成せずに分割アップロードを確認できるように、分割アップロードに切り替えるファイルサイズを引数で受け取る。
     async fn update_file_content_with_threshold(
         &self,
         file_id: &FileId,
@@ -1323,7 +1323,7 @@ mod test_upload_file {
         ]})
     }
 
-    /// 閾値を超えるファイルを、部分ごとにアップロードしてからコミットすることを確認
+    /// 分割アップロードに切り替えるファイルサイズを超えるファイルを、部分ごとにアップロードしてからコミットすることを確認
     #[tokio::test]
     async fn test_upload_file_in_chunks() -> anyhow::Result<()> {
         let (_dir, file_path) = create_file("big.bin", CHUNKED_CONTENT)?;
@@ -1806,7 +1806,7 @@ mod test_update_file_content {
     /// BOXが拒否する新しいファイル名、またはヘッダーに使用できない文字を含む`ETag`を指定した場合は、
     /// リクエストを送信せずにエラーを返すことを確認
     ///
-    /// 分割アップロードでは`ETag`をコミットで初めて送信するため、閾値を超えるファイルでも、部分をアップロードする前に検証する。
+    /// 分割アップロードでは`ETag`をコミットで初めて送信するため、分割アップロードに切り替えるファイルサイズを超えるファイルでも、部分をアップロードする前に検証する。
     #[rstest]
     #[case::invalid_name(UpdateFileContentOptions::default().with_name("a/b"), "InvalidRequestBody")]
     #[case::invalid_etag(UpdateFileContentOptions::default().with_etag("1\n"), "InvalidHeaderValue")]
@@ -1841,7 +1841,7 @@ mod test_update_file_content {
         Ok(())
     }
 
-    /// 閾値を超える場合は、`POST /files/{file_id}/upload_sessions`でアップロードセッションを作成し、
+    /// ファイルサイズが分割アップロードに切り替えるファイルサイズを超える場合は、`POST /files/{file_id}/upload_sessions`でアップロードセッションを作成し、
     /// 部分をアップロードしてから、`If-Match`ヘッダーを付けてコミットすることを確認
     #[tokio::test]
     async fn test_update_file_content_in_chunks() -> anyhow::Result<()> {

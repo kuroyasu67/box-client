@@ -20,7 +20,7 @@ use crate::{
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[non_exhaustive]
 pub struct FileVersion {
-    /// ファイルバージョンID
+    /// バージョンのID
     pub id: FileVersionId,
 
     /// このバージョンのファイルの内容のSHA-1ハッシュ値
