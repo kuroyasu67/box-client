@@ -658,7 +658,7 @@ let client = BoxClient::builder(config)
 
 アクセストークンをバックグラウンドで取得し直すタスクは、リクエストを送信するfutureを破棄しても中断せず、取得の成功または失敗まで実行する。
 
-## 接続先とUser-Agent
+## 接続先、プロキシおよびUser-Agent
 
 ### User-Agent
 
@@ -668,6 +668,27 @@ let client = BoxClient::builder(config)
 アプリケーションの名前を指定すると、BOXのログで呼び出し元のアプリケーションを識別しやすくなる。
 
 空文字列、空白だけの文字列、およびヘッダーの値に使用できない文字を含む文字列は、`BoxClientBuilder::user_agent`でエラーになる。
+
+### プロキシ
+
+利用者がプロキシを指定しない場合、`BoxClient`は環境変数（`HTTPS_PROXY`、`HTTP_PROXY`、`ALL_PROXY`および`NO_PROXY`など）に従う。
+
+- 利用者が`BoxClientBuilder::proxy`でプロキシのURLを指定した場合、`BoxClient`は、すべてのリクエストを指定したプロキシ経由で送信し、環境変数のプロキシを使用しない。
+  対象には、アクセストークンの取得とファイルのダウンロードも含む。
+- 利用者が`BoxClientBuilder::no_proxy`を呼び出した場合、`BoxClient`は、環境変数でプロキシが設定されていても、プロキシを使用せずに直接送信する。
+- プロキシに認証が必要な場合、利用者は、`http://user:password@proxy.example.com:8080`のように、URLにユーザー名とパスワードを含める。
+  `BoxClient`は、ユーザー名とパスワードを`Proxy-Authorization`ヘッダーで送信する。
+  ユーザー名とパスワードに`@`や`:`などを含める場合、利用者はパーセントエンコードする。
+- プロキシのURLのスキームは、`http`または`https`とする。
+  クエリまたはフラグメントを含むURL、およびホストを含まないURLは、`BoxClientBuilder::proxy`でエラーになる。
+- プロキシのURLは認証情報を含みうるため、`BoxClient`は、URLをDebug出力やエラーに含めない。
+
+```rust
+let client = BoxClient::builder(config)
+    .proxy("http://user:password@proxy.example.com:8080")?
+    .build()
+    .await?;
+```
 
 ### 接続先のURL
 

@@ -130,6 +130,12 @@ pub enum BoxClientError {
         reason: &'static str,
     },
 
+    /// プロキシのURLの不正エラー
+    ///
+    /// プロキシのURLは認証情報を含みうるため、エラーにはURLを含めずに、拒否した理由だけを含める。
+    #[error("Invalid proxy URL: {0}")]
+    InvalidProxyUrl(&'static str),
+
     /// ベースURLの不正エラー
     #[error("Invalid base URL: {0}")]
     InvalidBaseUrl(String),

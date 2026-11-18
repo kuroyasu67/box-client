@@ -4,6 +4,7 @@ use reqwest::{
     Response, StatusCode, Url,
     header::{CONTENT_TYPE, HeaderValue},
 };
+use secrecy::{ExposeSecret as _, SecretString};
 use serde::de::DeserializeOwned;
 use tracing::Instrument as _;
 
@@ -197,6 +198,7 @@ impl BoxClient {
             upload_base_url: None,
             token_url: None,
             user_agent: HeaderValue::from_static(CRATE_USER_AGENT),
+            proxy: ProxySetting::System,
         }
     }
 
@@ -393,6 +395,45 @@ pub struct BoxClientBuilder {
 
     /// `User-Agent`ヘッダーの値
     user_agent: HeaderValue,
+
+    /// プロキシの設定
+    proxy: ProxySetting,
+}
+
+/// プロキシの設定
+///
+/// プロキシのURLは認証情報を含みうるため、Debug出力やログに残らないように`SecretString`で保持する。
+#[derive(Debug, Clone)]
+enum ProxySetting {
+    /// 環境変数（`HTTPS_PROXY`、`HTTP_PROXY`、`ALL_PROXY`および`NO_PROXY`など）に従う。
+    System,
+
+    /// プロキシを使用しない。
+    Disabled,
+
+    /// 指定したプロキシを使用する。
+    Url(SecretString),
+}
+
+impl ProxySetting {
+    /// HTTPクライアントのビルダーに、プロキシの設定を適用する。
+    ///
+    /// # Errors
+    ///
+    /// HTTPクライアントがプロキシのURLを使用できない場合は、[`BoxClientError::InvalidProxyUrl`]を返す。
+    fn apply(&self, builder: reqwest::ClientBuilder) -> BoxClientResult<reqwest::ClientBuilder> {
+        match self {
+            // reqwestは、プロキシを指定しない場合に環境変数のプロキシを使用する。
+            Self::System => Ok(builder),
+            Self::Disabled => Ok(builder.no_proxy()),
+            Self::Url(url) => {
+                // reqwestのエラーはURLを含みうるため、原因を含めずにエラーを返す。
+                let proxy = reqwest::Proxy::all(url.expose_secret())
+                    .map_err(|_| BoxClientError::InvalidProxyUrl("the proxy url cannot be used"))?;
+                Ok(builder.proxy(proxy))
+            }
+        }
+    }
 }
 
 impl BoxClientBuilder {
@@ -535,6 +576,56 @@ impl BoxClientBuilder {
         Ok(self)
     }
 
+    /// すべてのリクエストを、指定したプロキシを経由して送信する。
+    ///
+    /// 指定しない場合は、環境変数（`HTTPS_PROXY`、`HTTP_PROXY`、`ALL_PROXY`および`NO_PROXY`など）に従う。
+    /// プロキシを指定すると、環境変数のプロキシは使用しない。
+    /// アクセストークンの取得とファイルのダウンロードを含む、すべてのリクエストに適用する。
+    ///
+    /// プロキシに認証が必要な場合は、`http://user:password@proxy.example.com:8080`のように、
+    /// URLにユーザー名とパスワードを含める。ユーザー名とパスワードに`@`や`:`などを含める場合は、パーセントエンコードする。
+    /// BOXクライアントは、ログやDebug出力に残らないように、プロキシのURLを保持する。
+    ///
+    /// # Errors
+    ///
+    /// 次の場合は、[`BoxClientError::InvalidProxyUrl`]を返す。
+    /// エラーには、認証情報を含みうるURLを含めない。
+    ///
+    /// - URLを解釈できない、またはホストを含まない。
+    /// - スキームが`http`または`https`でない。
+    /// - クエリまたはフラグメントを含む。
+    pub fn proxy(mut self, proxy_url: &str) -> BoxClientResult<Self> {
+        let url = Url::parse(proxy_url)
+            .map_err(|_| BoxClientError::InvalidProxyUrl("the proxy url cannot be parsed"))?;
+        if !matches!(url.scheme(), "http" | "https") {
+            return Err(BoxClientError::InvalidProxyUrl(
+                "the scheme of the proxy url must be http or https",
+            ));
+        }
+        if url.host_str().is_none_or(str::is_empty) {
+            return Err(BoxClientError::InvalidProxyUrl(
+                "the proxy url must contain a host",
+            ));
+        }
+        if url.query().is_some() || url.fragment().is_some() {
+            return Err(BoxClientError::InvalidProxyUrl(
+                "the proxy url must not contain a query or fragment",
+            ));
+        }
+        self.proxy = ProxySetting::Url(SecretString::from(proxy_url));
+        Ok(self)
+    }
+
+    /// プロキシを使用せずに、すべてのリクエストを直接送信する。
+    ///
+    /// 環境変数でプロキシが設定されていても、プロキシを使用しない。
+    /// [`BoxClientBuilder::proxy`]で指定したプロキシも取り消す。
+    #[must_use]
+    pub fn no_proxy(mut self) -> Self {
+        self.proxy = ProxySetting::Disabled;
+        self
+    }
+
     /// REST APIのベースURLを指定する。既定値は`https://api.box.com/2.0`とする。
     ///
     /// BOX以外のサーバーにアクセストークンを送信しないように注意する。
@@ -614,12 +705,16 @@ impl BoxClientBuilder {
             })?,
         };
         let token_url = self.token_url.unwrap_or_else(|| BOX_TOKEN_URL.to_owned());
-        let http_client = reqwest::Client::builder()
+        let http_client = self
+            .proxy
+            .apply(reqwest::Client::builder())?
             .user_agent(self.user_agent.clone())
             .timeout(self.timeout.request_timeout)
             .connect_timeout(self.timeout.connect_timeout)
             .build()?;
-        let download_client = reqwest::Client::builder()
+        let download_client = self
+            .proxy
+            .apply(reqwest::Client::builder())?
             .user_agent(self.user_agent)
             .read_timeout(self.timeout.download_read_timeout)
             .connect_timeout(self.timeout.connect_timeout)
@@ -1583,19 +1678,164 @@ mod test_box_client {
         }
     }
 
+    /// プロキシのユーザー名
+    const PROXY_USER: &str = "proxy-user";
+
+    /// プロキシのパスワード
+    ///
+    /// URLでパーセントエンコードする文字を含め、デコードしてから送信することも確かめる。
+    const PROXY_PASSWORD: &str = "proxy-p@ss";
+
+    /// 認証情報を含む、モックサーバーを指すプロキシのURLを返す。
+    fn proxy_url_with_credentials(server: &MockServer) -> anyhow::Result<String> {
+        let mut url = Url::parse(&server.uri())?;
+        url.set_username(PROXY_USER)
+            .map_err(|()| anyhow::anyhow!("failed to set username"))?;
+        url.set_password(Some(PROXY_PASSWORD))
+            .map_err(|()| anyhow::anyhow!("failed to set password"))?;
+        Ok(url.into())
+    }
+
+    /// 接続を拒否される、ループバックアドレスのURLを返す。
+    fn refused_url() -> anyhow::Result<String> {
+        // OSが割り当てたポートを閉じて、接続を拒否されるポートを用意する。
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+        let url = format!("http://{}", listener.local_addr()?);
+        drop(listener);
+        Ok(url)
+    }
+
+    /// 指定したプロキシを経由して、アクセストークンの取得、REST APIの呼び出しおよびファイルのダウンロードを送信し、
+    /// プロキシの認証情報を`Proxy-Authorization`ヘッダーで送信することを確認
+    #[tokio::test]
+    async fn test_send_via_proxy() -> anyhow::Result<()> {
+        // 接続先のサーバーは接続を拒否するため、プロキシを経由した場合だけ成功する。
+        let target = refused_url()?;
+        let proxy = MockServer::start().await;
+        let expected_authorization = format!(
+            "Basic {}",
+            base64::Engine::encode(
+                &base64::engine::general_purpose::STANDARD,
+                format!("{PROXY_USER}:{PROXY_PASSWORD}")
+            )
+        );
+        Mock::given(path(TOKEN_PATH))
+            .and(header(
+                "proxy-authorization",
+                expected_authorization.as_str(),
+            ))
+            .respond_with(crate::test_support::token_response())
+            .expect(1)
+            .mount(&proxy)
+            .await;
+        Mock::given(path(API_PATH))
+            .and(header(
+                "proxy-authorization",
+                expected_authorization.as_str(),
+            ))
+            .respond_with(ok_response())
+            .expect(1)
+            .mount(&proxy)
+            .await;
+        Mock::given(path("/2.0/files/11/content"))
+            .and(header(
+                "proxy-authorization",
+                expected_authorization.as_str(),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"content".as_slice()))
+            .expect(1)
+            .mount(&proxy)
+            .await;
+        let client = BoxClient::builder(test_config())
+            .retry(short_retry(0)?)
+            .proxy(&proxy_url_with_credentials(&proxy)?)?
+            .api_base_url(&format!("{target}/2.0"))?
+            .token_url(&format!("{target}{TOKEN_PATH}"))?
+            .build()
+            .await?;
+        let dir = tempfile::tempdir()?;
+
+        let _: serde_json::Value = client.send_json(request("GET")?).await?;
+        client
+            .download_file(
+                &crate::FileId::new("11"),
+                dir.path().join("content.txt"),
+                &crate::DownloadFileOptions::default(),
+            )
+            .await?;
+
+        Ok(())
+    }
+
+    /// プロキシを指定した後に`no_proxy`を呼び出した場合は、プロキシを使用せずに直接送信することを確認
+    #[tokio::test]
+    async fn test_no_proxy_overrides_proxy() -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        mount_api_always(&server, ok_response()).await;
+        // プロキシは接続を拒否するため、プロキシを使用した場合は失敗する。
+        let client = client_builder(&server, short_retry(0)?)?
+            .proxy(&refused_url()?)?
+            .no_proxy()
+            .build()
+            .await?;
+
+        let _: serde_json::Value = client.send_json(request("GET")?).await?;
+
+        assert_eq!(api_request_count(&server).await, 1);
+
+        Ok(())
+    }
+
+    /// プロキシのURLを検証し、エラーにURLを含めないことを確認
+    #[rstest]
+    #[case::http("http://proxy.example.com:8080", true)]
+    #[case::https("https://proxy.example.com", true)]
+    #[case::credentials("http://user:p%40ss@proxy.example.com:8080", true)]
+    #[case::loopback("http://127.0.0.1:3128", true)]
+    #[case::socks("socks5://proxy.example.com:1080", false)]
+    #[case::unparsable("not a url", false)]
+    #[case::no_host("http://", false)]
+    #[case::query("http://user:secret@proxy.example.com?key=value", false)]
+    #[case::fragment("http://user:secret@proxy.example.com#top", false)]
+    fn test_builder_validates_proxy_url(#[case] url: &str, #[case] valid: bool) {
+        let result = BoxClient::builder(test_config()).proxy(url);
+
+        if valid {
+            assert!(result.is_ok(), "result: {:?}", result.err());
+        } else {
+            let error = match result {
+                Err(e @ BoxClientError::InvalidProxyUrl(_)) => e,
+                other => panic!("unexpected result: {other:?}"),
+            };
+            let message = format!("{error} {error:?}");
+            assert!(!message.contains("secret"), "message: {message}");
+        }
+    }
+
     /// Debug出力にクライアントシークレット、秘密鍵、パスフレーズおよびアクセストークンを含めないことを確認
     #[tokio::test]
     async fn test_debug_does_not_expose_secrets() -> anyhow::Result<()> {
         let server = MockServer::start().await;
         mount_token(&server).await;
-        let builder = format!("{:?}", BoxClient::builder(test_config()));
-        let client = format!("{:?}", create_client(&server, short_retry(0)?).await?);
+        // モックサーバーをプロキシとしても使用し、プロキシの認証情報も出力しないことを確かめる。
+        let proxy_url = proxy_url_with_credentials(&server)?;
+        let builder = format!("{:?}", BoxClient::builder(test_config()).proxy(&proxy_url)?);
+        let client = format!(
+            "{:?}",
+            client_builder(&server, short_retry(0)?)?
+                .proxy(&proxy_url)?
+                .build()
+                .await?
+        );
 
         for secret in [
             "client-secret",
             "test-passphrase",
             "PRIVATE KEY",
             "access-token",
+            PROXY_PASSWORD,
+            "proxy-user",
         ] {
             assert!(!builder.contains(secret), "builder: {builder}");
             assert!(!client.contains(secret), "client: {client}");
