@@ -258,6 +258,19 @@ struct PreflightUploadBody<'a> {
     parent: ParentFolder,
 }
 
+/// 既存のファイルの新しいバージョンのプリフライトチェックのリクエストのボディ
+#[derive(Debug, Serialize)]
+struct PreflightVersionBody<'a> {
+    /// 新しいファイル名
+    ///
+    /// `None`の場合は送信せず、BOXはファイル名を変更しない場合として確認する。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<&'a str>,
+
+    /// ファイルのバイト数
+    size: u64,
+}
+
 /// プリフライトチェックに合格した場合に、BOXが返すアップロード用のURLとアクセストークン
 ///
 /// BOXのAPI仕様（OpenAPI）は、どちらの属性も必須としていないため、`Option`で受け取る。
@@ -635,6 +648,68 @@ impl BoxClient {
             size,
             parent_id = parent_id.as_ref(),
             "preflight check passed"
+        );
+
+        Ok(upload_url)
+    }
+
+    /// ファイルの内容を更新する前に、BOXが新しいバージョンを受け付けるかを確認する（プリフライトチェック）。
+    ///
+    /// ファイルの内容を送信せずに、ファイルサイズと、指定した場合は新しいファイル名だけをBOXに送信し、
+    /// 実際の更新と同じ検査を受ける。BOXは、ファイル名の重複、ファイルサイズの上限、
+    /// およびフォルダとアカウントのストレージの容量を検査する。
+    ///
+    /// 引数は[`BoxClient::update_file_content`]と同じであり、ファイルサイズは`update_file_content`と同じく
+    /// ファイルのメタデータから決める。ファイルの内容は読み込まない。
+    /// BOXのドキュメントは、このAPIが`If-Match`ヘッダーを受け付けることを記載していないため、`options.etag`は送信しない。
+    ///
+    /// 確認に合格した場合は、BOXが返すアップロード用のURLとアクセストークンを[`UploadUrl`]として返す。
+    /// [`BoxClient::update_file_content`]はこれらを使用しない。
+    /// なお、確認に合格しても、その後の更新が成功するとは限らない。
+    ///
+    /// HTTPメソッドがOPTIONSであり、BOXは状態を変更しないため、冪等なリクエストとして送信する。
+    ///
+    /// # Arguments
+    ///
+    /// - `file_id`: 内容を更新するファイルのID
+    /// - `path`: 新しい内容のファイルのパス
+    /// - `options`: 新しいファイル名のオプション。`options.etag`は使用しない。
+    ///
+    /// # Errors
+    ///
+    /// `options.name`をBOXが拒否する場合は、リクエストを送信せずに[`BoxClientError::InvalidRequestBody`]を返す。
+    /// ファイルのメタデータを読み込めない場合は、[`BoxClientError::ReadFile`]を返す。
+    /// BOXが新しいバージョンを受け付けない場合は、[`BoxClientError::Api`]を返す。
+    /// 例えば、新しいファイル名と同じ名前の項目が親フォルダに存在する場合、BOXは409を返す。
+    ///
+    /// 再試行できないエラーが発生した場合、または再試行回数の上限に達した場合はエラーを返す。
+    pub async fn preflight_update_file_content(
+        &self,
+        file_id: &FileId,
+        path: impl AsRef<Path>,
+        options: &UpdateFileContentOptions<'_>,
+    ) -> BoxClientResult<UploadUrl> {
+        let path = path.as_ref();
+        if let Some(name) = options.name {
+            validate_file_name(name)?;
+        }
+        let size = tokio::fs::metadata(path)
+            .await
+            .map_err(read_file_error(path))?
+            .len();
+
+        let request = ApiRequest::new(Method::OPTIONS, ["files", file_id.as_ref(), "content"])
+            .json(&PreflightVersionBody {
+                name: options.name,
+                size,
+            })?;
+        let upload_url = self.send(request, read_upload_url).await?;
+
+        tracing::debug!(
+            path = %path.display(),
+            size,
+            file_id = file_id.as_ref(),
+            "preflight check for new file version passed"
         );
 
         Ok(upload_url)
@@ -1880,6 +1955,112 @@ mod test_preflight_upload_file {
 
         let result = client
             .preflight_upload_file(dir.path().join(file_name), &FolderId::root(), &options)
+            .await;
+
+        let matched = match expected {
+            "ReadFile" => matches!(result, Err(BoxClientError::ReadFile { .. })),
+            _ => matches!(result, Err(BoxClientError::InvalidRequestBody(_))),
+        };
+        assert!(matched, "result: {result:?}");
+        assert_eq!(request_count(&server).await, requests_before);
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod test_preflight_update_file_content {
+    use rstest::rstest;
+    use serde_json::json;
+    use wiremock::{
+        Mock, MockServer, Request, ResponseTemplate,
+        matchers::{body_json, method, path},
+    };
+
+    use super::*;
+    use crate::test_support::{create_client, mount_token, request_count, short_retry};
+
+    /// 新しいバージョンのプリフライトチェックのAPIのパス
+    ///
+    /// アップロードと異なり、REST APIのホストで受け付ける。
+    const PREFLIGHT_PATH: &str = "/2.0/files/123/content";
+
+    /// ファイルサイズと、指定した場合だけ新しいファイル名を、REST APIのホストにOPTIONSで送信することを確認
+    ///
+    /// `ETag`を指定しても、`If-Match`ヘッダーを送信しないことも確認する。
+    #[rstest]
+    #[case::without_name(UpdateFileContentOptions::default(), json!({"size": 5}))]
+    #[case::with_name_and_etag(
+        UpdateFileContentOptions::default().with_name("report-v2.txt").with_etag("1"),
+        json!({"name": "report-v2.txt", "size": 5})
+    )]
+    #[tokio::test]
+    async fn test_preflight_update_file_content(
+        #[case] options: UpdateFileContentOptions<'static>,
+        #[case] expected_body: serde_json::Value,
+    ) -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let file_path = dir.path().join("report.txt");
+        std::fs::write(&file_path, b"hello")?;
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        Mock::given(method("OPTIONS"))
+            .and(path(PREFLIGHT_PATH))
+            .and(body_json(expected_body))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "upload_url": "https://upload.box.com/api/2.0/files/123/content?upload_session_id=1234",
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = create_client(&server, short_retry(0)?).await?;
+
+        let upload_url = client
+            .preflight_update_file_content(&FileId::new("123"), &file_path, &options)
+            .await?;
+
+        assert_eq!(
+            upload_url.upload_url.as_deref(),
+            Some("https://upload.box.com/api/2.0/files/123/content?upload_session_id=1234")
+        );
+        let requests: Vec<Request> = server.received_requests().await.unwrap_or_default();
+        assert!(
+            requests
+                .iter()
+                .filter(|r| r.url.path() == PREFLIGHT_PATH)
+                .all(|r| !r.headers.contains_key("if-match"))
+        );
+
+        Ok(())
+    }
+
+    /// 新しいファイル名が不正な場合、またはファイルが存在しない場合は、リクエストを送信せずにエラーを返すことを確認
+    #[rstest]
+    #[case::invalid_name(Some("a/b"), "report.txt", "InvalidRequestBody")]
+    #[case::missing_file(None, "missing.txt", "ReadFile")]
+    #[tokio::test]
+    async fn test_preflight_update_file_content_rejects_without_request(
+        #[case] option_name: Option<&'static str>,
+        #[case] file_name: &str,
+        #[case] expected: &str,
+    ) -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        std::fs::write(dir.path().join("report.txt"), b"hello")?;
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        let client = create_client(&server, short_retry(0)?).await?;
+        let requests_before = request_count(&server).await;
+        let options = UpdateFileContentOptions {
+            name: option_name,
+            etag: None,
+        };
+
+        let result = client
+            .preflight_update_file_content(
+                &FileId::new("123"),
+                dir.path().join(file_name),
+                &options,
+            )
             .await;
 
         let matched = match expected {

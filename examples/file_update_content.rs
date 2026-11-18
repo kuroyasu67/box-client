@@ -32,6 +32,12 @@ async fn main() -> anyhow::Result<()> {
         options = options.with_name(name);
     }
 
+    // ファイルの内容を送信する前に、BOXが新しいバージョンを受け付けるかを確認
+    let upload_url = client
+        .preflight_update_file_content(&file_id, file_path, &options)
+        .await?;
+    tracing::info!("preflight check passed: {upload_url:?}");
+
     let file = client
         .update_file_content(&file_id, file_path, &options)
         .await?;

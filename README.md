@@ -159,6 +159,15 @@
 - 確認に合格しても、その後のアップロードが成功するとは限らない。
 - 分割アップロードでは、BOXがアップロードセッションの作成時に同じ検査を行う。
 
+#### ファイルの内容の更新のプリフライトチェック
+
+- メソッド: `BoxClient::preflight_update_file_content`
+- BOX API: `OPTIONS /files/{file_id}/content`
+- ファイルの内容を送信せずに、BOXが既存のファイルの新しいバージョンを受け付けるかを確認する。
+- 引数は`BoxClient::update_file_content`と同じであり、ファイルサイズと、指定した場合は新しいファイル名を送信する。
+  BOXのドキュメントは、このAPIが`If-Match`ヘッダーを受け付けることを記載していないため、`UpdateFileContentOptions`のETagは送信しない。
+- 戻り値、エラーおよび注意点は、「[アップロードのプリフライトチェック](#アップロードのプリフライトチェック)」と同じである。
+
 #### ファイルの内容の更新
 
 - メソッド: `BoxClient::update_file_content`
