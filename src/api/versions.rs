@@ -2,11 +2,12 @@
 //!
 //! BOXは、プレミアムアカウントのユーザーのファイルだけにバージョンを記録する。
 
+use reqwest::header::IF_MATCH;
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
 use crate::{
-    BoxClient, BoxClientError, BoxClientResult, FileId, FileVersionId, UserMini,
+    BoxClient, BoxClientError, BoxClientResult, FileId, FileVersionId, Idempotency, UserMini,
     api::folders::{MAX_ITEMS_LIMIT, validate_limit},
     request::ApiRequest,
 };
@@ -137,6 +138,15 @@ struct PromoteFileVersionBody<'a> {
     /// BOXは、`file_version`だけを受け付ける。
     #[serde(rename = "type")]
     item_type: &'static str,
+}
+
+/// 削除したファイルのバージョンの復元リクエストのボディ
+#[derive(Debug, Serialize)]
+struct RestoreFileVersionBody {
+    /// ゴミ箱に移動した日時
+    ///
+    /// BOXは、`null`を指定するとバージョンを復元する。
+    trashed_at: Option<OffsetDateTime>,
 }
 
 impl BoxClient {
@@ -315,6 +325,112 @@ impl BoxClient {
         );
 
         Ok(version)
+    }
+
+    /// 削除したファイルのバージョンを復元する。
+    ///
+    /// BOXは、削除したバージョンをゴミ箱に移動している。このメソッドは、ゴミ箱に移動したバージョンを
+    /// ファイルのバージョン履歴に戻す。ファイル自体をゴミ箱から復元する場合は、
+    /// [`BoxClient::restore_file`]を使用する。
+    /// BOXは、Box Notesの復元にこのAPIを使用しないように案内している。
+    ///
+    /// 復元したバージョンを再び復元しても状態は変わらないため、HTTPメソッドがPUTであることに従い、
+    /// 冪等なリクエストとして送信する。
+    ///
+    /// # Arguments
+    ///
+    /// - `file_id`: ファイルのID
+    /// - `file_version_id`: 復元するバージョンのID
+    ///
+    /// # Returns
+    ///
+    /// 復元したバージョンを返す。
+    ///
+    /// # Errors
+    ///
+    /// ファイルまたはバージョンが存在しない場合、またはファイルを操作する権限がない場合は、
+    /// [`BoxClientError::Api`]を返す。
+    /// 再試行できないエラーが発生した場合、または再試行回数の上限に達した場合はエラーを返す。
+    pub async fn restore_file_version(
+        &self,
+        file_id: &FileId,
+        file_version_id: &FileVersionId,
+    ) -> BoxClientResult<FileVersion> {
+        let request = ApiRequest::put([
+            "files",
+            file_id.as_ref(),
+            "versions",
+            file_version_id.as_ref(),
+        ])
+        .json(&RestoreFileVersionBody { trashed_at: None })?;
+        let version = self.send_json(request).await?;
+
+        tracing::debug!(
+            file_id = file_id.as_ref(),
+            file_version_id = file_version_id.as_ref(),
+            "restored file version"
+        );
+
+        Ok(version)
+    }
+
+    /// ファイルのバージョンを削除する。
+    ///
+    /// BOXは、削除したバージョンをゴミ箱に移動する。ゴミ箱に移動したバージョンは、
+    /// [`BoxClient::restore_file_version`]でファイルのバージョン履歴に戻せる。
+    ///
+    /// クライアントは、5xxを受け取った場合、またはタイムアウトした場合に、同じリクエストを再送して再試行する。
+    /// しかし、これらの場合は、BOXがバージョンの削除を完了している可能性がある。
+    /// BOXが削除した後にリクエストを再送すると、削除済みのバージョンに対する削除となるため、BOXはエラーを返しうる。
+    /// その結果、削除に成功したにもかかわらず、削除に失敗したと誤って判断するおそれがある。
+    /// したがって、[`BoxClient::delete_file`]と同様に、HTTPメソッドがDELETEであっても冪等でないリクエストとして送信し、
+    /// BOXがリクエストを処理していないことが明らかな429、エラーコードが`operation_blocked_temporary`の409
+    /// および接続エラーの後にのみ再試行する。
+    ///
+    /// # Arguments
+    ///
+    /// - `file_id`: ファイルのID
+    /// - `file_version_id`: 削除するバージョンのID
+    /// - `etag`: 最後に取得したファイルの`ETag`。指定した場合は`If-Match`ヘッダーで送信し、
+    ///   ファイルが`ETag`の取得後に変更されていると、BOXはバージョンを削除せずに412を返す。
+    ///
+    /// # Errors
+    ///
+    /// `etag`に使用できない文字が含まれる場合は、リクエストを送信せずに
+    /// [`BoxClientError::InvalidHeaderValue`]を返す。
+    /// BOXがエラーレスポンスを返した場合は、[`BoxClientError::Api`]を返す。主なステータスは次のとおり。
+    ///
+    /// - 404: ファイルまたはバージョンが存在しない、またはファイルにアクセスする権限がない。
+    /// - 412: `etag`がファイルの現在の`ETag`と一致しない。
+    ///
+    /// 5xxまたはタイムアウトでエラーを返した場合は、BOXがバージョンを削除した可能性があるため、
+    /// [`BoxClient::file_version`]でバージョンの`trashed_at`を確認する。
+    pub async fn delete_file_version(
+        &self,
+        file_id: &FileId,
+        file_version_id: &FileVersionId,
+        etag: Option<&str>,
+    ) -> BoxClientResult<()> {
+        let mut request = ApiRequest::delete([
+            "files",
+            file_id.as_ref(),
+            "versions",
+            file_version_id.as_ref(),
+        ])
+        .idempotency(Idempotency::NonIdempotent);
+        if let Some(etag) = etag {
+            request = request.header(IF_MATCH, etag)?;
+        }
+
+        self.send_empty(request).await?;
+
+        tracing::debug!(
+            file_id = file_id.as_ref(),
+            file_version_id = file_version_id.as_ref(),
+            "deleted file version"
+        );
+
+        Ok(())
     }
 }
 
@@ -674,6 +790,177 @@ mod test_promote_file_version {
             matches!(&result, Err(BoxClientError::Api(e)) if e.status == status),
             "result: {result:?}"
         );
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod test_restore_file_version {
+    use rstest::rstest;
+    use serde_json::json;
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{body_json, method, path},
+    };
+
+    use super::*;
+    use crate::test_support::{create_client, mount_token, short_retry};
+
+    /// ファイルのバージョンのAPIのパス
+    const VERSION_PATH: &str = "/2.0/files/12345/versions/67890";
+
+    /// `trashed_at`に`null`を指定してPUTで送信し、復元したバージョンを返すことを確認
+    #[tokio::test]
+    async fn test_restore_file_version() -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        Mock::given(method("PUT"))
+            .and(path(VERSION_PATH))
+            .and(body_json(json!({"trashed_at": null})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "type": "file_version",
+                "id": "67890",
+                "version_number": "1",
+                "trashed_at": null,
+                "restored_at": "2012-12-12T10:53:43-08:00",
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = create_client(&server, short_retry(0)?).await?;
+
+        let version = client
+            .restore_file_version(&FileId::new("12345"), &FileVersionId::new("67890"))
+            .await?;
+
+        assert_eq!(version.id, FileVersionId::new("67890"));
+        assert!(version.trashed_at.is_none());
+        assert!(version.restored_at.is_some());
+
+        Ok(())
+    }
+
+    /// 復元は冪等であるため、5xxの後に再試行し、4xxは再試行せずにそのまま返すことを確認
+    #[rstest]
+    #[case::not_found(404, 1)]
+    #[case::internal_server_error(500, 3)]
+    #[tokio::test]
+    async fn test_restore_file_version_retries_only_server_errors(
+        #[case] status: u16,
+        #[case] expected_requests: u64,
+    ) -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        Mock::given(method("PUT"))
+            .and(path(VERSION_PATH))
+            .respond_with(ResponseTemplate::new(status))
+            .expect(expected_requests)
+            .mount(&server)
+            .await;
+        let client = create_client(&server, short_retry(2)?).await?;
+
+        let result = client
+            .restore_file_version(&FileId::new("12345"), &FileVersionId::new("67890"))
+            .await;
+
+        assert!(
+            matches!(&result, Err(BoxClientError::Api(e)) if e.status == status),
+            "result: {result:?}"
+        );
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod test_delete_file_version {
+    use rstest::rstest;
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{method, path},
+    };
+
+    use super::*;
+    use crate::test_support::{create_client, mount_token, short_retry};
+
+    /// ファイルのバージョンのAPIのパス
+    const VERSION_PATH: &str = "/2.0/files/12345/versions/67890";
+
+    /// バージョンのAPIへのDELETEリクエストのIf-Matchヘッダーを返す。
+    async fn delete_requests(server: &MockServer) -> Vec<Option<String>> {
+        server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|r| r.method.as_str() == "DELETE" && r.url.path() == VERSION_PATH)
+            .map(|r| {
+                r.headers
+                    .get("if-match")
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_owned)
+            })
+            .collect()
+    }
+
+    /// `ETag`を指定した場合だけ、If-Matchヘッダーを送信してバージョンを削除することを確認
+    #[rstest]
+    #[case::without_etag(None)]
+    #[case::with_etag(Some("1"))]
+    #[tokio::test]
+    async fn test_delete_file_version(#[case] etag: Option<&'static str>) -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        Mock::given(method("DELETE"))
+            .and(path(VERSION_PATH))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+        let client = create_client(&server, short_retry(0)?).await?;
+
+        client
+            .delete_file_version(&FileId::new("12345"), &FileVersionId::new("67890"), etag)
+            .await?;
+
+        assert_eq!(
+            delete_requests(&server).await,
+            vec![etag.map(str::to_owned)]
+        );
+
+        Ok(())
+    }
+
+    /// BOXのエラーレスポンスを、再試行せずにそのまま返すことを確認
+    ///
+    /// 削除は冪等でないため、5xxの後にも再送しない。
+    #[rstest]
+    #[case::not_found(404)]
+    #[case::etag_mismatch(412)]
+    #[case::internal_server_error(500)]
+    #[case::service_unavailable(503)]
+    #[tokio::test]
+    async fn test_delete_file_version_error_is_not_retried(
+        #[case] status: u16,
+    ) -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        Mock::given(method("DELETE"))
+            .and(path(VERSION_PATH))
+            .respond_with(ResponseTemplate::new(status))
+            .mount(&server)
+            .await;
+        let client = create_client(&server, short_retry(2)?).await?;
+
+        let result = client
+            .delete_file_version(&FileId::new("12345"), &FileVersionId::new("67890"), None)
+            .await;
+
+        assert!(
+            matches!(&result, Err(BoxClientError::Api(e)) if e.status == status),
+            "result: {result:?}"
+        );
+        assert_eq!(delete_requests(&server).await.len(), 1);
 
         Ok(())
     }
