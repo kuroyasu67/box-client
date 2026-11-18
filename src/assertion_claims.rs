@@ -12,7 +12,10 @@ pub(crate) struct AssertionClaims<'a> {
     /// 主体の種類。`enterprise`または`user`を指定する。
     pub box_sub_type: &'a str,
 
-    /// 受信者。トークンエンドポイントのURLを指定する。
+    /// 受信者
+    ///
+    /// BOXは、BOXのトークンエンドポイントのURLを求める。BOXクライアントは、トークンエンドポイントのURLの設定によらず、
+    /// BOXのトークンエンドポイントのURLを指定する。
     pub aud: &'a str,
 
     /// JWTアサーションの一意な識別子

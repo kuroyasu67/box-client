@@ -38,8 +38,8 @@ pub use api::folders::{
 pub use api::trash::{ListTrashedItemsOptions, RestoreItemOptions};
 pub use api::types::{
     BoxItem, FileId, FileItem, FileVersionId, FolderId, FolderItem, ItemStatus,
-    MAX_DESCRIPTION_CHARS, MoveDestination, ParentFolder, PathCollection, UpdateItemOptions,
-    UserId, WebLinkId, WebLinkItem,
+    MAX_DESCRIPTION_CHARS, MAX_NAME_CHARS, MoveDestination, ParentFolder, PathCollection,
+    UpdateItemOptions, UserId, WebLinkId, WebLinkItem,
 };
 pub use api::uploads::{UpdateFileContentOptions, UploadFileOptions, UploadUrl};
 pub use api::users::{User, UserMini};
@@ -49,10 +49,10 @@ pub use api::versions::{
 pub use api::web_links::{CreateWebLinkOptions, WebLink};
 pub use client::{
     BoxClient, BoxClientBuilder, BoxClientTimeout, DEFAULT_CHUNKED_UPLOAD_THRESHOLD,
-    DEFAULT_MAX_COMMIT_POLLS, DEFAULT_MAX_DOWNLOAD_POLLS, DEFAULT_UPLOAD_CONCURRENCY,
-    MAX_CHUNKED_UPLOAD_THRESHOLD, MAX_COMMIT_POLLS_LIMIT, MAX_DOWNLOAD_POLLS_LIMIT,
-    MAX_REFRESH_BEFORE_EXPIRY, MAX_UPLOAD_CONCURRENCY, MIN_CHUNKED_UPLOAD_THRESHOLD,
-    MIN_UPLOAD_CONCURRENCY,
+    DEFAULT_MAX_COMMIT_POLLS, DEFAULT_MAX_DOWNLOAD_POLLS, DEFAULT_REFRESH_BEFORE_EXPIRY,
+    DEFAULT_UPLOAD_CONCURRENCY, MAX_CHUNKED_UPLOAD_THRESHOLD, MAX_COMMIT_POLLS_LIMIT,
+    MAX_DOWNLOAD_POLLS_LIMIT, MAX_REFRESH_BEFORE_EXPIRY, MAX_UPLOAD_CONCURRENCY,
+    MIN_CHUNKED_UPLOAD_THRESHOLD, MIN_UPLOAD_CONCURRENCY,
 };
 pub use config::{BoxAppAuth, BoxAppSettings, BoxConfig};
 pub use errors::{ApiError, BoxClientError, BoxClientResult, CryptoError, ValidationError};

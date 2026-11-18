@@ -8,10 +8,9 @@ use std::path::Path;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use bytes::Bytes;
 use futures_util::stream::{FuturesUnordered, StreamExt as _};
-use garde::Validate;
 use reqwest::{
-    Method, Response, StatusCode,
-    header::{CONTENT_RANGE, HeaderName, HeaderValue, IF_MATCH},
+    Method, Response,
+    header::{CONTENT_RANGE, HeaderName, HeaderValue},
 };
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
@@ -20,10 +19,9 @@ use tokio::io::AsyncReadExt as _;
 
 use crate::{
     BoxClient, BoxClientError, BoxClientResult, File, FileId, FolderId, ParentFolder,
-    ValidationError,
-    api::types::validate_item_name,
+    api::types::RenameBody,
     request::ApiRequest,
-    retry::{AttemptError, Idempotency, parse_retry_after, read_json},
+    retry::{AttemptError, Idempotency, read_json, read_poll_response},
 };
 
 /// 内容のハッシュを送信するヘッダー
@@ -194,25 +192,15 @@ impl UploadTarget<'_> {
     }
 }
 
-/// BOXに保存するファイル名
-#[derive(Debug, Validate)]
-struct FileName<'a> {
-    /// ファイル名
-    ///
-    /// BOXは、名前の長さを文字数で数える。
-    #[garde(length(chars, min = 1, max = 255), custom(validate_item_name))]
-    name: &'a str,
-}
-
 /// ファイル名を検証する。
+///
+/// BOXは、ファイル名をファイル名の変更と同じ規則で検証するため、名前変更リクエストのボディの検証を使用する。
 ///
 /// # Errors
 ///
 /// ファイル名をBOXが拒否する場合は、[`BoxClientError::InvalidRequestBody`]を返す。
 fn validate_file_name(name: &str) -> BoxClientResult<()> {
-    FileName { name }
-        .validate()
-        .map_err(|report| BoxClientError::InvalidRequestBody(ValidationError::new(report)))
+    RenameBody::new(name).map(|_| ())
 }
 
 /// 1回のリクエストでアップロードする場合の、ファイルの属性
@@ -441,34 +429,18 @@ impl CommitResponse {
     }
 }
 
-/// アップロードセッションのコミットの結果
-#[derive(Debug)]
-enum CommitOutcome {
-    /// BOXがファイルを作成した。
-    Committed(CommitResponse),
-
-    /// BOXが部分を処理しているため、コミットを再送する必要がある。
-    Processing {
-        /// `Retry-After`ヘッダーが示す待機時間
-        retry_after: Option<std::time::Duration>,
-    },
-}
-
-/// アップロードセッションのコミットの成功レスポンスを読み込む。
+/// コミットのエラーが、BOXがコミットを処理している可能性を残すかどうかを返す。
 ///
-/// BOXは、すべての部分を受け取ったが処理を終えていない場合に、202と`Retry-After`ヘッダーを返す。
-async fn read_commit_response(
-    response: Response,
-    idempotency: Idempotency,
-) -> Result<CommitOutcome, AttemptError> {
-    if response.status() == StatusCode::ACCEPTED {
-        return Ok(CommitOutcome::Processing {
-            retry_after: parse_retry_after(response.headers()),
-        });
+/// 5xx、タイムアウト、通信エラー、およびBOXが処理を終えないまま再送の上限に達した場合は、
+/// BOXがコミットを処理している可能性がある。
+fn commit_may_be_processing(error: &BoxClientError) -> bool {
+    match error {
+        BoxClientError::Api(api_error) => api_error.status.is_server_error(),
+        BoxClientError::Http(_)
+        | BoxClientError::RetryAfterTooLong { .. }
+        | BoxClientError::UnexpectedResponse(_) => true,
+        _ => false,
     }
-    read_json(response, idempotency)
-        .await
-        .map(CommitOutcome::Committed)
 }
 
 /// ファイルの読み込みエラーを、パスを含むエラーに変換する関数を返す。
@@ -774,6 +746,11 @@ impl BoxClient {
         if let Some(name) = options.name {
             validate_file_name(name)?;
         }
+        // 分割アップロードでは、`ETag`をコミットで初めて送信する。
+        // すべての部分をアップロードした後に`ETag`の不正に気づかないように、アップロードを始める前に検証する。
+        if let Some(etag) = options.etag {
+            HeaderValue::from_str(etag).map_err(BoxClientError::InvalidHeaderValue)?;
+        }
 
         let target = UploadTarget::NewVersion {
             file_id,
@@ -796,7 +773,8 @@ impl BoxClient {
         let size = file.metadata().await.map_err(read_file_error(path))?.len();
 
         let uploaded = if size <= threshold {
-            self.upload_file_directly(path, &mut file, &target).await?
+            self.upload_file_directly(path, &mut file, size, &target)
+                .await?
         } else {
             self.upload_file_in_chunks(path, &mut file, size, &target)
                 .await?
@@ -823,12 +801,21 @@ impl BoxClient {
         &self,
         path: &Path,
         file: &mut tokio::fs::File,
+        size: u64,
         target: &UploadTarget<'_>,
     ) -> BoxClientResult<File> {
+        /// ボディのうち、ファイルの内容と`attributes`パートの内容以外の、multipartの区切りとヘッダーのバイト数の見積もり
+        const MULTIPART_OVERHEAD: usize = 512;
+
         let attributes = target.direct_upload_attributes()?;
         let boundary = format!("box-client-{}", uuid::Uuid::new_v4().simple());
 
-        let mut body = Vec::new();
+        // `read_to_end`がバッファを倍々に拡張して、ファイルサイズの約2倍のメモリを確保しないように、必要な容量を先に確保する。
+        // ファイルサイズは分割アップロードに切り替えるファイルサイズ以下であるため、`usize`に収まる。
+        let capacity = usize::try_from(size)
+            .unwrap_or(0)
+            .saturating_add(attributes.len() + MULTIPART_OVERHEAD);
+        let mut body = Vec::with_capacity(capacity);
         body.extend_from_slice(
             format!(
                 "--{boundary}\r\n\
@@ -862,9 +849,7 @@ impl BoxClient {
             .upload_host()
             .header(CONTENT_MD5, &content_sha1)?
             .body(content_type, Bytes::from(body));
-        if let Some(etag) = target.etag() {
-            request = request.header(IF_MATCH, etag)?;
-        }
+        request = request.if_match(target.etag())?;
 
         let files: FileCollection = self.send_json(request).await?;
         files.into_first()
@@ -872,7 +857,10 @@ impl BoxClient {
 
     /// ファイルを分割アップロードのAPIでアップロードする。
     ///
-    /// 部分のアップロードまたはコミットに失敗した場合は、アップロードセッションを中止してからエラーを返す。
+    /// 部分のアップロードに失敗した場合は、アップロードセッションを中止してからエラーを返す。
+    /// コミットに失敗した場合は、BOXがコミットを拒否したことが明らかな場合だけ、アップロードセッションを中止する。
+    /// 5xx、タイムアウトおよび通信エラーの場合は、BOXがコミットを処理している可能性があるため、中止しない。
+    /// 中止すると、BOXが処理しているコミットを取り消すおそれがあるためである。
     async fn upload_file_in_chunks(
         &self,
         path: &Path,
@@ -889,27 +877,45 @@ impl BoxClient {
             "created upload session"
         );
 
+        let (digest, parts) = match self.upload_parts(path, file, size, &session).await {
+            Ok(uploaded) => uploaded,
+            Err(error) => {
+                self.abort_upload_session(&session.id).await;
+                return Err(error);
+            }
+        };
+
         let result = self
-            .upload_parts_and_commit(path, file, size, &session, target.etag())
+            .commit_upload_session(&session, &digest, &parts, target.etag())
             .await;
-        if result.is_err() {
-            self.abort_upload_session(&session.id).await;
+        if let Err(error) = &result {
+            if commit_may_be_processing(error) {
+                tracing::debug!(
+                    upload_session_id = session.id,
+                    "commit may be being processed; not aborting upload session"
+                );
+            } else {
+                self.abort_upload_session(&session.id).await;
+            }
         }
         result
     }
 
-    /// ファイルを部分ごとにアップロードし、アップロードセッションをコミットする。
+    /// ファイルを部分ごとにアップロードし、ファイル全体の`Digest`ヘッダーの値と、位置の順に並べた部分を返す。
     ///
     /// ファイルを先頭から順に読み込みながら、[`BoxClient::upload_concurrency`]個までの部分を並列にアップロードする。
     /// いずれかの部分のアップロードに失敗した場合は、アップロード中の部分を取り消してエラーを返す。
-    async fn upload_parts_and_commit(
+    ///
+    /// # Errors
+    ///
+    /// ファイルを読み込めない場合、またはアップロード中にファイルサイズが変わった場合は、[`BoxClientError::ReadFile`]を返す。
+    async fn upload_parts(
         &self,
         path: &Path,
         file: &mut tokio::fs::File,
         size: u64,
         session: &UploadSession,
-        etag: Option<&str>,
-    ) -> BoxClientResult<File> {
+    ) -> BoxClientResult<(String, Vec<UploadedPart>)> {
         // 部分のサイズが0の場合は、ファイルを読み進められず無限ループになるため、BOXの応答を不正として扱う。
         if session.part_size == 0 {
             return Err(BoxClientError::UnexpectedResponse(
@@ -959,11 +965,19 @@ impl BoxClient {
             parts.push(part);
         }
 
+        // アップロード中にファイルが大きくなった場合は、BOXがファイルの先頭部分だけを保存しないように、エラーを返す。
+        // ファイルが小さくなった場合は、部分の読み込みで`read_exact`がエラーを返す。
+        let mut probe = [0u8; 1];
+        if file.read(&mut probe).await.map_err(read_file_error(path))? != 0 {
+            return Err(read_file_error(path)(std::io::Error::other(
+                "the file grew during the upload",
+            )));
+        }
+
         // 部分は完了した順に並ぶため、コミットの前にファイルの先頭からの位置の順に並べ替える。
         parts.sort_by_key(|part| part.offset);
         let digest = sha1_digest_header(&file_hasher.finalize());
-        self.commit_upload_session(session, &digest, &parts, etag)
-            .await
+        Ok((digest, parts))
     }
 
     /// 部分をアップロードする。
@@ -995,9 +1009,9 @@ impl BoxClient {
 
     /// アップロードセッションをコミットする。
     ///
-    /// BOXが部分の処理を終えていないことを示す202を返した場合は、`Retry-After`ヘッダーが示す時間だけ待機してから、
-    /// コミットを再送する。再送する回数の上限は、[`BoxClient::max_commit_polls`]が返す値とする。
-    /// `Retry-After`ヘッダーがない場合、または待機時間の上限を超える場合は、再試行設定に従って待機時間を決める。
+    /// BOXが部分の処理を終えていないことを示す202を返した場合、このメソッドは、
+    /// [`BoxClient::poll_until_ready`]に従って待機してから、コミットを再送する。
+    /// 再送する回数の上限は、[`BoxClient::max_commit_polls`]が返す値とする。
     ///
     /// `etag`を指定した場合は、`If-Match`ヘッダーで送信する。
     async fn commit_upload_session(
@@ -1008,40 +1022,33 @@ impl BoxClient {
         etag: Option<&str>,
     ) -> BoxClientResult<File> {
         let body = CommitUploadSessionBody { parts };
-        let mut polls = 0;
-        loop {
-            let mut request = ApiRequest::post(["files", "upload_sessions", &session.id, "commit"])
-                .upload_host()
-                .header(DIGEST, digest)?
-                .json(&body)?;
-            if let Some(etag) = etag {
-                request = request.header(IF_MATCH, etag)?;
-            }
-            let retry_after = match self.send(request, read_commit_response).await? {
-                CommitOutcome::Committed(response) => return response.into_file(),
-                CommitOutcome::Processing { retry_after } => retry_after,
-            };
-
-            if self.max_commit_polls() <= polls {
-                return Err(BoxClientError::UnexpectedResponse(
-                    "upload session was not committed before reaching max commit polls",
-                ));
-            }
-            polls += 1;
-
-            // `ThreadRng`は`Send`を実装していないため、待機時間の計算と待機を別の文に分け、`ThreadRng`を待機の前に破棄する。
-            let policy = self.retry_policy();
-            let delay = policy
-                .retry_delay(polls, retry_after, &mut rand::rng())
-                .unwrap_or_else(|_| policy.max_delay());
-            tracing::debug!(
-                upload_session_id = session.id,
-                polls,
-                delay_ms = delay.as_millis(),
-                "upload session is being processed; resending commit"
-            );
-            tokio::time::sleep(delay).await;
-        }
+        let response: CommitResponse = self
+            .poll_until_ready(
+                self.max_commit_polls(),
+                "upload session was not committed before reaching max commit polls",
+                |polls, delay| {
+                    tracing::debug!(
+                        upload_session_id = session.id,
+                        polls,
+                        delay_ms = delay.as_millis(),
+                        "upload session is being processed; resending commit"
+                    );
+                },
+                || async {
+                    let request =
+                        ApiRequest::post(["files", "upload_sessions", &session.id, "commit"])
+                            .upload_host()
+                            .header(DIGEST, digest)?
+                            .json(&body)?
+                            .if_match(etag)?;
+                    self.send(request, |response, idempotency| {
+                        read_poll_response(response, idempotency, read_json)
+                    })
+                    .await
+                },
+            )
+            .await?;
+        response.into_file()
     }
 
     /// アップロードセッションを中止する。
@@ -1062,6 +1069,27 @@ impl BoxClient {
 }
 
 #[cfg(test)]
+mod chunked_upload_test_constants {
+    //! 分割アップロードのテストで共有する定数
+
+    /// 分割アップロードに切り替えるファイルサイズ
+    ///
+    /// 大きなファイルを作成せずに分割アップロードを確認できるように、小さい値にする。
+    pub(super) const THRESHOLD: u64 = 20;
+
+    /// 分割アップロードでアップロードするファイルの内容
+    ///
+    /// 部分のサイズを10バイトとし、最後の部分が部分のサイズより小さくなる長さにする。
+    pub(super) const CHUNKED_CONTENT: &[u8] = b"abcdefghijklmnopqrstuvwxy";
+
+    /// 分割アップロードの部分のサイズ
+    pub(super) const PART_SIZE: usize = 10;
+
+    /// アップロードセッションのID
+    pub(super) const SESSION_ID: &str = "S1";
+}
+
+#[cfg(test)]
 mod test_upload_file {
     use std::{path::PathBuf, time::Duration};
 
@@ -1069,39 +1097,21 @@ mod test_upload_file {
     use serde_json::json;
     use tempfile::TempDir;
     use wiremock::{
-        Mock, MockServer, Request, ResponseTemplate,
+        Mock, MockServer, ResponseTemplate,
         matchers::{body_json, header, method, path},
     };
 
-    use super::*;
+    use super::{
+        chunked_upload_test_constants::{CHUNKED_CONTENT, PART_SIZE, SESSION_ID, THRESHOLD},
+        *,
+    };
     use crate::{
         MIN_CHUNKED_UPLOAD_THRESHOLD,
         test_support::{
-            UPLOAD_BASE_PATH, client_builder, create_client, create_client_with_upload_concurrency,
-            mount_token, request_count, short_retry,
+            client_builder, create_client, create_client_with_upload_concurrency, mount_token,
+            request_count, requests, short_retry, upload_path,
         },
     };
-
-    /// 分割アップロードに切り替えるファイルサイズ
-    ///
-    /// 大きなファイルを作成せずに分割アップロードを確認できるように、小さい値にする。
-    const THRESHOLD: u64 = 20;
-
-    /// 分割アップロードでアップロードするファイルの内容
-    ///
-    /// 部分のサイズを10バイトとし、最後の部分が部分のサイズより小さくなる長さにする。
-    const CHUNKED_CONTENT: &[u8] = b"abcdefghijklmnopqrstuvwxy";
-
-    /// 分割アップロードの部分のサイズ
-    const PART_SIZE: usize = 10;
-
-    /// アップロードセッションのID
-    const SESSION_ID: &str = "S1";
-
-    /// アップロードのAPIのパスを返す。
-    fn upload_path(suffix: &str) -> String {
-        format!("{UPLOAD_BASE_PATH}{suffix}")
-    }
 
     /// 一時ディレクトリに、指定した名前と内容のファイルを作成する。
     fn create_file(name: &str, content: &[u8]) -> anyhow::Result<(TempDir, PathBuf)> {
@@ -1114,17 +1124,6 @@ mod test_upload_file {
     /// ファイル情報のJSONを返す。
     fn file_json(name: &str) -> serde_json::Value {
         json!({"type": "file", "id": "11", "name": name})
-    }
-
-    /// 指定したメソッドとパスのリクエストを返す。
-    async fn requests(server: &MockServer, http_method: &str, request_path: &str) -> Vec<Request> {
-        server
-            .received_requests()
-            .await
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|r| r.method.as_str() == http_method && r.url.path() == request_path)
-            .collect()
     }
 
     /// 1回のリクエストで、`attributes`パート、`file`パートの順に送信し、内容のSHA-1をヘッダーで送信することを確認
@@ -1570,6 +1569,92 @@ mod test_upload_file {
         Ok(())
     }
 
+    /// コミットに失敗した場合は、BOXがコミットを拒否したことが明らかな場合だけアップロードセッションを中止することを確認
+    ///
+    /// 5xxの場合は、BOXがコミットを処理している可能性があるため、中止しない。
+    #[rstest]
+    #[case::precondition_failed(412, 1)]
+    #[case::internal_server_error(500, 0)]
+    #[tokio::test]
+    async fn test_upload_file_in_chunks_aborts_session_only_if_commit_rejected(
+        #[case] status: u16,
+        #[case] expected_aborts: usize,
+    ) -> anyhow::Result<()> {
+        let (_dir, file_path) = create_file("big.bin", CHUNKED_CONTENT)?;
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        mount_session_and_parts(&server).await;
+        let session_path = upload_path(&format!("/files/upload_sessions/{SESSION_ID}"));
+        Mock::given(method("POST"))
+            .and(path(format!("{session_path}/commit")))
+            .respond_with(ResponseTemplate::new(status))
+            .mount(&server)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path(session_path.as_str()))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+        let client = create_client(&server, short_retry(0)?).await?;
+
+        let result = client
+            .upload_file_with_threshold(
+                &file_path,
+                &FolderId::root(),
+                &UploadFileOptions::default(),
+                THRESHOLD,
+            )
+            .await;
+
+        assert!(
+            matches!(&result, Err(BoxClientError::Api(e)) if e.status == status),
+            "result: {result:?}"
+        );
+        assert_eq!(
+            requests(&server, "DELETE", &session_path).await.len(),
+            expected_aborts
+        );
+
+        Ok(())
+    }
+
+    /// アップロード中にファイルが大きくなった場合は、コミットせずにエラーを返すことを確認
+    ///
+    /// アップロードを始めたときのファイルサイズとして、実際より小さいサイズを渡し、ファイルが大きくなった状態を再現する。
+    #[tokio::test]
+    async fn test_upload_parts_rejects_grown_file() -> anyhow::Result<()> {
+        let (_dir, file_path) = create_file("big.bin", CHUNKED_CONTENT)?;
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        Mock::given(method("PUT"))
+            .and(path(upload_path(&format!(
+                "/files/upload_sessions/{SESSION_ID}"
+            ))))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "part": {"part_id": "P", "offset": 0, "size": PART_SIZE, "sha1": "0"},
+            })))
+            .mount(&server)
+            .await;
+        let client = create_client(&server, short_retry(0)?).await?;
+        let session = UploadSession {
+            id: SESSION_ID.to_owned(),
+            part_size: PART_SIZE as u64,
+            total_parts: 2,
+        };
+        let mut file = tokio::fs::File::open(&file_path).await?;
+
+        let result = client
+            .upload_parts(&file_path, &mut file, 2 * PART_SIZE as u64, &session)
+            .await;
+
+        assert!(
+            matches!(&result, Err(BoxClientError::ReadFile { path, .. }) if *path == file_path),
+            "result: {result:?}"
+        );
+
+        Ok(())
+    }
+
     /// BOXクライアントに設定した、分割アップロードに切り替えるファイルサイズに従って、アップロードの方法を選ぶことを確認
     ///
     /// アップロードの方法だけを確かめるため、BOXはどちらのアップロードにもエラーを返す。
@@ -1637,27 +1722,13 @@ mod test_update_file_content {
         matchers::{body_json, header, method, path},
     };
 
-    use super::*;
-    use crate::test_support::{
-        UPLOAD_BASE_PATH, create_client, mount_token, request_count, short_retry,
+    use super::{
+        chunked_upload_test_constants::{CHUNKED_CONTENT, PART_SIZE, SESSION_ID, THRESHOLD},
+        *,
     };
-
-    /// 分割アップロードに切り替えるファイルサイズ
-    const THRESHOLD: u64 = 20;
-
-    /// 分割アップロードでアップロードするファイルの内容
-    const CHUNKED_CONTENT: &[u8] = b"abcdefghijklmnopqrstuvwxy";
-
-    /// 分割アップロードの部分のサイズ
-    const PART_SIZE: usize = 10;
-
-    /// アップロードセッションのID
-    const SESSION_ID: &str = "S1";
-
-    /// アップロードのAPIのパスを返す。
-    fn upload_path(suffix: &str) -> String {
-        format!("{UPLOAD_BASE_PATH}{suffix}")
-    }
+    use crate::test_support::{
+        create_client, if_match, mount_token, request_count, requests, short_retry, upload_path,
+    };
 
     /// 一時ディレクトリに、指定した内容のファイルを作成する。
     fn create_file(content: &[u8]) -> anyhow::Result<(TempDir, PathBuf)> {
@@ -1670,26 +1741,6 @@ mod test_update_file_content {
     /// ファイル情報のJSONを返す。
     fn file_json(name: &str) -> serde_json::Value {
         json!({"type": "file", "id": "123", "etag": "2", "name": name})
-    }
-
-    /// 指定したメソッドとパスのリクエストを返す。
-    async fn requests(server: &MockServer, http_method: &str, request_path: &str) -> Vec<Request> {
-        server
-            .received_requests()
-            .await
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|r| r.method.as_str() == http_method && r.url.path() == request_path)
-            .collect()
-    }
-
-    /// リクエストの`If-Match`ヘッダーを返す。
-    fn if_match(request: &Request) -> Option<String> {
-        request
-            .headers
-            .get("if-match")
-            .and_then(|v| v.to_str().ok())
-            .map(str::to_owned)
     }
 
     /// 1回のリクエストで、`POST /files/{file_id}/content`に新しい内容を送信することを確認
@@ -1756,27 +1807,39 @@ mod test_update_file_content {
         Ok(())
     }
 
-    /// BOXが拒否する新しいファイル名を指定した場合は、リクエストを送信せずにエラーを返すことを確認
+    /// BOXが拒否する新しいファイル名、またはヘッダーに使用できない文字を含む`ETag`を指定した場合は、
+    /// リクエストを送信せずにエラーを返すことを確認
+    ///
+    /// 分割アップロードでは`ETag`をコミットで初めて送信するため、閾値を超えるファイルでも、部分をアップロードする前に検証する。
+    #[rstest]
+    #[case::invalid_name(UpdateFileContentOptions::default().with_name("a/b"), "InvalidRequestBody")]
+    #[case::invalid_etag(UpdateFileContentOptions::default().with_etag("1\n"), "InvalidHeaderValue")]
     #[tokio::test]
-    async fn test_update_file_content_rejects_invalid_name() -> anyhow::Result<()> {
-        let (_dir, file_path) = create_file(b"hello")?;
+    async fn test_update_file_content_rejects_without_request(
+        #[case] options: UpdateFileContentOptions<'static>,
+        #[case] expected: &str,
+    ) -> anyhow::Result<()> {
+        let (_dir, file_path) = create_file(CHUNKED_CONTENT)?;
         let server = MockServer::start().await;
         mount_token(&server).await;
         let client = create_client(&server, short_retry(0)?).await?;
         let requests_before = request_count(&server).await;
 
         let result = client
-            .update_file_content(
+            .update_file_content_with_threshold(
                 &FileId::new("123"),
                 &file_path,
-                &UpdateFileContentOptions::default().with_name("a/b"),
+                &options,
+                THRESHOLD,
             )
             .await;
 
-        assert!(
-            matches!(result, Err(BoxClientError::InvalidRequestBody(_))),
-            "result: {result:?}"
-        );
+        let actual = match &result {
+            Err(BoxClientError::InvalidRequestBody(_)) => "InvalidRequestBody",
+            Err(BoxClientError::InvalidHeaderValue(_)) => "InvalidHeaderValue",
+            _ => "other",
+        };
+        assert_eq!(actual, expected, "result: {result:?}");
         assert_eq!(request_count(&server).await, requests_before);
 
         Ok(())

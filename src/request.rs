@@ -3,7 +3,7 @@ use std::borrow::Cow;
 use bytes::Bytes;
 use reqwest::{
     Method, Url,
-    header::{AUTHORIZATION, HeaderName, HeaderValue},
+    header::{AUTHORIZATION, CONTENT_TYPE, HeaderName, HeaderValue, IF_MATCH},
 };
 use serde::Serialize;
 
@@ -80,21 +80,22 @@ pub(crate) enum HttpClientKind {
 
 /// リクエストを送信するホスト
 ///
-/// BOXは、ファイルのアップロードを、REST APIとは別のホスト（`upload.box.com`）で受け付ける。
+/// BOXは、ファイルのアップロードを、REST APIとは別のホストで受け付ける。
+/// 各ホストのベースURLは、[`BoxClientBuilder`](crate::BoxClientBuilder)で変更できる。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ApiHost {
-    /// REST APIのホスト（`api.box.com`）
+    /// REST APIのホスト（既定値は`api.box.com`）
     Api,
 
-    /// アップロードのホスト（`upload.box.com`）
+    /// アップロードのホスト（既定値は`upload.box.com`）
     Upload,
 }
 
 impl<'a> ApiRequest<'a> {
     /// HTTPメソッドとパス要素からリクエストを作成する。
     ///
-    /// 冪等性はHTTPメソッドから決定する。パス要素はURLエンコードしてから結合するため、
-    /// IDに`/`などが含まれていても、意図したエンドポイントを呼び出す。
+    /// このメソッドは、冪等性をHTTPメソッドから決定する。
+    /// BOXクライアントは、パス要素をURLエンコードしてから結合するため、IDに`/`などが含まれていても、意図したエンドポイントを呼び出す。
     ///
     /// # Arguments
     ///
@@ -145,8 +146,9 @@ impl<'a> ApiRequest<'a> {
     ///
     /// # Errors
     ///
-    /// `Authorization`ヘッダーを指定した場合は、[`BoxClientError::InvalidArgument`]を返す。
-    /// `Authorization`ヘッダーはクライアントがアクセストークンから設定するため、重複して送信しないように拒否する。
+    /// `Authorization`ヘッダーまたは`Content-Type`ヘッダーを指定した場合は、[`BoxClientError::InvalidArgument`]を返す。
+    /// BOXクライアントは、`Authorization`ヘッダーをアクセストークンから、`Content-Type`ヘッダーをリクエストボディから設定する。
+    /// したがって、このメソッドは、ヘッダーを重複して送信しないように、これらのヘッダーを拒否する。
     /// ヘッダーの値に制御文字など使用できない文字が含まれる場合は、
     /// [`BoxClientError::InvalidHeaderValue`]を返す。
     pub fn header(mut self, name: HeaderName, value: &str) -> BoxClientResult<Self> {
@@ -155,9 +157,28 @@ impl<'a> ApiRequest<'a> {
                 "authorization header is set by the client",
             ));
         }
+        if name == CONTENT_TYPE {
+            return Err(BoxClientError::InvalidArgument(
+                "content-type header is set from the request body",
+            ));
+        }
         let value = HeaderValue::from_str(value).map_err(BoxClientError::InvalidHeaderValue)?;
         self.headers.push((name, value));
         Ok(self)
+    }
+
+    /// `ETag`を指定した場合は、`If-Match`ヘッダーを追加する。
+    ///
+    /// BOXは、項目が`ETag`の取得後に変更されている場合に、リクエストを処理せずに412を返す。
+    ///
+    /// # Errors
+    ///
+    /// `etag`に制御文字など使用できない文字が含まれる場合は、[`BoxClientError::InvalidHeaderValue`]を返す。
+    pub(crate) fn if_match(self, etag: Option<&str>) -> BoxClientResult<Self> {
+        match etag {
+            Some(etag) => self.header(IF_MATCH, etag),
+            None => Ok(self),
+        }
     }
 
     /// リクエストボディをJSONにシリアライズして設定する。
@@ -360,10 +381,12 @@ mod test_api_request {
         Ok(())
     }
 
-    /// Authorizationヘッダーを指定した場合は、引数の不正エラーを返すことを確認
-    #[test]
-    fn test_header_rejects_authorization() {
-        let result = ApiRequest::get(["users"]).header(AUTHORIZATION, "Bearer other");
+    /// クライアントが設定するAuthorizationヘッダーまたはContent-Typeヘッダーを指定した場合は、引数の不正エラーを返すことを確認
+    #[rstest]
+    #[case::authorization(AUTHORIZATION, "Bearer other")]
+    #[case::content_type(CONTENT_TYPE, "text/plain")]
+    fn test_header_rejects_client_managed_headers(#[case] name: HeaderName, #[case] value: &str) {
+        let result = ApiRequest::get(["users"]).header(name, value);
 
         assert!(
             matches!(result, Err(BoxClientError::InvalidArgument(_))),
@@ -382,6 +405,21 @@ mod test_api_request {
             matches!(result, Err(BoxClientError::InvalidHeaderValue(_))),
             "result: {result:?}"
         );
+    }
+
+    /// `ETag`を指定した場合だけ、`If-Match`ヘッダーを追加することを確認
+    #[rstest]
+    #[case::some(Some("1"), vec![(IF_MATCH, HeaderValue::from_static("1"))])]
+    #[case::none(None, vec![])]
+    fn test_if_match(
+        #[case] etag: Option<&str>,
+        #[case] expected: Vec<(HeaderName, HeaderValue)>,
+    ) -> anyhow::Result<()> {
+        let request = ApiRequest::put(["files", "1"]).if_match(etag)?;
+
+        assert_eq!(request.headers, expected);
+
+        Ok(())
     }
 
     /// リクエストボディをJSONにシリアライズして保持することを確認

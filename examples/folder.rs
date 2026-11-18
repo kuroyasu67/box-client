@@ -13,7 +13,7 @@
 mod common;
 
 use box_client::{
-    BoxItem, CopyFolderOptions, DeleteFolderOptions, FolderId, ListItemsOptions, MoveDestination,
+    CopyFolderOptions, DeleteFolderOptions, FolderId, ListItemsOptions, MoveDestination,
     RestoreItemOptions,
 };
 
@@ -57,19 +57,7 @@ async fn main() -> anyhow::Result<()> {
     let items = client
         .list_all_items_in_folder(&parent_id, &ListItemsOptions::default())
         .await?;
-    for item in &items {
-        match item {
-            BoxItem::File(file) => tracing::info!("file: id={}, name={}", file.id, file.name),
-            BoxItem::Folder(folder) => {
-                tracing::info!("folder: id={}, name={}", folder.id, folder.name);
-            }
-            BoxItem::WebLink(link) => {
-                tracing::info!("web_link: id={}, name={}", link.id, link.name);
-            }
-            // `BoxItem`は`#[non_exhaustive]`であるため、`BoxItem::Unknown`と将来追加される種類をまとめて扱う。
-            _ => tracing::info!("unknown item"),
-        }
-    }
+    common::log_items(&items);
 
     // フォルダ名を変更
     // 直前に取得した`ETag`を指定し、取得後にフォルダが変更されていた場合は名前を変更しない。

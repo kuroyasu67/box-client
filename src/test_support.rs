@@ -1,10 +1,21 @@
 //! 複数のモジュールのテストで共有する補助関数
 
-use std::time::Duration;
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::Duration,
+};
 
+use reqwest::Url;
 use secrecy::SecretString;
 use serde_json::json;
-use wiremock::{Mock, MockServer, ResponseTemplate, matchers::path};
+use tokio::{
+    io::AsyncReadExt as _,
+    net::{TcpListener, TcpStream},
+};
+use wiremock::{Match, Mock, MockServer, Request, ResponseTemplate, matchers::path};
 
 use crate::{
     client::{BoxClient, BoxClientBuilder, BoxClientTimeout},
@@ -73,6 +84,140 @@ pub(crate) async fn request_count(server: &MockServer) -> usize {
     server.received_requests().await.map_or(0, |r| r.len())
 }
 
+/// モックサーバーが受信したリクエストのうち、指定したメソッドとパスのリクエストを返す。
+pub(crate) async fn requests(server: &MockServer, method: &str, path: &str) -> Vec<Request> {
+    server
+        .received_requests()
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|r| r.method.as_str() == method && r.url.path() == path)
+        .collect()
+}
+
+/// モックサーバーが受信した、指定したメソッドとパスのリクエストの数を返す。
+pub(crate) async fn count_requests(server: &MockServer, method: &str, path: &str) -> usize {
+    requests(server, method, path).await.len()
+}
+
+/// モックサーバーが受信した、指定したパスのリクエストの数をメソッドによらず返す。
+pub(crate) async fn count_requests_to_path(server: &MockServer, path: &str) -> usize {
+    server
+        .received_requests()
+        .await
+        .unwrap_or_default()
+        .iter()
+        .filter(|r| r.url.path() == path)
+        .count()
+}
+
+/// リクエストの`If-Match`ヘッダーを返す。
+pub(crate) fn if_match(request: &Request) -> Option<String> {
+    request
+        .headers
+        .get("if-match")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned)
+}
+
+/// モックサーバーが受信した、指定したメソッドとパスのリクエストの`If-Match`ヘッダーを返す。
+pub(crate) async fn if_match_headers(
+    server: &MockServer,
+    method: &str,
+    path: &str,
+) -> Vec<Option<String>> {
+    requests(server, method, path)
+        .await
+        .iter()
+        .map(if_match)
+        .collect()
+}
+
+/// `matcher`に一致するリクエストに、最初の`n`回だけ`response`を返すモックを登録する。
+pub(crate) async fn mount_first_n(
+    server: &MockServer,
+    matcher: impl Match + 'static,
+    response: ResponseTemplate,
+    n: u64,
+) {
+    Mock::given(matcher)
+        .respond_with(response)
+        .up_to_n_times(n)
+        .mount(server)
+        .await;
+}
+
+/// `matcher`に一致するリクエストに、常に`response`を返すモックを登録する。
+pub(crate) async fn mount_always(
+    server: &MockServer,
+    matcher: impl Match + 'static,
+    response: ResponseTemplate,
+) {
+    Mock::given(matcher)
+        .respond_with(response)
+        .mount(server)
+        .await;
+}
+
+/// 項目が存在しないことを示す、BOXの404のエラーレスポンスを返す。
+pub(crate) fn not_found_response() -> ResponseTemplate {
+    ResponseTemplate::new(404).set_body_json(json!({
+        "type": "error",
+        "status": 404,
+        "code": "not_found",
+        "message": "Not Found",
+    }))
+}
+
+/// 他の操作によるロックを示す、エラーコードが`operation_blocked_temporary`の409のエラーレスポンスを返す。
+pub(crate) fn operation_blocked_response() -> ResponseTemplate {
+    ResponseTemplate::new(409).set_body_json(json!({
+        "type": "error",
+        "status": 409,
+        "code": "operation_blocked_temporary",
+        "message": "The operation is blocked by another on-going operation",
+    }))
+}
+
+/// 接続からリクエストヘッダーの終わり（空行）まで読み込む。
+///
+/// 接続が閉じられた場合または読み込みに失敗した場合は、その時点で読み込みを終える。
+pub(crate) async fn read_request_head(stream: &mut TcpStream) {
+    let mut buffer = Vec::new();
+    let mut chunk = [0u8; 1024];
+    while !buffer.windows(4).any(|w| w == b"\r\n\r\n") {
+        match stream.read(&mut chunk).await {
+            Ok(0) | Err(_) => break,
+            Ok(n) => buffer.extend_from_slice(&chunk[..n]),
+        }
+    }
+}
+
+/// ローカルホストの空いているポートで待ち受け、接続ごとにレスポンスを返すHTTPサーバーを起動する。
+///
+/// サーバーは、接続を受け付けた順に、リクエストヘッダーを読み終えてから`handler`を呼び出す。
+/// `handler`は、0から始まる接続の番号と接続を受け取り、レスポンスを書き込む。
+/// 戻り値は、サーバーを指すREST APIのベースURLと、サーバーが受け付けた接続の数である。
+pub(crate) async fn start_raw_server<F, Fut>(handler: F) -> anyhow::Result<(Url, Arc<AtomicUsize>)>
+where
+    F: Fn(usize, TcpStream) -> Fut + Send + 'static,
+    Fut: Future<Output = ()> + Send,
+{
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let api_base_url = Url::parse(&format!("http://{}/2.0", listener.local_addr()?))?;
+    let connections = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&connections);
+    tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            let connection = counter.fetch_add(1, Ordering::SeqCst);
+            read_request_head(&mut stream).await;
+            handler(connection, stream).await;
+        }
+    });
+
+    Ok((api_base_url, connections))
+}
+
 /// モックサーバーに接続するBOXクライアントを作成する。
 ///
 /// 呼び出し側がエラーの種類を検証できるように、エラーを`BoxClientError`のまま返す。
@@ -100,6 +245,25 @@ pub(crate) fn client_builder(
         .api_base_url(&format!("{}/2.0", server.uri()))?
         .upload_base_url(&format!("{}{UPLOAD_BASE_PATH}", server.uri()))?
         .token_url(&format!("{}{TOKEN_PATH}", server.uri()))
+}
+
+/// `api_base_url`のサーバーにREST APIのリクエストを送信し、`token_server`からアクセストークンを取得するBOXクライアントのビルダーを返す。
+///
+/// `start_raw_server`で起動したサーバーなど、モックサーバー以外のサーバーに接続するテストで使用する。
+pub(crate) fn raw_server_client_builder(
+    api_base_url: &Url,
+    token_server: &MockServer,
+    retry: RetryPolicy,
+) -> BoxClientResult<BoxClientBuilder> {
+    BoxClient::builder(test_config())
+        .retry(retry)
+        .api_base_url(api_base_url.as_str())?
+        .token_url(&format!("{}{TOKEN_PATH}", token_server.uri()))
+}
+
+/// アップロードのAPIのパスを返す。
+pub(crate) fn upload_path(suffix: &str) -> String {
+    format!("{UPLOAD_BASE_PATH}{suffix}")
 }
 
 /// タイムアウトを指定して、モックサーバーに接続するBOXクライアントを作成する。

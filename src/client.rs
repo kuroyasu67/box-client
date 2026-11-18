@@ -14,8 +14,8 @@ use crate::{
     errors::{BoxClientError, BoxClientResult},
     request::{ApiHost, ApiRequest, HttpClientKind},
     retry::{
-        AttemptError, Idempotency, RetryPolicy, classify_error_response, classify_transport_error,
-        read_json, run_with_retry,
+        AttemptError, Idempotency, PollOutcome, RetryPolicy, classify_error_response,
+        classify_transport_error, read_json, run_with_retry,
     },
 };
 
@@ -45,7 +45,7 @@ const CRATE_USER_AGENT: &str = concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_
 /// 通常、トークン管理者はアクセストークンを1秒未満で取得できる。トークンエンドポイントが一時的に失敗し、
 /// トークン管理者が再試行設定に従って数回再試行しても期限内に取得を終えられるように、この既定値を60秒とする。
 /// その結果、トークン管理者は発行から約59分後にアクセストークンを取得し直す。
-const DEFAULT_REFRESH_BEFORE_EXPIRY: Duration = Duration::from_secs(60);
+pub const DEFAULT_REFRESH_BEFORE_EXPIRY: Duration = Duration::from_secs(60);
 
 /// アクセストークンを有効期限のどれだけ前に取得し直すかの上限
 ///
@@ -94,7 +94,8 @@ pub const MAX_CHUNKED_UPLOAD_THRESHOLD: u64 = 50 * 1024 * 1024;
 /// 分割アップロードのコミットで、BOXが処理中を示す202を返した場合に、コミットを再送する回数の上限の既定値
 ///
 /// BOXは、部分の処理を終えるまで202を返し続ける。大きいファイルでは処理に時間がかかるため、
-/// 再試行設定の既定値で待機した場合に数分間はコミットを再送し続けられるように、30回とする。
+/// BOXクライアントが、`Retry-After`ヘッダーがない場合に再試行設定の既定値で待機して、
+/// 約12分間コミットを再送し続けられるように、30回とする。
 pub const DEFAULT_MAX_COMMIT_POLLS: u32 = 30;
 
 /// 分割アップロードのコミットで、コミットを再送する回数の上限に指定できる最大値
@@ -202,13 +203,6 @@ impl BoxClient {
         }
     }
 
-    /// 再試行設定を返す。
-    ///
-    /// 1回のAPI呼び出しの外側で待機するAPIメソッドが、再試行設定に従って待機時間を決めるために使用する。
-    pub(crate) fn retry_policy(&self) -> &RetryPolicy {
-        &self.retry
-    }
-
     /// 分割アップロードで、並列にアップロードする部分の数を返す。
     #[must_use]
     pub fn upload_concurrency(&self) -> usize {
@@ -231,6 +225,62 @@ impl BoxClient {
     #[must_use]
     pub fn max_download_polls(&self) -> u32 {
         self.max_download_polls
+    }
+
+    /// BOXが処理を終えるまで、`attempt`でリクエストを送信し直す。
+    ///
+    /// `attempt`が[`PollOutcome::NotReady`]を返した場合は、`Retry-After`ヘッダーが示す時間だけ待機してから、
+    /// `attempt`を再び呼び出す。`Retry-After`ヘッダーがない場合は、再試行設定の指数バックオフで待機時間を決める。
+    /// 202の後の再送は、再試行設定の最大再試行回数に含めない。
+    ///
+    /// # Arguments
+    ///
+    /// - `max_polls`: 再送する回数の上限
+    /// - `not_ready`: BOXが処理を終えなかった場合に返すエラーのメッセージ
+    /// - `on_wait`: 待機する前に、再送の回数と待機時間を受け取ってログを出力するクロージャー
+    /// - `attempt`: リクエストを1回送信するクロージャー
+    ///
+    /// # Errors
+    ///
+    /// 再送した回数が`max_polls`に達してもBOXが処理を終えない場合は、[`BoxClientError::UnexpectedResponse`]を返す。
+    /// `Retry-After`ヘッダーが示す待機時間が、再試行設定の待機時間の上限を超える場合は、
+    /// BOXが指定した時刻より早く再送しないように、再送せずに[`BoxClientError::RetryAfterTooLong`]を返す。
+    /// `attempt`がエラーを返した場合は、そのエラーを返す。
+    pub(crate) async fn poll_until_ready<T, F, Fut>(
+        &self,
+        max_polls: u32,
+        not_ready: &'static str,
+        on_wait: impl Fn(u32, Duration),
+        mut attempt: F,
+    ) -> BoxClientResult<T>
+    where
+        F: FnMut() -> Fut,
+        Fut: Future<Output = BoxClientResult<PollOutcome<T>>>,
+    {
+        let mut polls = 0;
+        loop {
+            let retry_after = match attempt().await? {
+                PollOutcome::Ready(value) => return Ok(value),
+                PollOutcome::NotReady { retry_after } => retry_after,
+            };
+
+            if max_polls <= polls {
+                return Err(BoxClientError::UnexpectedResponse(not_ready));
+            }
+            polls += 1;
+
+            // `ThreadRng`は`Send`を実装していないため、待機時間の計算と待機を別の文に分け、`ThreadRng`を待機の前に破棄する。
+            let delay = self
+                .retry
+                .retry_delay(polls, retry_after, &mut rand::rng())
+                .map_err(|retry_after| BoxClientError::RetryAfterTooLong {
+                    retry_after,
+                    max_delay: self.retry.max_delay(),
+                    source: Box::new(BoxClientError::UnexpectedResponse(not_ready)),
+                })?;
+            on_wait(polls, delay);
+            tokio::time::sleep(delay).await;
+        }
     }
 
     /// リクエストを送信し、成功レスポンスのJSONボディをデシリアライズして返す。
@@ -453,7 +503,7 @@ impl BoxClientBuilder {
         self
     }
 
-    /// アクセストークンを有効期限のどれだけ前に取得し直すかを指定する。既定値は60秒とする。
+    /// アクセストークンを有効期限のどれだけ前に取得し直すかを指定する。既定値は[`DEFAULT_REFRESH_BEFORE_EXPIRY`]（60秒）とする。
     ///
     /// アクセストークンの有効期間は60分である。有効期限までの残り時間がこの値以下になると、
     /// BOXクライアントはバックグラウンドで新しいアクセストークンを取得する。BOXクライアントは、取得を終えるまで、
@@ -521,7 +571,7 @@ impl BoxClientBuilder {
     /// 分割アップロードのコミットで、BOXが処理中を示す202を返した場合に、コミットを再送する回数の上限を指定する。
     /// 既定値は[`DEFAULT_MAX_COMMIT_POLLS`]とする。
     ///
-    /// `0`を指定すると、BOXが202を返した時点で再送せずにエラーを返す。
+    /// `0`を指定すると、BOXクライアントは、BOXが202を返した時点で再送せずにエラーを返す。
     /// 202の後の再送は、再試行設定の最大再試行回数に含めない。
     ///
     /// # Errors
@@ -536,7 +586,7 @@ impl BoxClientBuilder {
     /// ファイルのダウンロードで、BOXがダウンロードの準備ができていないことを示す202を返した場合に、
     /// リクエストを再送する回数の上限を指定する。既定値は[`DEFAULT_MAX_DOWNLOAD_POLLS`]とする。
     ///
-    /// `0`を指定すると、BOXが202を返した時点で再送せずにエラーを返す。
+    /// `0`を指定すると、BOXクライアントは、BOXが202を返した時点で再送せずにエラーを返す。
     /// 202の後の再送は、再試行設定の最大再試行回数に含めない。
     ///
     /// # Errors
@@ -555,7 +605,7 @@ impl BoxClientBuilder {
     ///
     /// `User-Agent`ヘッダーは、指定した値の後ろに空白とこのクレートの名前とバージョンを続けた
     /// `<user_agent> box-client/<version>`とする。指定しない場合は、`box-client/<version>`とする。
-    /// BOXのログで呼び出し元のアプリケーションを識別しやすくなるように、`my-app/1.0`のような形式で指定する。
+    /// 利用者は、BOXのログで呼び出し元のアプリケーションを識別しやすくなるように、`my-app/1.0`のような形式で指定する。
     ///
     /// アクセストークンの取得とファイルのダウンロードを含む、すべてのリクエストで送信する。
     ///
@@ -579,12 +629,12 @@ impl BoxClientBuilder {
     /// すべてのリクエストを、指定したプロキシを経由して送信する。
     ///
     /// 指定しない場合は、環境変数（`HTTPS_PROXY`、`HTTP_PROXY`、`ALL_PROXY`および`NO_PROXY`など）に従う。
-    /// プロキシを指定すると、環境変数のプロキシは使用しない。
+    /// プロキシを指定すると、BOXクライアントは環境変数のプロキシを使用しない。
     /// アクセストークンの取得とファイルのダウンロードを含む、すべてのリクエストに適用する。
     ///
     /// プロキシに認証が必要な場合は、`http://user:password@proxy.example.com:8080`のように、
     /// URLにユーザー名とパスワードを含める。ユーザー名とパスワードに`@`や`:`などを含める場合は、パーセントエンコードする。
-    /// BOXクライアントは、ログやDebug出力に残らないように、プロキシのURLを保持する。
+    /// BOXクライアントは、プロキシのURLを`SecretString`で保持し、ログやDebug出力に含めない。
     ///
     /// # Errors
     ///
@@ -628,13 +678,14 @@ impl BoxClientBuilder {
 
     /// REST APIのベースURLを指定する。既定値は`https://api.box.com/2.0`とする。
     ///
-    /// BOX以外のサーバーにアクセストークンを送信しないように注意する。
+    /// 利用者は、BOX以外のサーバーにアクセストークンを送信しないように注意する。
     /// 利用者のテストで、BOXの代わりにモックサーバーへ接続する場合などに使用する。
     /// ベースURLの後ろに、`folders/0`のようなAPIのパスを続けてリクエストを送信する。
     ///
     /// # Errors
     ///
-    /// URLが[`BoxClientBuilder::token_url`]の条件を満たさない場合は、[`BoxClientError::InvalidEndpointUrl`]を返す。
+    /// URLを解釈できない場合、またはURLが[`BoxClientBuilder::token_url`]に記載した条件を満たさない場合は、
+    /// [`BoxClientError::InvalidEndpointUrl`]を返す。
     pub fn api_base_url(mut self, api_base_url: &str) -> BoxClientResult<Self> {
         self.api_base_url = Some(parse_endpoint_url("api_base_url", api_base_url)?);
         Ok(self)
@@ -647,7 +698,8 @@ impl BoxClientBuilder {
     ///
     /// # Errors
     ///
-    /// URLが[`BoxClientBuilder::token_url`]の条件を満たさない場合は、[`BoxClientError::InvalidEndpointUrl`]を返す。
+    /// URLを解釈できない場合、またはURLが[`BoxClientBuilder::token_url`]に記載した条件を満たさない場合は、
+    /// [`BoxClientError::InvalidEndpointUrl`]を返す。
     pub fn upload_base_url(mut self, upload_base_url: &str) -> BoxClientResult<Self> {
         self.upload_base_url = Some(parse_endpoint_url("upload_base_url", upload_base_url)?);
         Ok(self)
@@ -675,9 +727,25 @@ impl BoxClientBuilder {
         Ok(self)
     }
 
+    /// REST APIとファイルのダウンロードで共通の、プロキシ、`User-Agent`ヘッダーおよび接続のタイムアウトを設定した
+    /// HTTPクライアントのビルダーを返す。
+    ///
+    /// 呼び出し元は、HTTPクライアントの用途に応じたタイムアウトを追加してから、HTTPクライアントを作成する。
+    ///
+    /// # Errors
+    ///
+    /// HTTPクライアントがプロキシのURLを使用できない場合は、[`BoxClientError::InvalidProxyUrl`]を返す。
+    fn http_client_builder(&self) -> BoxClientResult<reqwest::ClientBuilder> {
+        Ok(self
+            .proxy
+            .apply(reqwest::Client::builder())?
+            .user_agent(self.user_agent.clone())
+            .connect_timeout(self.timeout.connect_timeout))
+    }
+
     /// BOXクライアントを作成する。
     ///
-    /// 設定の誤りに起動時に気づけるように、最初のアクセストークンをここで取得する。
+    /// 利用者が設定の誤りに起動時に気づけるように、このメソッドは最初のアクセストークンを取得する。
     ///
     /// # Errors
     ///
@@ -693,32 +761,22 @@ impl BoxClientBuilder {
             });
         }
 
-        let api_base_url = match self.api_base_url {
-            Some(url) => url,
-            None => Url::parse(BOX_API_BASE_URL)
-                .map_err(|e| BoxClientError::InvalidBaseUrl(format!("{BOX_API_BASE_URL}: {e}")))?,
-        };
-        let upload_base_url = match self.upload_base_url {
-            Some(url) => url,
-            None => Url::parse(BOX_UPLOAD_BASE_URL).map_err(|e| {
-                BoxClientError::InvalidBaseUrl(format!("{BOX_UPLOAD_BASE_URL}: {e}"))
-            })?,
-        };
-        let token_url = self.token_url.unwrap_or_else(|| BOX_TOKEN_URL.to_owned());
+        // `http_client_builder`は`self`を参照するため、`self`のフィールドを取り出す前にHTTPクライアントを作成する。
         let http_client = self
-            .proxy
-            .apply(reqwest::Client::builder())?
-            .user_agent(self.user_agent.clone())
+            .http_client_builder()?
             .timeout(self.timeout.request_timeout)
-            .connect_timeout(self.timeout.connect_timeout)
             .build()?;
         let download_client = self
-            .proxy
-            .apply(reqwest::Client::builder())?
-            .user_agent(self.user_agent)
+            .http_client_builder()?
             .read_timeout(self.timeout.download_read_timeout)
-            .connect_timeout(self.timeout.connect_timeout)
             .build()?;
+        let api_base_url = self
+            .api_base_url
+            .map_or_else(|| default_url(BOX_API_BASE_URL), Ok)?;
+        let upload_base_url = self
+            .upload_base_url
+            .map_or_else(|| default_url(BOX_UPLOAD_BASE_URL), Ok)?;
+        let token_url = self.token_url.unwrap_or_else(|| BOX_TOKEN_URL.to_owned());
         let token_manager = Arc::new(TokenManager::new(
             http_client.clone(),
             &self.config,
@@ -754,12 +812,18 @@ impl BoxClientBuilder {
 ///
 /// URLを解釈できない場合、または条件を満たさない場合は、[`BoxClientError::InvalidEndpointUrl`]を返す。
 fn parse_endpoint_url(name: &'static str, value: &str) -> BoxClientResult<Url> {
+    let Ok(url) = Url::parse(value) else {
+        return Err(BoxClientError::InvalidEndpointUrl {
+            name,
+            url: "<unparsable>".to_owned(),
+            reason: "the url cannot be parsed",
+        });
+    };
     let invalid = |reason: &'static str| BoxClientError::InvalidEndpointUrl {
         name,
-        url: value.to_owned(),
+        url: redact_url(&url),
         reason,
     };
-    let url = Url::parse(value).map_err(|_| invalid("the url cannot be parsed"))?;
     if url.cannot_be_a_base() {
         return Err(invalid("the url cannot be a base url"));
     }
@@ -788,6 +852,34 @@ fn parse_endpoint_url(name: &'static str, value: &str) -> BoxClientResult<Url> {
         return Err(invalid("the url must not contain a query or fragment"));
     }
     Ok(url)
+}
+
+/// BOXのURLの定数を解釈する。
+///
+/// 定数は正しいURLであるため、このクレートのテストが通る限り、この関数はエラーを返さない。
+///
+/// # Errors
+///
+/// URLを解釈できない場合は、[`BoxClientError::InvalidBaseUrl`]を返す。
+fn default_url(url: &'static str) -> BoxClientResult<Url> {
+    Url::parse(url).map_err(|e| BoxClientError::InvalidBaseUrl(format!("{url}: {e}")))
+}
+
+/// エラーに含めるために、認証情報を含みうる部分を取り除いたURLを返す。
+///
+/// ユーザー名、パスワード、クエリおよびフラグメントを取り除く。
+/// `mailto:`のようにベースURLにできないURLは、パスに認証情報を含みうるため、スキームだけを返す。
+fn redact_url(url: &Url) -> String {
+    if url.cannot_be_a_base() {
+        return format!("{}:", url.scheme());
+    }
+    let mut redacted = url.clone();
+    // ベースURLにできるURLでは、ユーザー名とパスワードを必ず変更できるため、結果を無視する。
+    let _ = redacted.set_username("");
+    let _ = redacted.set_password(None);
+    redacted.set_query(None);
+    redacted.set_fragment(None);
+    redacted.into()
 }
 
 /// 202を受け取った場合に再送する回数の上限が、指定できる最大値以下であることを検証する。
@@ -837,8 +929,8 @@ pub struct BoxClientTimeout {
 
     /// ファイルのダウンロードで、データを受信しない状態が続いた場合のタイムアウト
     ///
-    /// リクエストを送信してからレスポンスヘッダーを受信するまでの時間と、レスポンスボディのデータを受信する間隔に適用し、
-    /// データを受信するたびに計測をやり直す。
+    /// BOXクライアントは、このタイムアウトを、リクエストを送信してからレスポンスヘッダーを受信するまでの時間と、
+    /// レスポンスボディのデータを受信する間隔に適用し、データを受信するたびに計測をやり直す。
     /// ダウンロードの時間はファイルサイズによって大きく変わるため、ダウンロードには
     /// [`BoxClientTimeout::request_timeout`]を適用せず、このタイムアウトで通信が止まったことを検出する。
     /// ダウンロード全体の時間を制限する場合は、呼び出し元が`tokio::time::timeout`などで制限する。
@@ -886,10 +978,7 @@ mod test_box_client {
 
     use rstest::rstest;
     use serde_json::json;
-    use tokio::{
-        io::{AsyncReadExt as _, AsyncWriteExt as _},
-        net::TcpListener,
-    };
+    use tokio::io::AsyncWriteExt as _;
     use wiremock::{
         Mock, MockServer, ResponseTemplate,
         matchers::{body_json, header, method, path},
@@ -897,51 +986,13 @@ mod test_box_client {
 
     use super::*;
     use crate::test_support::{
-        TOKEN_PATH, client_builder, create_client, create_client_with_timeout, mount_token,
-        short_retry, test_config,
+        TOKEN_PATH, client_builder, count_requests_to_path, create_client,
+        create_client_with_timeout, mount_always, mount_first_n, mount_token,
+        raw_server_client_builder, request_count, short_retry, start_raw_server, test_config,
     };
 
     /// APIのパス
     const API_PATH: &str = "/2.0/items/1";
-
-    /// `API_PATH`へのリクエストを数える。
-    async fn api_request_count(server: &MockServer) -> usize {
-        server
-            .received_requests()
-            .await
-            .unwrap_or_default()
-            .iter()
-            .filter(|r| r.url.path() == API_PATH)
-            .count()
-    }
-
-    /// トークンエンドポイントへのリクエストを数える。
-    async fn token_request_count(server: &MockServer) -> usize {
-        server
-            .received_requests()
-            .await
-            .unwrap_or_default()
-            .iter()
-            .filter(|r| r.url.path() == TOKEN_PATH)
-            .count()
-    }
-
-    /// 最初の`n`回だけAPIが`response`を返すモックを登録する。
-    async fn mount_api_first_n(server: &MockServer, response: ResponseTemplate, n: u64) {
-        Mock::given(path(API_PATH))
-            .respond_with(response)
-            .up_to_n_times(n)
-            .mount(server)
-            .await;
-    }
-
-    /// APIが常に`response`を返すモックを登録する。
-    async fn mount_api_always(server: &MockServer, response: ResponseTemplate) {
-        Mock::given(path(API_PATH))
-            .respond_with(response)
-            .mount(server)
-            .await;
-    }
 
     /// 成功レスポンスを返す。
     fn ok_response() -> ResponseTemplate {
@@ -961,7 +1012,7 @@ mod test_box_client {
 
         create_client(&server, short_retry(0)?).await?;
 
-        assert_eq!(token_request_count(&server).await, 1);
+        assert_eq!(count_requests_to_path(&server, TOKEN_PATH).await, 1);
 
         Ok(())
     }
@@ -1149,7 +1200,7 @@ mod test_box_client {
 
         if valid {
             assert!(result.is_ok(), "result: {:?}", result.err());
-            assert_eq!(token_request_count(&server).await, 1);
+            assert_eq!(count_requests_to_path(&server, TOKEN_PATH).await, 1);
         } else {
             assert!(
                 matches!(
@@ -1161,7 +1212,7 @@ mod test_box_client {
                 result.err()
             );
             // 設定の誤りを検出した時点で、トークンエンドポイントへリクエストしない。
-            assert_eq!(token_request_count(&server).await, 0);
+            assert_eq!(count_requests_to_path(&server, TOKEN_PATH).await, 0);
         }
 
         Ok(())
@@ -1256,12 +1307,12 @@ mod test_box_client {
     async fn test_send_empty() -> anyhow::Result<()> {
         let server = MockServer::start().await;
         mount_token(&server).await;
-        mount_api_always(&server, ResponseTemplate::new(204)).await;
+        mount_always(&server, path(API_PATH), ResponseTemplate::new(204)).await;
         let client = create_client(&server, short_retry(0)?).await?;
 
         client.send_empty(request("DELETE")?).await?;
 
-        assert_eq!(api_request_count(&server).await, 1);
+        assert_eq!(count_requests_to_path(&server, API_PATH).await, 1);
 
         Ok(())
     }
@@ -1283,14 +1334,17 @@ mod test_box_client {
     ) -> anyhow::Result<()> {
         let server = MockServer::start().await;
         mount_token(&server).await;
-        mount_api_first_n(&server, ResponseTemplate::new(status), 1).await;
-        mount_api_always(&server, ok_response()).await;
+        mount_first_n(&server, path(API_PATH), ResponseTemplate::new(status), 1).await;
+        mount_always(&server, path(API_PATH), ok_response()).await;
         let client = create_client(&server, short_retry(1)?).await?;
 
         let result: BoxClientResult<serde_json::Value> = client.send_json(request(method)?).await;
 
         assert_eq!(result.is_ok(), expected_requests == 2, "result: {result:?}");
-        assert_eq!(api_request_count(&server).await, expected_requests);
+        assert_eq!(
+            count_requests_to_path(&server, API_PATH).await,
+            expected_requests
+        );
 
         Ok(())
     }
@@ -1300,15 +1354,15 @@ mod test_box_client {
     async fn test_send_retries_overridden_idempotency() -> anyhow::Result<()> {
         let server = MockServer::start().await;
         mount_token(&server).await;
-        mount_api_first_n(&server, ResponseTemplate::new(500), 1).await;
-        mount_api_always(&server, ok_response()).await;
+        mount_first_n(&server, path(API_PATH), ResponseTemplate::new(500), 1).await;
+        mount_always(&server, path(API_PATH), ok_response()).await;
         let client = create_client(&server, short_retry(1)?).await?;
 
         let _: serde_json::Value = client
             .send_json(request("POST")?.idempotency(Idempotency::Idempotent))
             .await?;
 
-        assert_eq!(api_request_count(&server).await, 2);
+        assert_eq!(count_requests_to_path(&server, API_PATH).await, 2);
 
         Ok(())
     }
@@ -1324,7 +1378,12 @@ mod test_box_client {
     ) -> anyhow::Result<()> {
         let server = MockServer::start().await;
         mount_token(&server).await;
-        mount_api_always(&server, ok_response().set_delay(Duration::from_secs(1))).await;
+        mount_always(
+            &server,
+            path(API_PATH),
+            ok_response().set_delay(Duration::from_secs(1)),
+        )
+        .await;
         let client =
             create_client_with_timeout(&server, short_retry(1)?, Duration::from_millis(200))
                 .await?;
@@ -1335,7 +1394,10 @@ mod test_box_client {
             matches!(&result, Err(BoxClientError::Http(e)) if e.is_timeout()),
             "result: {result:?}"
         );
-        assert_eq!(api_request_count(&server).await, expected_requests);
+        assert_eq!(
+            count_requests_to_path(&server, API_PATH).await,
+            expected_requests
+        );
 
         Ok(())
     }
@@ -1350,16 +1412,16 @@ mod test_box_client {
     ) -> anyhow::Result<()> {
         let server = MockServer::start().await;
         mount_token(&server).await;
-        mount_api_first_n(&server, ResponseTemplate::new(401), 1).await;
-        mount_api_always(&server, ok_response()).await;
+        mount_first_n(&server, path(API_PATH), ResponseTemplate::new(401), 1).await;
+        mount_always(&server, path(API_PATH), ok_response()).await;
         // 再試行回数を0にし、再送が再試行回数に含まれないことも確かめる。
         let client = create_client(&server, short_retry(0)?).await?;
 
         let _: serde_json::Value = client.send_json(request(method)?).await?;
 
-        assert_eq!(api_request_count(&server).await, 2);
+        assert_eq!(count_requests_to_path(&server, API_PATH).await, 2);
         // 構築時に1回、401の後に1回取得する。
-        assert_eq!(token_request_count(&server).await, 2);
+        assert_eq!(count_requests_to_path(&server, TOKEN_PATH).await, 2);
 
         Ok(())
     }
@@ -1369,7 +1431,7 @@ mod test_box_client {
     async fn test_send_fails_on_repeated_unauthorized() -> anyhow::Result<()> {
         let server = MockServer::start().await;
         mount_token(&server).await;
-        mount_api_always(&server, ResponseTemplate::new(401)).await;
+        mount_always(&server, path(API_PATH), ResponseTemplate::new(401)).await;
         let client = create_client(&server, short_retry(2)?).await?;
 
         let result: BoxClientResult<serde_json::Value> = client.send_json(request("GET")?).await;
@@ -1378,7 +1440,7 @@ mod test_box_client {
             matches!(&result, Err(BoxClientError::Api(e)) if e.status == 401),
             "result: {result:?}"
         );
-        assert_eq!(api_request_count(&server).await, 2);
+        assert_eq!(count_requests_to_path(&server, API_PATH).await, 2);
 
         Ok(())
     }
@@ -1388,8 +1450,9 @@ mod test_box_client {
     async fn test_send_returns_api_error() -> anyhow::Result<()> {
         let server = MockServer::start().await;
         mount_token(&server).await;
-        mount_api_always(
+        mount_always(
             &server,
+            path(API_PATH),
             ResponseTemplate::new(404).set_body_json(json!({
                 "type": "error",
                 "status": 404,
@@ -1421,8 +1484,9 @@ mod test_box_client {
     async fn test_send_json_does_not_retry_decode_error() -> anyhow::Result<()> {
         let server = MockServer::start().await;
         mount_token(&server).await;
-        mount_api_always(
+        mount_always(
             &server,
+            path(API_PATH),
             ResponseTemplate::new(200).set_body_string("not json"),
         )
         .await;
@@ -1434,7 +1498,7 @@ mod test_box_client {
             matches!(&result, Err(BoxClientError::DeserializeResponse(_))),
             "result: {result:?}"
         );
-        assert_eq!(api_request_count(&server).await, 1);
+        assert_eq!(count_requests_to_path(&server, API_PATH).await, 1);
 
         Ok(())
     }
@@ -1443,32 +1507,16 @@ mod test_box_client {
     ///
     /// 戻り値は、サーバーを指すREST APIのベースURLと、サーバーが受け付けた接続の数である。
     async fn start_truncating_server() -> anyhow::Result<(Url, Arc<AtomicUsize>)> {
-        let listener = TcpListener::bind("127.0.0.1:0").await?;
-        let api_base_url = Url::parse(&format!("http://{}/2.0", listener.local_addr()?))?;
-        let connections = Arc::new(AtomicUsize::new(0));
-        let counter = Arc::clone(&connections);
-        tokio::spawn(async move {
-            while let Ok((mut stream, _)) = listener.accept().await {
-                counter.fetch_add(1, Ordering::SeqCst);
-                // リクエストヘッダーを読み終えてから、宣言した長さより短いボディを返して接続を切る。
-                let mut buffer = Vec::new();
-                let mut chunk = [0u8; 1024];
-                while !buffer.windows(4).any(|w| w == b"\r\n\r\n") {
-                    match stream.read(&mut chunk).await {
-                        Ok(0) | Err(_) => break,
-                        Ok(n) => buffer.extend_from_slice(&chunk[..n]),
-                    }
-                }
-                let _ = stream
-                    .write_all(
-                        b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\
-                          content-length: 100\r\n\r\n{\"id\":",
-                    )
-                    .await;
-            }
-        });
-
-        Ok((api_base_url, connections))
+        // 宣言した長さより短いボディを返して接続を切る。
+        start_raw_server(|_, mut stream| async move {
+            let _ = stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\
+                      content-length: 100\r\n\r\n{\"id\":",
+                )
+                .await;
+        })
+        .await
     }
 
     /// 成功レスポンスのボディの受信中に接続が切れた場合は、冪等なリクエストのみ再試行することを確認
@@ -1483,10 +1531,7 @@ mod test_box_client {
         let token_server = MockServer::start().await;
         mount_token(&token_server).await;
         let (api_base_url, connections) = start_truncating_server().await?;
-        let client = BoxClient::builder(test_config())
-            .retry(short_retry(2)?)
-            .api_base_url(api_base_url.as_str())?
-            .token_url(&format!("{}{TOKEN_PATH}", token_server.uri()))?
+        let client = raw_server_client_builder(&api_base_url, &token_server, short_retry(2)?)?
             .build()
             .await?;
 
@@ -1520,12 +1565,13 @@ mod test_box_client {
         let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
         let api_base_url = Url::parse(&format!("http://{}/2.0", listener.local_addr()?))?;
         drop(listener);
-        let client = BoxClient::builder(test_config())
-            .retry(RetryPolicy::new(max_retries, DELAY, DELAY, Duration::ZERO)?)
-            .api_base_url(api_base_url.as_str())?
-            .token_url(&format!("{}{TOKEN_PATH}", server.uri()))?
-            .build()
-            .await?;
+        let client = raw_server_client_builder(
+            &api_base_url,
+            &server,
+            RetryPolicy::new(max_retries, DELAY, DELAY, Duration::ZERO)?,
+        )?
+        .build()
+        .await?;
 
         let started_at = std::time::Instant::now();
         let result: BoxClientResult<serde_json::Value> = client.send_json(request("POST")?).await;
@@ -1559,10 +1605,7 @@ mod test_box_client {
             "result: {result:?}"
         );
         // BOXクライアントの作成時に送信したトークンリクエストだけを受信している。
-        assert_eq!(
-            server.received_requests().await.unwrap_or_default().len(),
-            1
-        );
+        assert_eq!(request_count(&server).await, 1);
 
         Ok(())
     }
@@ -1633,25 +1676,31 @@ mod test_box_client {
     }
 
     /// httpsのURLと、ローカルホストまたはループバックアドレスのhttpのURLだけを受け付けることを確認
+    ///
+    /// 拒否する場合は、エラーに含めるURLから、認証情報を含みうるユーザー名、パスワード、クエリおよびフラグメントを
+    /// 取り除くことも確認する。`expected`が`None`の場合は、URLを受け付ける。
     #[rstest]
-    #[case::https("https://api.box.com/2.0", true)]
-    #[case::https_with_port("https://box.example.com:8443/api", true)]
-    #[case::http_localhost("http://localhost:8080/2.0", true)]
-    #[case::http_localhost_uppercase("http://LOCALHOST/2.0", true)]
-    #[case::http_ipv4_loopback("http://127.0.0.1:8080/2.0", true)]
-    #[case::http_ipv4_loopback_range("http://127.1.2.3/2.0", true)]
-    #[case::http_ipv6_loopback("http://[::1]:8080/2.0", true)]
-    #[case::http_remote("http://api.box.com/2.0", false)]
-    #[case::http_localhost_subdomain("http://localhost.example.com/2.0", false)]
-    #[case::other_scheme("ftp://api.box.com/2.0", false)]
-    #[case::not_base("mailto:user@example.com", false)]
-    #[case::credentials("https://user:password@api.box.com/2.0", false)]
-    #[case::username("https://user@api.box.com/2.0", false)]
-    #[case::query("https://api.box.com/2.0?key=value", false)]
-    #[case::fragment("https://api.box.com/2.0#top", false)]
-    #[case::unparsable("not a url", false)]
-    #[case::relative("/2.0", false)]
-    fn test_builder_validates_endpoint_urls(#[case] url: &str, #[case] valid: bool) {
+    #[case::https("https://api.box.com/2.0", None)]
+    #[case::https_with_port("https://box.example.com:8443/api", None)]
+    #[case::http_localhost("http://localhost:8080/2.0", None)]
+    #[case::http_localhost_uppercase("http://LOCALHOST/2.0", None)]
+    #[case::http_ipv4_loopback("http://127.0.0.1:8080/2.0", None)]
+    #[case::http_ipv4_loopback_range("http://127.1.2.3/2.0", None)]
+    #[case::http_ipv6_loopback("http://[::1]:8080/2.0", None)]
+    #[case::http_remote("http://api.box.com/2.0", Some("http://api.box.com/2.0"))]
+    #[case::http_localhost_subdomain(
+        "http://localhost.example.com/2.0",
+        Some("http://localhost.example.com/2.0")
+    )]
+    #[case::other_scheme("ftp://api.box.com/2.0", Some("ftp://api.box.com/2.0"))]
+    #[case::not_base("mailto:secret@example.com", Some("mailto:"))]
+    #[case::credentials("https://user:secret@api.box.com/2.0", Some("https://api.box.com/2.0"))]
+    #[case::username("https://secret@api.box.com/2.0", Some("https://api.box.com/2.0"))]
+    #[case::query("https://api.box.com/2.0?key=secret", Some("https://api.box.com/2.0"))]
+    #[case::fragment("https://api.box.com/2.0#secret", Some("https://api.box.com/2.0"))]
+    #[case::unparsable("not a secret url", Some("<unparsable>"))]
+    #[case::relative("/2.0", Some("<unparsable>"))]
+    fn test_builder_validates_endpoint_urls(#[case] url: &str, #[case] expected: Option<&str>) {
         type Setter = fn(BoxClientBuilder, &str) -> BoxClientResult<BoxClientBuilder>;
         let setters: [(&str, Setter); 3] = [
             ("api_base_url", BoxClientBuilder::api_base_url),
@@ -1662,18 +1711,23 @@ mod test_box_client {
         for (expected_name, setter) in setters {
             let result = setter(BoxClient::builder(test_config()), url);
 
-            if valid {
-                assert!(result.is_ok(), "{expected_name}: {:?}", result.err());
-            } else {
-                assert!(
-                    matches!(
-                        &result,
-                        Err(BoxClientError::InvalidEndpointUrl { name, url: u, .. })
-                            if *name == expected_name && u == url
-                    ),
-                    "{expected_name}: {:?}",
-                    result.err()
-                );
+            match expected {
+                None => assert!(result.is_ok(), "{expected_name}: {:?}", result.err()),
+                Some(expected_url) => {
+                    let Err(error) = result else {
+                        panic!("{expected_name}: unexpected success");
+                    };
+                    assert!(
+                        matches!(
+                            &error,
+                            BoxClientError::InvalidEndpointUrl { name, url: actual_url, .. }
+                                if *name == expected_name && actual_url == expected_url
+                        ),
+                        "{expected_name}: {error:?}"
+                    );
+                    let message = format!("{error} {error:?}");
+                    assert!(!message.contains("secret"), "message: {message}");
+                }
             }
         }
     }
@@ -1772,7 +1826,7 @@ mod test_box_client {
     async fn test_no_proxy_overrides_proxy() -> anyhow::Result<()> {
         let server = MockServer::start().await;
         mount_token(&server).await;
-        mount_api_always(&server, ok_response()).await;
+        mount_always(&server, path(API_PATH), ok_response()).await;
         // プロキシは接続を拒否するため、プロキシを使用した場合は失敗する。
         let client = client_builder(&server, short_retry(0)?)?
             .proxy(&refused_url()?)?
@@ -1782,7 +1836,7 @@ mod test_box_client {
 
         let _: serde_json::Value = client.send_json(request("GET")?).await?;
 
-        assert_eq!(api_request_count(&server).await, 1);
+        assert_eq!(count_requests_to_path(&server, API_PATH).await, 1);
 
         Ok(())
     }
@@ -1835,7 +1889,9 @@ mod test_box_client {
             "PRIVATE KEY",
             "access-token",
             PROXY_PASSWORD,
-            "proxy-user",
+            // URLに含めたパーセントエンコードした形も出力しない。
+            "proxy-p%40ss",
+            PROXY_USER,
         ] {
             assert!(!builder.contains(secret), "builder: {builder}");
             assert!(!client.contains(secret), "client: {client}");

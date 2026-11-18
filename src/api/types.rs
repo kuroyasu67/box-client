@@ -1,7 +1,50 @@
 use garde::Validate;
 use serde::{Deserialize, Serialize};
 
-use crate::{BoxClientError, BoxClientResult, ValidationError};
+use crate::{
+    BoxClientError, BoxClientResult, ValidationError, request::ApiRequest, retry::Idempotency,
+};
+
+/// 項目名の最大文字数
+///
+/// BOXは、ファイル、フォルダおよびWebリンクのどの名前も、1文字以上255文字以下に制限する。
+/// BOXは、名前の長さを文字数で数える。
+pub const MAX_NAME_CHARS: usize = 255;
+
+/// リクエストボディを検証し、BOXが受け付ける場合はそのまま返す。
+///
+/// # Errors
+///
+/// BOXが受け付けない値が含まれる場合は、[`BoxClientError::InvalidRequestBody`]を返す。
+pub(crate) fn validated<T: Validate<Context = ()>>(body: T) -> BoxClientResult<T> {
+    body.validate()
+        .map_err(|report| BoxClientError::InvalidRequestBody(ValidationError::new(report)))?;
+    Ok(body)
+}
+
+/// ファイル、フォルダまたはWebリンクの属性を更新するリクエスト（`PUT /{collection}/{id}`）を作成する。
+///
+/// 名前の変更、説明の設定、移動およびWebリンクのURLの変更で共有する。
+/// `etag`を指定した場合は、`If-Match`ヘッダーで送信する。
+///
+/// `ETag`を指定した場合は、BOXが更新した後に再送すると、`ETag`が変わっているためBOXは412を返す。
+/// その結果、呼び出し元が更新の結果を誤って判断するおそれがあるため、このリクエストは、HTTPメソッドがPUTであっても冪等でないリクエストとして送信する。
+///
+/// # Errors
+///
+/// ボディをJSONにシリアライズできない場合は、[`BoxClientError::SerializeBody`]を返す。
+/// `etag`に使用できない文字が含まれる場合は、[`BoxClientError::InvalidHeaderValue`]を返す。
+pub(crate) fn update_item_request<'a, B: Serialize + ?Sized>(
+    collection: &'static str,
+    id: &'a str,
+    body: &B,
+    etag: Option<&str>,
+) -> BoxClientResult<ApiRequest<'a>> {
+    ApiRequest::put([collection, id])
+        .idempotency(Idempotency::NonIdempotent)
+        .json(body)?
+        .if_match(etag)
+}
 
 /// BOXの項目のIDを表す型を定義する。
 ///
@@ -11,7 +54,7 @@ macro_rules! box_item_struct {
         #[doc = concat!(
             $item,
             "のID\n\n",
-            "BOXはIDを数字の文字列で返すが、このクライアントは値を検証せずに保持する。\n",
+            "BOXはIDを数字の文字列で返すが、BOXクライアントは値を検証せずに保持する。\n",
             "空文字列などの不正なIDは、APIを呼び出したときに",
             "[`BoxClientError::InvalidPathSegment`](crate::BoxClientError::InvalidPathSegment)になる。",
         )]
@@ -75,7 +118,7 @@ pub enum BoxItem {
     /// Webリンク
     WebLink(WebLinkItem),
 
-    /// このクライアントが知らない種類の項目
+    /// BOXクライアントが知らない種類の項目
     ///
     /// BOXが項目の種類を追加しても、ページ全体の取得を失敗させないために受け入れる。
     #[serde(other)]
@@ -149,7 +192,7 @@ pub enum ItemStatus {
     /// 削除済み
     Deleted,
 
-    /// このクライアントが知らない状態
+    /// BOXクライアントが知らない状態
     ///
     /// BOXが状態を追加しても、項目の情報の取得を失敗させないために受け入れる。
     #[serde(other)]
@@ -163,14 +206,14 @@ pub struct ParentFolder {
     pub id: FolderId,
 }
 
-/// ファイル名またはフォルダ名に使用できない文字が含まれていないか検証する。
+/// ファイル、フォルダまたはWebリンクの名前に使用できない文字が含まれていないか検証する。
 ///
-/// BOXは、ファイル名とフォルダ名のどちらでも、ASCIIの非印字文字、`/`または`\`を含む名前、
+/// BOXは、ファイル名、フォルダ名およびWebリンク名のどれでも、ASCIIの非印字文字、`/`または`\`を含む名前、
 /// 末尾が空白の名前、`.`および`..`を拒否する。
 /// `garde`の`custom`バリデーターとして、`#[garde(custom(validate_item_name))]`のように使用する。
 ///
 /// BOXは名前の長さも1文字以上255文字以下に制限する。長さは文字数で数えるため、
-/// このバリデーターでは検証せず、`#[garde(length(chars, min = 1, max = 255))]`と組み合わせて検証する。
+/// このバリデーターでは検証せず、`#[garde(length(chars, min = 1, max = MAX_NAME_CHARS))]`と組み合わせて検証する。
 #[expect(
     clippy::trivially_copy_pass_by_ref,
     reason = "gardeのcustomバリデーターは、コンテキストを参照で受け取るシグネチャを要求するため"
@@ -229,7 +272,7 @@ pub(crate) struct RenameBody<'a> {
     /// 新しい名前
     ///
     /// BOXは、名前の長さを文字数で数える。
-    #[garde(length(chars, min = 1, max = 255), custom(validate_item_name))]
+    #[garde(length(chars, min = 1, max = MAX_NAME_CHARS), custom(validate_item_name))]
     name: &'a str,
 }
 
@@ -240,23 +283,21 @@ impl<'a> RenameBody<'a> {
     ///
     /// 名前をBOXが拒否する場合は、[`BoxClientError::InvalidRequestBody`]を返す。
     pub(crate) fn new(name: &'a str) -> BoxClientResult<Self> {
-        let body = Self { name };
-        body.validate()
-            .map_err(|report| BoxClientError::InvalidRequestBody(ValidationError::new(report)))?;
-        Ok(body)
+        validated(Self { name })
     }
 }
 
-/// ファイルまたはフォルダの説明の最大文字数
+/// ファイル、フォルダまたはWebリンクの説明の最大文字数
 ///
-/// BOXは、ファイルとフォルダのどちらの説明も、256文字以下に制限する。
+/// BOXは、ファイル、フォルダおよびWebリンクのどの説明も、256文字以下に制限する。
 pub const MAX_DESCRIPTION_CHARS: usize = 256;
 
-/// ファイルまたはフォルダの説明設定リクエストのボディ
+/// ファイル、フォルダまたはWebリンクの説明設定リクエストのボディ
 ///
-/// BOXは、ファイルとフォルダの説明を同じ形式で受け付けるため、
-/// [`BoxClient::set_file_description`](crate::BoxClient::set_file_description)および
-/// [`BoxClient::set_folder_description`](crate::BoxClient::set_folder_description)で共有する。
+/// BOXは、ファイル、フォルダおよびWebリンクの説明を同じ形式で受け付けるため、
+/// [`BoxClient::set_file_description`](crate::BoxClient::set_file_description)、
+/// [`BoxClient::set_folder_description`](crate::BoxClient::set_folder_description)および
+/// [`BoxClient::set_web_link_description`](crate::BoxClient::set_web_link_description)で共有する。
 #[derive(Debug, Clone, Serialize, Validate)]
 pub(crate) struct SetDescriptionBody<'a> {
     /// 説明
@@ -273,18 +314,16 @@ impl<'a> SetDescriptionBody<'a> {
     ///
     /// 説明が[`MAX_DESCRIPTION_CHARS`]文字より長い場合は、[`BoxClientError::InvalidRequestBody`]を返す。
     pub(crate) fn new(description: &'a str) -> BoxClientResult<Self> {
-        let body = Self { description };
-        body.validate()
-            .map_err(|report| BoxClientError::InvalidRequestBody(ValidationError::new(report)))?;
-        Ok(body)
+        validated(Self { description })
     }
 }
 
-/// ファイルまたはフォルダの移動先
+/// ファイル、フォルダまたはWebリンクの移動先
 ///
-/// BOXは、ファイルとフォルダの移動先を同じ形式で受け付けるため、
-/// [`BoxClient::move_file`](crate::BoxClient::move_file)および
-/// [`BoxClient::move_folder`](crate::BoxClient::move_folder)で共有する。
+/// BOXは、ファイル、フォルダおよびWebリンクの移動先を同じ形式で受け付けるため、
+/// [`BoxClient::move_file`](crate::BoxClient::move_file)、
+/// [`BoxClient::move_folder`](crate::BoxClient::move_folder)および
+/// [`BoxClient::move_web_link`](crate::BoxClient::move_web_link)で共有する。
 ///
 /// # Examples
 ///
@@ -312,7 +351,7 @@ pub enum MoveDestination {
     User(UserId),
 }
 
-/// ファイルまたはフォルダの移動リクエストのボディ
+/// ファイル、フォルダまたはWebリンクの移動リクエストのボディ
 ///
 /// BOXは、フォルダの移動先の親フォルダと他の属性を同時に指定すると、403（`operation_limit_exceeded`）を返す。
 /// したがって、移動先の親フォルダだけを送信する。
@@ -363,7 +402,7 @@ impl<'a> MoveBody<'a> {
     }
 }
 
-/// 省略可能なファイル名またはフォルダ名に、使用できない文字が含まれていないか検証する。
+/// 省略可能なファイル、フォルダまたはWebリンクの名前に、使用できない文字が含まれていないか検証する。
 ///
 /// `None`の場合は検証しない。`garde`の`custom`バリデーターは、フィールドの型の参照を受け取るため、
 /// `Option<&str>`のフィールドには[`validate_item_name`]を直接適用できない。

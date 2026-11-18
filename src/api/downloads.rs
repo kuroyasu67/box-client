@@ -5,18 +5,15 @@
 //! HTTPクライアントは、ホストが異なるURLへリダイレクトするときに`Authorization`ヘッダーを送信しないため、
 //! アクセストークンを`dl.boxcloud.com`へ送信しない。
 
-use std::{
-    ffi::OsString,
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
 
-use reqwest::{Response, StatusCode};
+use reqwest::Response;
 use tokio::io::AsyncWriteExt as _;
 
 use crate::{
     BoxClient, BoxClientError, BoxClientResult, FileId, FileVersionId,
     request::ApiRequest,
-    retry::{AttemptError, Idempotency, classify_body_error, parse_retry_after},
+    retry::{AttemptError, Idempotency, classify_body_error, read_poll_response},
 };
 
 /// ファイルのダウンロードのオプション
@@ -50,26 +47,11 @@ impl<'a> DownloadFileOptions<'a> {
     }
 }
 
-/// ファイルのダウンロードの1回のリクエストの結果
-#[derive(Debug)]
-enum DownloadOutcome {
-    /// ファイルの内容を一時ファイルに書き込んだ。
-    Downloaded {
-        /// 書き込んだバイト数
-        size: u64,
-    },
-
-    /// BOXがダウンロードの準備を終えていないため、リクエストを再送する必要がある。
-    NotReady {
-        /// `Retry-After`ヘッダーが示す待機時間
-        retry_after: Option<std::time::Duration>,
-    },
-}
-
 /// ダウンロードしている内容を書き込む一時ファイル
 ///
-/// ダウンロードに失敗した場合、またはダウンロードしているfutureが破棄された場合に、
-/// 書きかけの一時ファイルを残さないように、[`TempFile::persist`]を呼び出さずに破棄すると一時ファイルを削除する。
+/// `TempFile`は、[`TempFile::persist`]を呼び出さずに破棄されると、一時ファイルを削除する。
+/// これにより、ダウンロードに失敗した場合、またはダウンロードしているfutureが破棄された場合に、
+/// 書きかけの一時ファイルを残さない。
 #[derive(Debug)]
 struct TempFile {
     /// 一時ファイルのパス
@@ -80,21 +62,25 @@ struct TempFile {
 }
 
 impl TempFile {
-    /// 保存先と同じディレクトリに、保存先のファイル名とUUIDから一時ファイルのパスを決める。
+    /// 保存先と同じディレクトリに、UUIDから一時ファイルのパスを決める。
     ///
-    /// 一時ファイルは、保存先と同じファイルシステムに作成して、保存先への移動で内容を複製しないようにする。
-    /// 一時ファイルは、ダウンロードの開始時に作成する。
+    /// このメソッドは、パスを決めるだけで、一時ファイルを作成しない。
+    /// [`write_response`]が、成功レスポンスを受け取るたびに一時ファイルを作成し直す。
+    /// 一時ファイルを保存先と同じファイルシステムに作成することで、保存先への移動で内容を複製しない。
+    ///
+    /// 保存先のファイル名を一時ファイルの名前に含めると、長いファイル名でファイル名の長さの上限を超えるため、
+    /// 一時ファイルの名前は、保存先のファイル名によらず`.<UUID>.download`とする。
     ///
     /// # Errors
     ///
     /// 保存先のパスからファイル名を取得できない場合は、[`BoxClientError::InvalidArgument`]を返す。
     fn new(path: &Path) -> BoxClientResult<Self> {
-        let file_name = path.file_name().ok_or(BoxClientError::InvalidArgument(
-            "the file name cannot be taken from the path",
-        ))?;
-        let mut temp_name = OsString::from(".");
-        temp_name.push(file_name);
-        temp_name.push(format!(".{}.download", uuid::Uuid::new_v4().simple()));
+        if path.file_name().is_none() {
+            return Err(BoxClientError::InvalidArgument(
+                "the file name cannot be taken from the path",
+            ));
+        }
+        let temp_name = format!(".{}.download", uuid::Uuid::new_v4().simple());
 
         Ok(Self {
             path: path.with_file_name(temp_name),
@@ -105,6 +91,8 @@ impl TempFile {
     /// 一時ファイルを保存先に移動する。
     ///
     /// 保存先にファイルが存在する場合は、そのファイルを置き換える。
+    /// ただし、Windowsでは、保存先のファイルが読み取り専用の場合、または他のプロセスが削除を許可せずに開いている場合に、
+    /// 置き換えに失敗する。
     async fn persist(mut self, path: &Path) -> std::io::Result<()> {
         tokio::fs::rename(&self.path, path).await?;
         self.persisted = true;
@@ -137,13 +125,7 @@ async fn write_response(
     idempotency: Idempotency,
     temp_path: &Path,
     path: &Path,
-) -> Result<DownloadOutcome, AttemptError> {
-    if response.status() == StatusCode::ACCEPTED {
-        return Ok(DownloadOutcome::NotReady {
-            retry_after: parse_retry_after(response.headers()),
-        });
-    }
-
+) -> Result<u64, AttemptError> {
     let write_error = |source: std::io::Error| {
         AttemptError::Fatal(BoxClientError::WriteFile {
             path: path.to_owned(),
@@ -166,7 +148,7 @@ async fn write_response(
     file.flush().await.map_err(write_error)?;
     file.sync_all().await.map_err(write_error)?;
 
-    Ok(DownloadOutcome::Downloaded { size })
+    Ok(size)
 }
 
 impl BoxClient {
@@ -177,10 +159,10 @@ impl BoxClient {
     /// したがって、ダウンロードに失敗した場合は、保存先に書きかけのファイルを残さず、保存先に存在したファイルも変更しない。
     /// 保存先にファイルが存在する場合は、ダウンロードしたファイルで置き換える。
     ///
-    /// BOXがダウンロードの準備ができていないことを示す202を返した場合は、`Retry-After`ヘッダーが示す時間だけ
-    /// 待機してから、リクエストを再送する。再送する回数の上限は、[`BoxClient::max_download_polls`]が返す値とする。
-    /// `Retry-After`ヘッダーがない場合、または待機時間の上限を超える場合は、
-    /// 再試行設定に従って待機時間を決める。
+    /// BOXがダウンロードの準備ができていないことを示す202を返した場合、このメソッドは、
+    /// `Retry-After`ヘッダーが示す時間だけ待機してから、リクエストを再送する。
+    /// `Retry-After`ヘッダーがない場合は、再試行設定の指数バックオフで待機時間を決める。
+    /// 再送する回数の上限は、[`BoxClient::max_download_polls`]が返す値とする。
     ///
     /// ダウンロードの時間はファイルサイズによって大きく変わるため、
     /// [`BoxClientTimeout::request_timeout`](crate::BoxClientTimeout::request_timeout)を適用しない。
@@ -217,43 +199,33 @@ impl BoxClient {
         let path = path.as_ref();
         let temp_file = TempFile::new(path)?;
 
-        let mut polls = 0;
-        let size = loop {
-            let mut request =
-                ApiRequest::get(["files", file_id.as_ref(), "content"]).download_client();
-            if let Some(version) = options.version {
-                request = request.query("version", version.as_ref());
-            }
-            let outcome = self
-                .send(request, |response, idempotency| {
-                    write_response(response, idempotency, &temp_file.path, path)
-                })
-                .await?;
-            let retry_after = match outcome {
-                DownloadOutcome::Downloaded { size } => break size,
-                DownloadOutcome::NotReady { retry_after } => retry_after,
-            };
-
-            if self.max_download_polls() <= polls {
-                return Err(BoxClientError::UnexpectedResponse(
-                    "file was not ready to download before reaching max download polls",
-                ));
-            }
-            polls += 1;
-
-            // `ThreadRng`は`Send`を実装していないため、待機時間の計算と待機を別の文に分け、`ThreadRng`を待機の前に破棄する。
-            let policy = self.retry_policy();
-            let delay = policy
-                .retry_delay(polls, retry_after, &mut rand::rng())
-                .unwrap_or_else(|_| policy.max_delay());
-            tracing::debug!(
-                file_id = file_id.as_ref(),
-                polls,
-                delay_ms = delay.as_millis(),
-                "file is not ready to download; resending request"
-            );
-            tokio::time::sleep(delay).await;
-        };
+        let size = self
+            .poll_until_ready(
+                self.max_download_polls(),
+                "file was not ready to download before reaching max download polls",
+                |polls, delay| {
+                    tracing::debug!(
+                        file_id = file_id.as_ref(),
+                        polls,
+                        delay_ms = delay.as_millis(),
+                        "file is not ready to download; resending request"
+                    );
+                },
+                || async {
+                    let mut request =
+                        ApiRequest::get(["files", file_id.as_ref(), "content"]).download_client();
+                    if let Some(version) = options.version {
+                        request = request.query("version", version.as_ref());
+                    }
+                    self.send(request, |response, idempotency| {
+                        read_poll_response(response, idempotency, |response, idempotency| {
+                            write_response(response, idempotency, &temp_file.path, path)
+                        })
+                    })
+                    .await
+                },
+            )
+            .await?;
 
         temp_file
             .persist(path)
@@ -280,9 +252,7 @@ mod test_download_file {
 
     use reqwest::Url;
     use rstest::rstest;
-    use serde_json::json;
     use tempfile::TempDir;
-    use tokio::{io::AsyncReadExt as _, net::TcpListener};
     use wiremock::{
         Mock, MockServer, ResponseTemplate,
         matchers::{header, method, path, query_param},
@@ -292,7 +262,8 @@ mod test_download_file {
     use crate::{
         BoxClientTimeout,
         test_support::{
-            TOKEN_PATH, client_builder, create_client, mount_token, short_retry, test_config,
+            client_builder, create_client, mount_token, not_found_response,
+            raw_server_client_builder, request_count, short_retry, start_raw_server,
         },
     };
 
@@ -513,6 +484,43 @@ mod test_download_file {
         Ok(())
     }
 
+    /// BOXが待機時間の上限を超える`Retry-After`ヘッダーとともに202を返した場合は、
+    /// BOXが指定した時刻より早く再送しないように、再送せずにエラーを返すことを確認
+    #[tokio::test]
+    async fn test_download_file_gives_up_when_retry_after_is_too_long() -> anyhow::Result<()> {
+        let (dir, file_path) = destination()?;
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        // `short_retry`の待機時間の上限は50ミリ秒であるため、1秒は上限を超える。
+        Mock::given(method("GET"))
+            .and(path(CONTENT_PATH))
+            .respond_with(ResponseTemplate::new(202).insert_header("retry-after", "1"))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = create_client(&server, short_retry(0)?).await?;
+
+        let result = client
+            .download_file(
+                &FileId::new(FILE_ID),
+                &file_path,
+                &DownloadFileOptions::default(),
+            )
+            .await;
+
+        assert!(
+            matches!(
+                &result,
+                Err(BoxClientError::RetryAfterTooLong { retry_after, .. })
+                    if *retry_after == Duration::from_secs(1)
+            ),
+            "result: {result:?}"
+        );
+        assert_eq!(file_names(&dir)?, Vec::<String>::new());
+
+        Ok(())
+    }
+
     /// ダウンロードに失敗した場合は、保存先に存在したファイルを変更せず、一時ファイルも残さないことを確認
     #[tokio::test]
     async fn test_download_file_not_found_keeps_existing_file() -> anyhow::Result<()> {
@@ -522,11 +530,7 @@ mod test_download_file {
         mount_token(&server).await;
         Mock::given(method("GET"))
             .and(path(CONTENT_PATH))
-            .respond_with(ResponseTemplate::new(404).set_body_json(json!({
-                "type": "error",
-                "status": 404,
-                "code": "not_found",
-            })))
+            .respond_with(not_found_response())
             .mount(&server)
             .await;
         let client = create_client(&server, short_retry(2)?).await?;
@@ -553,37 +557,20 @@ mod test_download_file {
     ///
     /// 戻り値は、サーバーを指すREST APIのベースURLと、サーバーが受け付けた接続の数である。
     async fn start_truncating_once_server() -> anyhow::Result<(Url, Arc<AtomicUsize>)> {
-        let listener = TcpListener::bind("127.0.0.1:0").await?;
-        let api_base_url = Url::parse(&format!("http://{}/2.0", listener.local_addr()?))?;
-        let connections = Arc::new(AtomicUsize::new(0));
-        let counter = Arc::clone(&connections);
-        tokio::spawn(async move {
-            while let Ok((mut stream, _)) = listener.accept().await {
-                let connection = counter.fetch_add(1, Ordering::SeqCst);
-                // リクエストヘッダーを読み終えてから、レスポンスを返す。
-                let mut buffer = Vec::new();
-                let mut chunk = [0u8; 1024];
-                while !buffer.windows(4).any(|w| w == b"\r\n\r\n") {
-                    match stream.read(&mut chunk).await {
-                        Ok(0) | Err(_) => break,
-                        Ok(n) => buffer.extend_from_slice(&chunk[..n]),
-                    }
-                }
-                let header = format!(
-                    "HTTP/1.1 200 OK\r\ncontent-length: {}\r\n\r\n",
-                    CONTENT.len()
-                );
-                let body = if connection == 0 {
-                    &CONTENT[..CONTENT.len() / 2]
-                } else {
-                    CONTENT
-                };
-                let _ = stream.write_all(header.as_bytes()).await;
-                let _ = stream.write_all(body).await;
-            }
-        });
-
-        Ok((api_base_url, connections))
+        start_raw_server(|connection, mut stream| async move {
+            let header = format!(
+                "HTTP/1.1 200 OK\r\ncontent-length: {}\r\n\r\n",
+                CONTENT.len()
+            );
+            let body = if connection == 0 {
+                &CONTENT[..CONTENT.len() / 2]
+            } else {
+                CONTENT
+            };
+            let _ = stream.write_all(header.as_bytes()).await;
+            let _ = stream.write_all(body).await;
+        })
+        .await
     }
 
     /// レスポンスヘッダーを返した後、`interval`ごとに内容を1バイトずつ返すHTTPサーバーを起動する。
@@ -594,36 +581,25 @@ mod test_download_file {
         interval: Duration,
         stall: Option<Duration>,
     ) -> anyhow::Result<Url> {
-        let listener = TcpListener::bind("127.0.0.1:0").await?;
-        let api_base_url = Url::parse(&format!("http://{}/2.0", listener.local_addr()?))?;
-        tokio::spawn(async move {
-            while let Ok((mut stream, _)) = listener.accept().await {
-                let mut buffer = Vec::new();
-                let mut chunk = [0u8; 1024];
-                while !buffer.windows(4).any(|w| w == b"\r\n\r\n") {
-                    match stream.read(&mut chunk).await {
-                        Ok(0) | Err(_) => break,
-                        Ok(n) => buffer.extend_from_slice(&chunk[..n]),
-                    }
+        let (api_base_url, _) = start_raw_server(move |_, mut stream| async move {
+            let header = format!(
+                "HTTP/1.1 200 OK\r\ncontent-length: {}\r\n\r\n",
+                CONTENT.len()
+            );
+            let _ = stream.write_all(header.as_bytes()).await;
+            for (i, byte) in CONTENT.iter().enumerate() {
+                if i == CONTENT.len() / 2
+                    && let Some(stall) = stall
+                {
+                    tokio::time::sleep(stall).await;
                 }
-                let header = format!(
-                    "HTTP/1.1 200 OK\r\ncontent-length: {}\r\n\r\n",
-                    CONTENT.len()
-                );
-                let _ = stream.write_all(header.as_bytes()).await;
-                for (i, byte) in CONTENT.iter().enumerate() {
-                    if i == CONTENT.len() / 2
-                        && let Some(stall) = stall
-                    {
-                        tokio::time::sleep(stall).await;
-                    }
-                    tokio::time::sleep(interval).await;
-                    if stream.write_all(&[*byte]).await.is_err() {
-                        break;
-                    }
+                tokio::time::sleep(interval).await;
+                if stream.write_all(&[*byte]).await.is_err() {
+                    break;
                 }
             }
-        });
+        })
+        .await?;
 
         Ok(api_base_url)
     }
@@ -635,17 +611,16 @@ mod test_download_file {
         request_timeout: Duration,
         download_read_timeout: Duration,
     ) -> anyhow::Result<BoxClient> {
-        Ok(BoxClient::builder(test_config())
-            .timeout(
-                BoxClientTimeout::default()
-                    .with_request_timeout(request_timeout)
-                    .with_download_read_timeout(download_read_timeout),
-            )
-            .retry(short_retry(0)?)
-            .api_base_url(api_base_url.as_str())?
-            .token_url(&format!("{}{TOKEN_PATH}", token_server.uri()))?
-            .build()
-            .await?)
+        Ok(
+            raw_server_client_builder(&api_base_url, token_server, short_retry(0)?)?
+                .timeout(
+                    BoxClientTimeout::default()
+                        .with_request_timeout(request_timeout)
+                        .with_download_read_timeout(download_read_timeout),
+                )
+                .build()
+                .await?,
+        )
     }
 
     /// データを受信し続けている間は、ダウンロード全体の時間が`request_timeout`を超えてもタイムアウトしないことを確認
@@ -725,10 +700,7 @@ mod test_download_file {
         let token_server = MockServer::start().await;
         mount_token(&token_server).await;
         let (api_base_url, connections) = start_truncating_once_server().await?;
-        let client = BoxClient::builder(test_config())
-            .retry(short_retry(1)?)
-            .api_base_url(api_base_url.as_str())?
-            .token_url(&format!("{}{TOKEN_PATH}", token_server.uri()))?
+        let client = raw_server_client_builder(&api_base_url, &token_server, short_retry(1)?)?
             .build()
             .await?;
 
@@ -769,10 +741,7 @@ mod test_download_file {
             "result: {result:?}"
         );
         // BOXクライアントの作成時に送信したトークンリクエストだけを受信している。
-        assert_eq!(
-            server.received_requests().await.unwrap_or_default().len(),
-            1
-        );
+        assert_eq!(request_count(&server).await, 1);
 
         Ok(())
     }

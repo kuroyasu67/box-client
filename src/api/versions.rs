@@ -2,7 +2,6 @@
 //!
 //! BOXは、プレミアムアカウントのユーザーのファイルだけにバージョンを記録する。
 
-use reqwest::header::IF_MATCH;
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
@@ -186,7 +185,7 @@ impl BoxClient {
     /// 現在のバージョンのIDは、[`BoxClient::file_information`]で取得した[`File::file_version`](crate::File::file_version)で確認できる。
     ///
     /// 1回の呼び出しで返すバージョンは最大で`limit`件である。次のページを取得する場合は、
-    /// 前のページの`offset`にバージョン数を加えた値を`offset`に指定して再度呼び出す。
+    /// 前のページの`offset`に、前のページの`entries`の数を加えた値を`offset`に指定して再度呼び出す。
     /// すべてのバージョンが必要な場合は、[`BoxClient::list_all_file_versions`]を使用する。
     ///
     /// # Arguments
@@ -256,7 +255,9 @@ impl BoxClient {
             pages += 1;
             let count = page.entries.len() as u64;
             versions.extend(page.entries);
-            offset = page.offset + count;
+            // BOXが返す`offset`ではなく、要求した`offset`から次のページの位置を求める。
+            // BOXが`offset`を無視して同じページを返し続けても、位置を進めて必ずループを終える。
+            offset += count;
 
             if count == 0 || page.total_count <= offset {
                 break;
@@ -379,7 +380,7 @@ impl BoxClient {
     /// BOXは、削除したバージョンをゴミ箱に移動する。ゴミ箱に移動したバージョンは、
     /// [`BoxClient::restore_file_version`]でファイルのバージョン履歴に戻せる。
     ///
-    /// クライアントは、5xxを受け取った場合、またはタイムアウトした場合に、同じリクエストを再送して再試行する。
+    /// BOXクライアントは、冪等なリクエストであれば、5xxを受け取った場合、またはタイムアウトした場合に、同じリクエストを再送して再試行する。
     /// しかし、これらの場合は、BOXがバージョンの削除を完了している可能性がある。
     /// BOXが削除した後にリクエストを再送すると、削除済みのバージョンに対する削除となるため、BOXはエラーを返しうる。
     /// その結果、削除に成功したにもかかわらず、削除に失敗したと誤って判断するおそれがある。
@@ -418,9 +419,7 @@ impl BoxClient {
             file_version_id.as_ref(),
         ])
         .idempotency(Idempotency::NonIdempotent);
-        if let Some(etag) = etag {
-            request = request.header(IF_MATCH, etag)?;
-        }
+        request = request.if_match(etag)?;
 
         self.send_empty(request).await?;
 
@@ -446,7 +445,7 @@ mod test_file_version {
     use super::*;
     use crate::{
         UserId, UserMini,
-        test_support::{create_client, mount_token, short_retry},
+        test_support::{create_client, mount_token, not_found_response, short_retry},
     };
 
     /// `GET /files/{file_id}/versions/{file_version_id}`を呼び出し、バージョンの属性をデシリアライズすることを確認
@@ -518,12 +517,7 @@ mod test_file_version {
         mount_token(&server).await;
         Mock::given(method("GET"))
             .and(path("/2.0/files/12345/versions/999"))
-            .respond_with(ResponseTemplate::new(404).set_body_json(json!({
-                "type": "error",
-                "status": 404,
-                "code": "not_found",
-                "message": "Not Found",
-            })))
+            .respond_with(not_found_response())
             .mount(&server)
             .await;
         let client = create_client(&server, short_retry(0)?).await?;
@@ -551,7 +545,9 @@ mod test_list_file_versions {
     };
 
     use super::*;
-    use crate::test_support::{create_client, mount_token, request_count, short_retry};
+    use crate::test_support::{
+        count_requests_to_path, create_client, mount_token, request_count, short_retry,
+    };
 
     /// ファイルのバージョンのAPIのパス
     const VERSIONS_PATH: &str = "/2.0/files/12345/versions";
@@ -679,14 +675,38 @@ mod test_list_file_versions {
         let ids: Vec<String> = versions.iter().map(|v| v.id.to_string()).collect();
         let expected: Vec<String> = (0..total).map(|i| i.to_string()).collect();
         assert_eq!(ids, expected);
-        let pages = server
-            .received_requests()
-            .await
-            .unwrap_or_default()
-            .iter()
-            .filter(|r| r.url.path() == VERSIONS_PATH)
-            .count();
+        let pages = count_requests_to_path(&server, VERSIONS_PATH).await;
         assert_eq!(pages, expected_pages);
+
+        Ok(())
+    }
+
+    /// BOXが要求と異なる`offset`を返し続けても、要求した`offset`から位置を進めてループを終えることを確認
+    #[tokio::test]
+    async fn test_list_all_file_versions_ignores_returned_offset() -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        // BOXは、要求した`offset`によらず、常に`offset`が0で1件のバージョンを返す。
+        Mock::given(method("GET"))
+            .and(path(VERSIONS_PATH))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "total_count": 3,
+                "offset": 0,
+                "limit": 1,
+                "entries": [version_json(0)],
+            })))
+            .mount(&server)
+            .await;
+        let client = create_client(&server, short_retry(0)?).await?;
+
+        let versions = client
+            .list_all_file_versions(
+                &FileId::new("12345"),
+                &ListFileVersionsOptions::default().with_limit(1),
+            )
+            .await?;
+
+        assert_eq!(versions.len(), 3);
 
         Ok(())
     }
@@ -882,27 +902,12 @@ mod test_delete_file_version {
     };
 
     use super::*;
-    use crate::test_support::{create_client, mount_token, short_retry};
+    use crate::test_support::{
+        count_requests, create_client, if_match_headers, mount_token, short_retry,
+    };
 
     /// ファイルのバージョンのAPIのパス
     const VERSION_PATH: &str = "/2.0/files/12345/versions/67890";
-
-    /// バージョンのAPIへのDELETEリクエストのIf-Matchヘッダーを返す。
-    async fn delete_requests(server: &MockServer) -> Vec<Option<String>> {
-        server
-            .received_requests()
-            .await
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|r| r.method.as_str() == "DELETE" && r.url.path() == VERSION_PATH)
-            .map(|r| {
-                r.headers
-                    .get("if-match")
-                    .and_then(|v| v.to_str().ok())
-                    .map(str::to_owned)
-            })
-            .collect()
-    }
 
     /// `ETag`を指定した場合だけ、If-Matchヘッダーを送信してバージョンを削除することを確認
     #[rstest]
@@ -924,7 +929,7 @@ mod test_delete_file_version {
             .await?;
 
         assert_eq!(
-            delete_requests(&server).await,
+            if_match_headers(&server, "DELETE", VERSION_PATH).await,
             vec![etag.map(str::to_owned)]
         );
 
@@ -960,7 +965,7 @@ mod test_delete_file_version {
             matches!(&result, Err(BoxClientError::Api(e)) if e.status == status),
             "result: {result:?}"
         );
-        assert_eq!(delete_requests(&server).await.len(), 1);
+        assert_eq!(count_requests(&server, "DELETE", VERSION_PATH).await, 1);
 
         Ok(())
     }

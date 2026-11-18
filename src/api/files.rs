@@ -4,14 +4,15 @@ use garde::Validate;
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
-use reqwest::header::IF_MATCH;
-
+// ドキュメントのリンクとテストだけが参照する。
+#[cfg(any(doc, test))]
+use crate::BoxClientError;
 use crate::{
-    BoxClient, BoxClientError, BoxClientResult, FileId, FileVersion, FileVersionId, FolderId,
-    FolderItem, Idempotency, ItemStatus, MoveDestination, ParentFolder, PathCollection, UserMini,
-    ValidationError,
+    BoxClient, BoxClientResult, FileId, FileVersion, FileVersionId, FolderId, FolderItem,
+    Idempotency, ItemStatus, MoveDestination, ParentFolder, PathCollection, UserMini,
     api::types::{
-        MoveBody, RenameBody, SetDescriptionBody, UpdateItemOptions, validate_optional_item_name,
+        MAX_NAME_CHARS, MoveBody, RenameBody, SetDescriptionBody, UpdateItemOptions,
+        update_item_request, validate_optional_item_name, validated,
     },
     request::ApiRequest,
 };
@@ -149,7 +150,7 @@ struct CopyFileBody<'a> {
     /// `None`の場合は送信せず、BOXはコピー元のファイルと同じ名前を付ける。
     /// `garde`は`None`の場合に`length`を検証しない。
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[garde(length(chars, min = 1, max = 255), custom(validate_optional_item_name))]
+    #[garde(length(chars, min = 1, max = MAX_NAME_CHARS), custom(validate_optional_item_name))]
     name: Option<&'a str>,
 
     /// コピーするバージョンのID
@@ -167,16 +168,13 @@ impl<'a> CopyFileBody<'a> {
     ///
     /// ファイル名をBOXが拒否する場合は、[`BoxClientError::InvalidRequestBody`]を返す。
     fn new(parent_id: &FolderId, options: &CopyFileOptions<'a>) -> BoxClientResult<Self> {
-        let body = Self {
+        validated(Self {
             parent: ParentFolder {
                 id: parent_id.clone(),
             },
             name: options.name,
             version: options.version,
-        };
-        body.validate()
-            .map_err(|report| BoxClientError::InvalidRequestBody(ValidationError::new(report)))?;
-        Ok(body)
+        })
     }
 }
 
@@ -250,7 +248,7 @@ impl BoxClient {
 
     /// ファイル名を変更する。
     ///
-    /// クライアントは、5xxを受け取った場合、またはタイムアウトした場合に、同じリクエストを再送して再試行する。
+    /// BOXクライアントは、冪等なリクエストであれば、5xxを受け取った場合、またはタイムアウトした場合に、同じリクエストを再送して再試行する。
     /// しかし、これらの場合は、BOXがファイル名の変更を完了している可能性がある。
     /// `options.etag`を指定した場合は、名前の変更によって`ETag`が変わるため、再送すると412を受け取る。
     /// その結果、変更に成功したにもかかわらず、変更に失敗したと誤って判断するおそれがある。
@@ -288,12 +286,7 @@ impl BoxClient {
         options: &UpdateItemOptions<'_>,
     ) -> BoxClientResult<File> {
         let body = RenameBody::new(name)?;
-        let mut request = ApiRequest::put(["files", file_id.as_ref()])
-            .idempotency(Idempotency::NonIdempotent)
-            .json(&body)?;
-        if let Some(etag) = options.etag {
-            request = request.header(IF_MATCH, etag)?;
-        }
+        let request = update_item_request("files", file_id.as_ref(), &body, options.etag)?;
 
         let file: File = self.send_json(request).await?;
 
@@ -306,7 +299,7 @@ impl BoxClient {
     ///
     /// 説明を削除する場合は、`description`に空文字列を指定する。
     ///
-    /// クライアントは、5xxを受け取った場合、またはタイムアウトした場合に、同じリクエストを再送して再試行する。
+    /// BOXクライアントは、冪等なリクエストであれば、5xxを受け取った場合、またはタイムアウトした場合に、同じリクエストを再送して再試行する。
     /// しかし、これらの場合は、BOXが説明の設定を完了している可能性がある。
     /// `options.etag`を指定した場合は、説明の設定によって`ETag`が変わるため、再送すると412を受け取る。
     /// その結果、設定に成功したにもかかわらず、設定に失敗したと誤って判断するおそれがある。
@@ -342,12 +335,7 @@ impl BoxClient {
         options: &UpdateItemOptions<'_>,
     ) -> BoxClientResult<File> {
         let body = SetDescriptionBody::new(description)?;
-        let mut request = ApiRequest::put(["files", file_id.as_ref()])
-            .idempotency(Idempotency::NonIdempotent)
-            .json(&body)?;
-        if let Some(etag) = options.etag {
-            request = request.header(IF_MATCH, etag)?;
-        }
+        let request = update_item_request("files", file_id.as_ref(), &body, options.etag)?;
 
         let file = self.send_json(request).await?;
 
@@ -358,7 +346,7 @@ impl BoxClient {
 
     /// ファイルを別のフォルダへ移動する。
     ///
-    /// クライアントは、5xxを受け取った場合、またはタイムアウトした場合に、同じリクエストを再送して再試行する。
+    /// BOXクライアントは、冪等なリクエストであれば、5xxを受け取った場合、またはタイムアウトした場合に、同じリクエストを再送して再試行する。
     /// しかし、これらの場合は、BOXがファイルの移動を完了している可能性がある。
     /// `options.etag`を指定した場合は、移動によって`ETag`が変わるため、再送すると412を受け取る。
     /// その結果、移動に成功したにもかかわらず、移動に失敗したと誤って判断するおそれがある。
@@ -393,12 +381,7 @@ impl BoxClient {
         options: &UpdateItemOptions<'_>,
     ) -> BoxClientResult<File> {
         let body = MoveBody::new(destination)?;
-        let mut request = ApiRequest::put(["files", file_id.as_ref()])
-            .idempotency(Idempotency::NonIdempotent)
-            .json(&body)?;
-        if let Some(etag) = options.etag {
-            request = request.header(IF_MATCH, etag)?;
-        }
+        let request = update_item_request("files", file_id.as_ref(), &body, options.etag)?;
 
         let file = self.send_json(request).await?;
 
@@ -411,7 +394,7 @@ impl BoxClient {
     ///
     /// BOXは、エンタープライズの設定に従って、ファイルをゴミ箱に移動するか、完全に削除する。
     ///
-    /// クライアントは、5xxを受け取った場合、またはタイムアウトした場合に、同じリクエストを再送して再試行する。
+    /// BOXクライアントは、冪等なリクエストであれば、5xxを受け取った場合、またはタイムアウトした場合に、同じリクエストを再送して再試行する。
     /// しかし、これらの場合は、BOXがファイルの削除を完了している可能性がある。
     /// BOXは削除済みのファイルに対して404を返すため、BOXが削除した後にリクエストを再送すると、
     /// 削除に成功したにもかかわらず、削除に失敗したと誤って判断するおそれがある。
@@ -440,9 +423,7 @@ impl BoxClient {
     pub async fn delete_file(&self, file_id: &FileId, etag: Option<&str>) -> BoxClientResult<()> {
         let mut request =
             ApiRequest::delete(["files", file_id.as_ref()]).idempotency(Idempotency::NonIdempotent);
-        if let Some(etag) = etag {
-            request = request.header(IF_MATCH, etag)?;
-        }
+        request = request.if_match(etag)?;
 
         self.send_empty(request).await?;
 
@@ -606,7 +587,7 @@ mod test_file_information {
     use super::*;
     use crate::{
         BoxClientError, FolderId,
-        test_support::{create_client, mount_token, short_retry},
+        test_support::{create_client, mount_token, not_found_response, short_retry},
     };
 
     /// `GET /files/{file_id}`を呼び出し、ファイル情報をデシリアライズすることを確認
@@ -646,12 +627,7 @@ mod test_file_information {
         mount_token(&server).await;
         Mock::given(method("GET"))
             .and(path("/2.0/files/999"))
-            .respond_with(ResponseTemplate::new(404).set_body_json(json!({
-                "type": "error",
-                "status": 404,
-                "code": "not_found",
-                "message": "Not Found",
-            })))
+            .respond_with(not_found_response())
             .mount(&server)
             .await;
         let client = create_client(&server, short_retry(0)?).await?;
@@ -813,27 +789,12 @@ mod test_rename_file {
     };
 
     use super::*;
-    use crate::test_support::{create_client, mount_token, request_count, short_retry};
+    use crate::test_support::{
+        count_requests, create_client, if_match_headers, mount_token, request_count, short_retry,
+    };
 
     /// ファイルのAPIのパス
     const FILE_PATH: &str = "/2.0/files/12345";
-
-    /// ファイルのAPIへのPUTリクエストのIf-Matchヘッダーを返す。
-    async fn rename_requests(server: &MockServer) -> Vec<Option<String>> {
-        server
-            .received_requests()
-            .await
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|r| r.method.as_str() == "PUT" && r.url.path() == FILE_PATH)
-            .map(|r| {
-                r.headers
-                    .get("if-match")
-                    .and_then(|v| v.to_str().ok())
-                    .map(str::to_owned)
-            })
-            .collect()
-    }
 
     /// 新しい名前だけをボディで送信し、オプションに応じてIf-Matchヘッダーを送信することを確認
     #[rstest]
@@ -866,7 +827,7 @@ mod test_rename_file {
 
         assert_eq!(file.name, "Renamed.pdf");
         assert_eq!(
-            rename_requests(&server).await,
+            if_match_headers(&server, "PUT", FILE_PATH).await,
             vec![expected_if_match.map(str::to_owned)]
         );
 
@@ -929,7 +890,7 @@ mod test_rename_file {
             matches!(&result, Err(BoxClientError::Api(e)) if e.status == status),
             "result: {result:?}"
         );
-        assert_eq!(rename_requests(&server).await.len(), 1);
+        assert_eq!(count_requests(&server, "PUT", FILE_PATH).await, 1);
 
         Ok(())
     }
@@ -945,27 +906,12 @@ mod test_set_file_description {
     };
 
     use super::*;
-    use crate::test_support::{create_client, mount_token, request_count, short_retry};
+    use crate::test_support::{
+        count_requests, create_client, if_match_headers, mount_token, request_count, short_retry,
+    };
 
     /// ファイルのAPIのパス
     const FILE_PATH: &str = "/2.0/files/12345";
-
-    /// ファイルのAPIへのPUTリクエストのIf-Matchヘッダーを返す。
-    async fn update_requests(server: &MockServer) -> Vec<Option<String>> {
-        server
-            .received_requests()
-            .await
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|r| r.method.as_str() == "PUT" && r.url.path() == FILE_PATH)
-            .map(|r| {
-                r.headers
-                    .get("if-match")
-                    .and_then(|v| v.to_str().ok())
-                    .map(str::to_owned)
-            })
-            .collect()
-    }
 
     /// 説明だけをボディで送信し、オプションに応じてIf-Matchヘッダーを送信することを確認
     ///
@@ -1012,7 +958,7 @@ mod test_set_file_description {
 
         assert_eq!(file.description.as_deref(), Some(description));
         assert_eq!(
-            update_requests(&server).await,
+            if_match_headers(&server, "PUT", FILE_PATH).await,
             vec![expected_if_match.map(str::to_owned)]
         );
 
@@ -1074,7 +1020,7 @@ mod test_set_file_description {
             matches!(&result, Err(BoxClientError::Api(e)) if e.status == status),
             "result: {result:?}"
         );
-        assert_eq!(update_requests(&server).await.len(), 1);
+        assert_eq!(count_requests(&server, "PUT", FILE_PATH).await, 1);
 
         Ok(())
     }
@@ -1092,28 +1038,14 @@ mod test_move_file {
     use super::*;
     use crate::{
         FolderId, UserId,
-        test_support::{create_client, mount_token, request_count, short_retry},
+        test_support::{
+            count_requests, create_client, if_match_headers, mount_token, request_count,
+            short_retry,
+        },
     };
 
     /// ファイルのAPIのパス
     const FILE_PATH: &str = "/2.0/files/12345";
-
-    /// ファイルのAPIへのPUTリクエストのIf-Matchヘッダーを返す。
-    async fn move_requests(server: &MockServer) -> Vec<Option<String>> {
-        server
-            .received_requests()
-            .await
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|r| r.method.as_str() == "PUT" && r.url.path() == FILE_PATH)
-            .map(|r| {
-                r.headers
-                    .get("if-match")
-                    .and_then(|v| v.to_str().ok())
-                    .map(str::to_owned)
-            })
-            .collect()
-    }
 
     /// 移動先に応じた親フォルダだけをボディで送信し、オプションに応じてIf-Matchヘッダーを送信することを確認
     #[rstest]
@@ -1165,7 +1097,7 @@ mod test_move_file {
 
         assert_eq!(file.id, FileId::new("12345"));
         assert_eq!(
-            move_requests(&server).await,
+            if_match_headers(&server, "PUT", FILE_PATH).await,
             vec![expected_if_match.map(str::to_owned)]
         );
 
@@ -1226,7 +1158,7 @@ mod test_move_file {
             matches!(&result, Err(BoxClientError::Api(e)) if e.status == status),
             "result: {result:?}"
         );
-        assert_eq!(move_requests(&server).await.len(), 1);
+        assert_eq!(count_requests(&server, "PUT", FILE_PATH).await, 1);
 
         Ok(())
     }
@@ -1243,28 +1175,14 @@ mod test_delete_file {
     use super::*;
     use crate::{
         BoxClientError,
-        test_support::{create_client, mount_token, request_count, short_retry},
+        test_support::{
+            count_requests, create_client, if_match_headers, mount_token, request_count,
+            short_retry,
+        },
     };
 
     /// ファイルのAPIのパス
     const FILE_PATH: &str = "/2.0/files/123";
-
-    /// ファイルのAPIへのDELETEリクエストのIf-Matchヘッダーを返す。
-    async fn delete_requests(server: &MockServer) -> Vec<Option<String>> {
-        server
-            .received_requests()
-            .await
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|r| r.method.as_str() == "DELETE" && r.url.path() == FILE_PATH)
-            .map(|r| {
-                r.headers
-                    .get("if-match")
-                    .and_then(|v| v.to_str().ok())
-                    .map(str::to_owned)
-            })
-            .collect()
-    }
 
     /// `ETag`を指定した場合だけ、If-Matchヘッダーを送信することを確認
     #[rstest]
@@ -1284,7 +1202,7 @@ mod test_delete_file {
         client.delete_file(&FileId::new("123"), etag).await?;
 
         assert_eq!(
-            delete_requests(&server).await,
+            if_match_headers(&server, "DELETE", FILE_PATH).await,
             vec![etag.map(str::to_owned)]
         );
 
@@ -1338,7 +1256,7 @@ mod test_delete_file {
             matches!(&result, Err(BoxClientError::Api(e)) if e.status == status),
             "result: {result:?}"
         );
-        assert_eq!(delete_requests(&server).await.len(), 1);
+        assert_eq!(count_requests(&server, "DELETE", FILE_PATH).await, 1);
 
         Ok(())
     }
@@ -1363,7 +1281,7 @@ mod test_delete_file {
 
         client.delete_file(&FileId::new("123"), None).await?;
 
-        assert_eq!(delete_requests(&server).await.len(), 2);
+        assert_eq!(count_requests(&server, "DELETE", FILE_PATH).await, 2);
 
         Ok(())
     }

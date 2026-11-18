@@ -27,10 +27,12 @@ pub async fn setup() -> anyhow::Result<BoxClient> {
         .init();
 
     // 分割アップロードに切り替えるファイルサイズを最小値の20MiBとし、1回のリクエストで送信するデータを20MiB以下にする。
-    // 上りの通信速度が毎秒2メガビット程度でも送信を終えられるように、リクエストのタイムアウトを2分とする。
+    // 分割アップロードでは、部分（BOXが決める。例えば8MiB）を既定の並列数の4つまで同時に送信するため、
+    // 通信帯域を分け合う部分のデータは最大で32MiB程度になる。
+    // 上りの通信速度が毎秒2メガビット程度でも、どちらの送信も終えられるように、リクエストのタイムアウトを5分とする。
     // ダウンロードにはリクエストのタイムアウトを適用しないため、データを30秒受信しない場合にタイムアウトさせる。
     let timeout = BoxClientTimeout::default()
-        .with_request_timeout(Duration::from_secs(120))
+        .with_request_timeout(Duration::from_secs(300))
         .with_connect_timeout(Duration::from_secs(5))
         .with_download_read_timeout(Duration::from_secs(30));
     let retry = RetryPolicy::new(
@@ -98,7 +100,18 @@ pub async fn list_trashed_items(client: &BoxClient) -> anyhow::Result<()> {
     let items = client
         .list_all_trashed_items(&ListTrashedItemsOptions::default())
         .await?;
-    for item in &items {
+    log_items(&items);
+
+    Ok(())
+}
+
+/// 項目の種類、IDおよび名前を表示する。
+#[allow(
+    dead_code,
+    reason = "サンプルごとに`common`モジュールをコンパイルするため、この関数を呼び出さないサンプルでは未使用になる"
+)]
+pub fn log_items(items: &[BoxItem]) {
+    for item in items {
         match item {
             BoxItem::File(file) => tracing::info!("file: id={}, name={}", file.id, file.name),
             BoxItem::Folder(folder) => {
@@ -111,6 +124,4 @@ pub async fn list_trashed_items(client: &BoxClient) -> anyhow::Result<()> {
             _ => tracing::info!("unknown item"),
         }
     }
-
-    Ok(())
 }

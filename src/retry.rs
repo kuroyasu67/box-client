@@ -486,6 +486,40 @@ pub(crate) fn classify_api_error(
     }
 }
 
+/// BOXが処理を終えるまで再送するリクエストの、1回の送信の結果
+///
+/// BOXは、アップロードセッションのコミットやファイルのダウンロードで、処理を終えていない場合に
+/// 202と`Retry-After`ヘッダーを返す。
+#[derive(Debug)]
+pub(crate) enum PollOutcome<T> {
+    /// BOXが処理を終えた。
+    Ready(T),
+
+    /// BOXが処理を終えていないため、リクエストを再送する必要がある。
+    NotReady {
+        /// `Retry-After`ヘッダーが示す待機時間
+        retry_after: Option<Duration>,
+    },
+}
+
+/// 成功レスポンスが202の場合は[`PollOutcome::NotReady`]を返し、それ以外の場合は`read`で読み込んだ結果を返す。
+pub(crate) async fn read_poll_response<T, F, Fut>(
+    response: Response,
+    idempotency: Idempotency,
+    read: F,
+) -> Result<PollOutcome<T>, AttemptError>
+where
+    F: FnOnce(Response, Idempotency) -> Fut,
+    Fut: Future<Output = Result<T, AttemptError>>,
+{
+    if response.status() == StatusCode::ACCEPTED {
+        return Ok(PollOutcome::NotReady {
+            retry_after: parse_retry_after(response.headers()),
+        });
+    }
+    read(response, idempotency).await.map(PollOutcome::Ready)
+}
+
 /// `Retry-After`ヘッダーが示す待機時間を返す。
 ///
 /// BOXは`Retry-After`ヘッダーに秒数を設定するため、秒数として解釈できない場合は`None`を返し、

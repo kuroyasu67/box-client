@@ -771,12 +771,15 @@ mod test_refresh_interval_after_failure {
 #[cfg(test)]
 mod test_token_manager {
     use rstest::rstest;
-    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+    use wiremock::{MockServer, ResponseTemplate, matchers::method};
 
     use super::*;
     use crate::{
         errors::BoxClientError,
-        test_support::{TOKEN_PATH, request_count, short_retry, test_config, token_response},
+        test_support::{
+            TOKEN_PATH, mount_always, mount_first_n, request_count, short_retry, test_config,
+            token_response,
+        },
     };
 
     /// テストで使用する`refresh_before_expiry`
@@ -844,28 +847,11 @@ mod test_token_manager {
             .map_err(|_| anyhow::anyhow!("token endpoint did not receive {expected} requests"))
     }
 
-    /// 最初の`n`回だけ`response`を返すモックを登録する。
-    async fn mount_first_n(server: &MockServer, response: ResponseTemplate, n: u64) {
-        Mock::given(method("POST"))
-            .respond_with(response)
-            .up_to_n_times(n)
-            .mount(server)
-            .await;
-    }
-
-    /// 常に`response`を返すモックを登録する。
-    async fn mount_always(server: &MockServer, response: ResponseTemplate) {
-        Mock::given(method("POST"))
-            .respond_with(response)
-            .mount(server)
-            .await;
-    }
-
     /// JWTベアラーでトークンをリクエストし、取得したアクセストークンをキャッシュすることを確認
     #[tokio::test]
     async fn test_access_token_fetches_and_caches() -> anyhow::Result<()> {
         let server = MockServer::start().await;
-        mount_always(&server, token_response()).await;
+        mount_always(&server, method("POST"), token_response()).await;
         let manager = create_manager(
             &server,
             Duration::from_secs(2),
@@ -895,10 +881,17 @@ mod test_token_manager {
     #[tokio::test]
     async fn test_access_token_refreshes_in_background() -> anyhow::Result<()> {
         let server = MockServer::start().await;
-        mount_first_n(&server, token_response_with("old-token", 3600), 1).await;
+        mount_first_n(
+            &server,
+            method("POST"),
+            token_response_with("old-token", 3600),
+            1,
+        )
+        .await;
         // 呼び出し元が取得を待っていないことを確かめるため、取得し直すときのレスポンスを遅らせる。
         mount_always(
             &server,
+            method("POST"),
             token_response_with("new-token", 3600).set_delay(Duration::from_millis(500)),
         )
         .await;
@@ -926,10 +919,17 @@ mod test_token_manager {
     #[tokio::test]
     async fn test_access_token_refreshes_in_background_once() -> anyhow::Result<()> {
         let server = MockServer::start().await;
-        mount_first_n(&server, token_response_with("old-token", 3600), 1).await;
+        mount_first_n(
+            &server,
+            method("POST"),
+            token_response_with("old-token", 3600),
+            1,
+        )
+        .await;
         // すべての呼び出しがバックグラウンドの取得中に行われるように、レスポンスを遅らせる。
         mount_always(
             &server,
+            method("POST"),
             token_response_with("new-token", 3600).set_delay(Duration::from_millis(500)),
         )
         .await;
@@ -961,8 +961,14 @@ mod test_token_manager {
     async fn test_access_token_keeps_cached_token_when_background_refresh_fails()
     -> anyhow::Result<()> {
         let server = MockServer::start().await;
-        mount_first_n(&server, token_response_with("old-token", 3600), 1).await;
-        mount_always(&server, ResponseTemplate::new(500)).await;
+        mount_first_n(
+            &server,
+            method("POST"),
+            token_response_with("old-token", 3600),
+            1,
+        )
+        .await;
+        mount_always(&server, method("POST"), ResponseTemplate::new(500)).await;
         let manager = create_manager(
             &server,
             Duration::from_secs(2),
@@ -987,8 +993,14 @@ mod test_token_manager {
     -> anyhow::Result<()> {
         const INTERVAL: Duration = Duration::from_millis(300);
         let server = MockServer::start().await;
-        mount_first_n(&server, token_response_with("old-token", 3600), 1).await;
-        mount_always(&server, ResponseTemplate::new(500)).await;
+        mount_first_n(
+            &server,
+            method("POST"),
+            token_response_with("old-token", 3600),
+            1,
+        )
+        .await;
+        mount_always(&server, method("POST"), ResponseTemplate::new(500)).await;
         let http_client = reqwest::Client::builder()
             .timeout(Duration::from_secs(2))
             .build()?;
@@ -1030,8 +1042,19 @@ mod test_token_manager {
     async fn test_access_token_fetches_when_expired() -> anyhow::Result<()> {
         let server = MockServer::start().await;
         // 有効期間0秒のアクセストークンは、取得した時点で期限切れになる。
-        mount_first_n(&server, token_response_with("expired-token", 0), 1).await;
-        mount_always(&server, token_response_with("new-token", 3600)).await;
+        mount_first_n(
+            &server,
+            method("POST"),
+            token_response_with("expired-token", 0),
+            1,
+        )
+        .await;
+        mount_always(
+            &server,
+            method("POST"),
+            token_response_with("new-token", 3600),
+        )
+        .await;
         let manager = create_manager(
             &server,
             Duration::from_secs(2),
@@ -1052,8 +1075,14 @@ mod test_token_manager {
     #[tokio::test]
     async fn test_access_token_fails_when_expired_and_fetch_fails() -> anyhow::Result<()> {
         let server = MockServer::start().await;
-        mount_first_n(&server, token_response_with("expired-token", 0), 1).await;
-        mount_always(&server, ResponseTemplate::new(500)).await;
+        mount_first_n(
+            &server,
+            method("POST"),
+            token_response_with("expired-token", 0),
+            1,
+        )
+        .await;
+        mount_always(&server, method("POST"), ResponseTemplate::new(500)).await;
         let manager = create_manager(
             &server,
             Duration::from_secs(2),
@@ -1080,6 +1109,7 @@ mod test_token_manager {
         // 最初の取得が完了する前に3つの呼び出しが始まるように、レスポンスを遅らせる。
         mount_always(
             &server,
+            method("POST"),
             token_response().set_delay(Duration::from_millis(100)),
         )
         .await;
@@ -1114,7 +1144,7 @@ mod test_token_manager {
         #[case] expected_requests: usize,
     ) -> anyhow::Result<()> {
         let server = MockServer::start().await;
-        mount_always(&server, token_response()).await;
+        mount_always(&server, method("POST"), token_response()).await;
         let manager = create_manager(
             &server,
             Duration::from_secs(2),
@@ -1147,8 +1177,8 @@ mod test_token_manager {
     #[tokio::test]
     async fn test_access_token_retries_retryable_status(#[case] status: u16) -> anyhow::Result<()> {
         let server = MockServer::start().await;
-        mount_first_n(&server, ResponseTemplate::new(status), 1).await;
-        mount_always(&server, token_response()).await;
+        mount_first_n(&server, method("POST"), ResponseTemplate::new(status), 1).await;
+        mount_always(&server, method("POST"), token_response()).await;
         let manager = create_manager(
             &server,
             Duration::from_secs(2),
@@ -1170,11 +1200,12 @@ mod test_token_manager {
         let server = MockServer::start().await;
         mount_first_n(
             &server,
+            method("POST"),
             ResponseTemplate::new(429).insert_header("Retry-After", "0"),
             1,
         )
         .await;
-        mount_always(&server, token_response()).await;
+        mount_always(&server, method("POST"), token_response()).await;
         // 指数バックオフで待機すると10秒かかる設定にする。
         let retry = RetryPolicy::new(
             1,
@@ -1206,7 +1237,7 @@ mod test_token_manager {
         #[case] expected_requests: usize,
     ) -> anyhow::Result<()> {
         let server = MockServer::start().await;
-        mount_always(&server, ResponseTemplate::new(500)).await;
+        mount_always(&server, method("POST"), ResponseTemplate::new(500)).await;
         let manager = create_manager(
             &server,
             Duration::from_secs(2),
@@ -1237,6 +1268,7 @@ mod test_token_manager {
         let server = MockServer::start().await;
         mount_always(
             &server,
+            method("POST"),
             ResponseTemplate::new(status).set_body_string(r#"{"error":"invalid_grant"}"#),
         )
         .await;
@@ -1265,7 +1297,12 @@ mod test_token_manager {
     #[tokio::test]
     async fn test_access_token_retries_timeout() -> anyhow::Result<()> {
         let server = MockServer::start().await;
-        mount_always(&server, token_response().set_delay(Duration::from_secs(1))).await;
+        mount_always(
+            &server,
+            method("POST"),
+            token_response().set_delay(Duration::from_secs(1)),
+        )
+        .await;
         let manager = create_manager(
             &server,
             Duration::from_millis(100),
@@ -1307,7 +1344,7 @@ mod test_token_manager {
     #[tokio::test]
     async fn test_access_token_uses_box_token_url_as_audience() -> anyhow::Result<()> {
         let server = MockServer::start().await;
-        mount_always(&server, token_response()).await;
+        mount_always(&server, method("POST"), token_response()).await;
         // トークンエンドポイントのURLは、モックサーバーのURLである。
         let manager = create_manager(
             &server,
@@ -1344,8 +1381,14 @@ mod test_token_manager {
         let server = MockServer::start().await;
         // BOXの時刻がシステム時刻より2分進んでいる。
         let box_time = SystemTime::now() + Duration::from_secs(120);
-        mount_first_n(&server, expiration_rejected_response(box_time), 1).await;
-        mount_always(&server, token_response()).await;
+        mount_first_n(
+            &server,
+            method("POST"),
+            expiration_rejected_response(box_time),
+            1,
+        )
+        .await;
+        mount_always(&server, method("POST"), token_response()).await;
         // 再試行回数を0にし、再送が再試行回数に含まれないことも確かめる。
         let manager = create_manager(
             &server,
@@ -1379,6 +1422,7 @@ mod test_token_manager {
         let server = MockServer::start().await;
         mount_always(
             &server,
+            method("POST"),
             expiration_rejected_response(SystemTime::now() + Duration::from_secs(120)),
         )
         .await;
@@ -1407,6 +1451,7 @@ mod test_token_manager {
         let server = MockServer::start().await;
         mount_always(
             &server,
+            method("POST"),
             ResponseTemplate::new(400).set_body_json(serde_json::json!({
                 "error": "invalid_grant",
                 "error_description": "Invalid client credentials",
@@ -1439,6 +1484,7 @@ mod test_token_manager {
         let server = MockServer::start().await;
         mount_always(
             &server,
+            method("POST"),
             ResponseTemplate::new(200).set_body_string("not json"),
         )
         .await;

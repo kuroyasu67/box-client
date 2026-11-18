@@ -117,13 +117,17 @@ pub enum BoxClientError {
 
     /// BOXクライアントがリクエストを送信するURLの不正エラー
     ///
-    /// アクセストークンを送信する先であるため、BOXクライアントは条件を満たさないURLを拒否する。
+    /// これらのURLは、アクセストークン、クライアントシークレットおよびJWTアサーションを送信する先である。
+    /// したがって、BOXクライアントは条件を満たさないURLを拒否する。
     #[error("Invalid {name}: {url:?} ({reason})")]
     InvalidEndpointUrl {
         /// 設定の名前（`api_base_url`、`upload_base_url`または`token_url`）
         name: &'static str,
 
         /// 指定されたURL
+        ///
+        /// エラーメッセージがログに残っても認証情報が漏れないように、ユーザー名、パスワード、クエリおよびフラグメントを取り除く。
+        /// URLを解釈できない場合は`<unparsable>`とし、ベースURLにできない場合はスキームだけとする。
         url: String,
 
         /// URLを拒否した理由

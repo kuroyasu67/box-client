@@ -1,16 +1,18 @@
 //! Webリンクに関するAPI
 
 use garde::Validate;
-use reqwest::header::IF_MATCH;
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
+// ドキュメントのリンクとテストだけが参照する。
+#[cfg(any(doc, test))]
+use crate::BoxClientError;
 use crate::{
-    BoxClient, BoxClientError, BoxClientResult, FolderId, FolderItem, Idempotency, ItemStatus,
-    MAX_DESCRIPTION_CHARS, MoveDestination, ParentFolder, PathCollection, UserMini,
-    ValidationError, WebLinkId,
+    BoxClient, BoxClientResult, FolderId, FolderItem, Idempotency, ItemStatus,
+    MAX_DESCRIPTION_CHARS, MoveDestination, ParentFolder, PathCollection, UserMini, WebLinkId,
     api::types::{
-        MoveBody, RenameBody, SetDescriptionBody, UpdateItemOptions, validate_optional_item_name,
+        MAX_NAME_CHARS, MoveBody, RenameBody, SetDescriptionBody, UpdateItemOptions,
+        update_item_request, validate_optional_item_name, validated,
     },
     request::ApiRequest,
 };
@@ -125,8 +127,8 @@ struct CreateWebLinkBody<'a> {
     ///
     /// `url`ルールでURLを解釈できることを検証する。
     /// `url`ルールはすべてのスキームを受け付けるが、BOXは`http://`または`https://`で始まるURLだけを受け付けるため、
-    /// `pattern`ルールでスキームも検証する。
-    #[garde(url, pattern(r"^https?://"))]
+    /// `pattern`ルールでスキームも検証する。URLのスキームは大文字と小文字を区別しないため、大文字と小文字を区別せずに検証する。
+    #[garde(url, pattern(r"(?i-u)^https?://"))]
     url: &'a str,
 
     /// Webリンクを作成する親フォルダ
@@ -138,7 +140,7 @@ struct CreateWebLinkBody<'a> {
     /// `None`の場合は送信せず、BOXはURLをWebリンク名にする。
     /// `garde`は`None`の場合に`length`を検証しない。
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[garde(length(chars, min = 1, max = 255), custom(validate_optional_item_name))]
+    #[garde(length(chars, min = 1, max = MAX_NAME_CHARS), custom(validate_optional_item_name))]
     name: Option<&'a str>,
 
     /// Webリンクの説明
@@ -160,17 +162,14 @@ impl<'a> CreateWebLinkBody<'a> {
         parent_id: &FolderId,
         options: &CreateWebLinkOptions<'a>,
     ) -> BoxClientResult<Self> {
-        let body = Self {
+        validated(Self {
             url,
             parent: ParentFolder {
                 id: parent_id.clone(),
             },
             name: options.name,
             description: options.description,
-        };
-        body.validate()
-            .map_err(|report| BoxClientError::InvalidRequestBody(ValidationError::new(report)))?;
-        Ok(body)
+        })
     }
 }
 
@@ -180,7 +179,7 @@ struct UpdateWebLinkUrlBody<'a> {
     /// 新しいURL
     ///
     /// [`CreateWebLinkBody::url`]と同じ規則で検証する。
-    #[garde(url, pattern(r"^https?://"))]
+    #[garde(url, pattern(r"(?i-u)^https?://"))]
     url: &'a str,
 }
 
@@ -192,10 +191,7 @@ impl<'a> UpdateWebLinkUrlBody<'a> {
     /// URLを解釈できない場合、またはURLが`http://`もしくは`https://`で始まらない場合は、
     /// [`BoxClientError::InvalidRequestBody`]を返す。
     fn new(url: &'a str) -> BoxClientResult<Self> {
-        let body = Self { url };
-        body.validate()
-            .map_err(|report| BoxClientError::InvalidRequestBody(ValidationError::new(report)))?;
-        Ok(body)
+        validated(Self { url })
     }
 }
 
@@ -213,13 +209,7 @@ fn update_web_link_request<'a, B: Serialize>(
     body: &B,
     options: &UpdateItemOptions<'_>,
 ) -> BoxClientResult<ApiRequest<'a>> {
-    let mut request = ApiRequest::put(["web_links", web_link_id.as_ref()])
-        .idempotency(Idempotency::NonIdempotent)
-        .json(body)?;
-    if let Some(etag) = options.etag {
-        request = request.header(IF_MATCH, etag)?;
-    }
-    Ok(request)
+    update_item_request("web_links", web_link_id.as_ref(), body, options.etag)
 }
 
 impl BoxClient {
@@ -443,7 +433,7 @@ impl BoxClient {
 
     /// Webリンクを削除する。
     ///
-    /// クライアントは、5xxを受け取った場合、またはタイムアウトした場合に、同じリクエストを再送して再試行する。
+    /// BOXクライアントは、冪等なリクエストであれば、5xxを受け取った場合、またはタイムアウトした場合に、同じリクエストを再送して再試行する。
     /// しかし、これらの場合は、BOXがWebリンクの削除を完了している可能性がある。
     /// BOXが削除した後にリクエストを再送すると、削除済みのWebリンクに対する削除となるため、BOXはエラーを返しうる。
     /// その結果、削除に成功したにもかかわらず、削除に失敗したと誤って判断するおそれがある。
@@ -602,7 +592,7 @@ mod test_web_link_information {
     use super::*;
     use crate::{
         BoxClientError, FolderId,
-        test_support::{create_client, mount_token, short_retry},
+        test_support::{create_client, mount_token, not_found_response, short_retry},
     };
 
     /// `GET /web_links/{web_link_id}`を呼び出し、Webリンク情報をデシリアライズすることを確認
@@ -644,12 +634,7 @@ mod test_web_link_information {
         mount_token(&server).await;
         Mock::given(method("GET"))
             .and(path("/2.0/web_links/999"))
-            .respond_with(ResponseTemplate::new(404).set_body_json(json!({
-                "type": "error",
-                "status": 404,
-                "code": "not_found",
-                "message": "Not Found",
-            })))
+            .respond_with(not_found_response())
             .mount(&server)
             .await;
         let client = create_client(&server, short_retry(0)?).await?;
@@ -807,7 +792,10 @@ mod test_update_web_link {
     use super::*;
     use crate::{
         UserId,
-        test_support::{create_client, mount_token, request_count, short_retry},
+        test_support::{
+            count_requests, create_client, if_match_headers, mount_token, request_count,
+            short_retry,
+        },
     };
 
     /// WebリンクのAPIのパス
@@ -850,23 +838,6 @@ mod test_update_web_link {
         }
     }
 
-    /// WebリンクのAPIへのPUTリクエストのIf-Matchヘッダーを返す。
-    async fn update_requests(server: &MockServer) -> Vec<Option<String>> {
-        server
-            .received_requests()
-            .await
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|r| r.method.as_str() == "PUT" && r.url.path() == WEB_LINK_PATH)
-            .map(|r| {
-                r.headers
-                    .get("if-match")
-                    .and_then(|v| v.to_str().ok())
-                    .map(str::to_owned)
-            })
-            .collect()
-    }
-
     /// 更新する属性だけをボディで送信し、`ETag`を指定した場合だけIf-Matchヘッダーを送信することを確認
     #[rstest]
     #[case::rename(Update::Rename("Example"), json!({"name": "Example"}), None)]
@@ -888,6 +859,11 @@ mod test_update_web_link {
         None
     )]
     #[case::url(Update::Url("http://example.org"), json!({"url": "http://example.org"}), Some("1"))]
+    #[case::uppercase_scheme(
+        Update::Url("HTTPS://example.org"),
+        json!({"url": "HTTPS://example.org"}),
+        None
+    )]
     #[tokio::test]
     async fn test_update_web_link(
         #[case] update: Update,
@@ -915,7 +891,7 @@ mod test_update_web_link {
 
         assert_eq!(web_link.id, WebLinkId::new("12345"));
         assert_eq!(
-            update_requests(&server).await,
+            if_match_headers(&server, "PUT", WEB_LINK_PATH).await,
             vec![etag.map(str::to_owned)]
         );
 
@@ -976,7 +952,7 @@ mod test_update_web_link {
             matches!(&result, Err(BoxClientError::Api(e)) if e.status == status),
             "result: {result:?}"
         );
-        assert_eq!(update_requests(&server).await.len(), 1);
+        assert_eq!(count_requests(&server, "PUT", WEB_LINK_PATH).await, 1);
 
         Ok(())
     }
@@ -985,7 +961,6 @@ mod test_update_web_link {
 #[cfg(test)]
 mod test_delete_web_link {
     use rstest::rstest;
-    use serde_json::json;
     use wiremock::{
         Mock, MockServer, ResponseTemplate,
         matchers::{method, path},
@@ -994,22 +969,13 @@ mod test_delete_web_link {
     use super::*;
     use crate::{
         BoxClientError,
-        test_support::{create_client, mount_token, short_retry},
+        test_support::{
+            count_requests, create_client, mount_token, operation_blocked_response, short_retry,
+        },
     };
 
     /// WebリンクのAPIのパス
     const WEB_LINK_PATH: &str = "/2.0/web_links/123";
-
-    /// WebリンクのAPIへのDELETEリクエストの数を返す。
-    async fn delete_count(server: &MockServer) -> usize {
-        server
-            .received_requests()
-            .await
-            .unwrap_or_default()
-            .iter()
-            .filter(|r| r.method.as_str() == "DELETE" && r.url.path() == WEB_LINK_PATH)
-            .count()
-    }
 
     /// `DELETE /web_links/{web_link_id}`を呼び出し、204を受け取ると成功することを確認
     #[tokio::test]
@@ -1026,7 +992,7 @@ mod test_delete_web_link {
 
         client.delete_web_link(&WebLinkId::new("123")).await?;
 
-        assert_eq!(delete_count(&server).await, 1);
+        assert_eq!(count_requests(&server, "DELETE", WEB_LINK_PATH).await, 1);
 
         Ok(())
     }
@@ -1057,7 +1023,7 @@ mod test_delete_web_link {
             matches!(&result, Err(BoxClientError::Api(e)) if e.status == status),
             "result: {result:?}"
         );
-        assert_eq!(delete_count(&server).await, 1);
+        assert_eq!(count_requests(&server, "DELETE", WEB_LINK_PATH).await, 1);
 
         Ok(())
     }
@@ -1065,12 +1031,7 @@ mod test_delete_web_link {
     /// 429または他の操作によるロックで409を受け取った場合は、冪等でないリクエストとして送信しても再試行することを確認
     #[rstest]
     #[case::too_many_requests(ResponseTemplate::new(429))]
-    #[case::operation_blocked_temporary(ResponseTemplate::new(409).set_body_json(json!({
-        "type": "error",
-        "status": 409,
-        "code": "operation_blocked_temporary",
-        "message": "The operation is blocked by another on-going operation",
-    })))]
+    #[case::operation_blocked_temporary(operation_blocked_response())]
     #[tokio::test]
     async fn test_delete_web_link_retries_request_not_processed(
         #[case] first_response: ResponseTemplate,
@@ -1092,7 +1053,7 @@ mod test_delete_web_link {
 
         client.delete_web_link(&WebLinkId::new("123")).await?;
 
-        assert_eq!(delete_count(&server).await, 2);
+        assert_eq!(count_requests(&server, "DELETE", WEB_LINK_PATH).await, 2);
 
         Ok(())
     }

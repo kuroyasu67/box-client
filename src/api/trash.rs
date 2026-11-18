@@ -1,19 +1,21 @@
 //! ゴミ箱に関するAPI
 
-use serde::Serialize;
+use garde::Validate;
+use serde::{Serialize, de::DeserializeOwned};
 
 use crate::{
     BoxClient, BoxClientError, BoxClientResult, BoxItem, FileId, Folder, FolderId, WebLink,
     WebLinkId,
     api::files::File,
     api::folders::{ItemsPage, MAX_ITEMS_LIMIT, collect_all_pages, validate_limit},
+    api::types::{MAX_NAME_CHARS, validate_optional_item_name, validated},
     request::ApiRequest,
 };
 
 /// ゴミ箱内の項目をリストするときのオプション
 ///
 /// BOXは、マーカー方式のページ送りで`sort`または`direction`クエリパラメーターを指定すると、
-/// 400（`invalid_parameter`）を返す。このクライアントは常にマーカー方式でページを送るため、
+/// 400（`invalid_parameter`）を返す。BOXクライアントは常にマーカー方式でページを送るため、
 /// 並び替えに使用する属性および並び替えの方向を指定できない。
 ///
 /// 将来フィールドを追加しても利用者のコードが壊れないように、`#[non_exhaustive]`を付けている。
@@ -95,14 +97,19 @@ impl<'a> RestoreItemOptions<'a> {
 }
 
 /// フォルダ、ファイルまたはWebリンクを復元するリクエストのボディ
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Validate)]
 struct RestoreItemBody<'a> {
     /// 復元後のフォルダ名、ファイル名またはWebリンク名
+    ///
+    /// BOXは、使用できない文字を含む名前を拒否せずに、文字を取り除いて復元する。
+    /// 指定した名前と異なる名前で復元しないように、名前の変更と同じ規則で検証する。
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[garde(length(chars, min = 1, max = MAX_NAME_CHARS), custom(validate_optional_item_name))]
     name: Option<&'a str>,
 
     /// 元の親フォルダが存在しない場合の復元先の親フォルダ
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[garde(skip)]
     parent: Option<ParentReference<'a>>,
 }
 
@@ -113,18 +120,41 @@ struct ParentReference<'a> {
     id: &'a str,
 }
 
-impl<'a> From<&RestoreItemOptions<'a>> for RestoreItemBody<'a> {
-    fn from(options: &RestoreItemOptions<'a>) -> Self {
-        Self {
+impl<'a> RestoreItemBody<'a> {
+    /// オプションからボディを作成して検証する。
+    ///
+    /// # Errors
+    ///
+    /// `options.name`をBOXが拒否する場合は、[`BoxClientError::InvalidRequestBody`]を返す。
+    fn new(options: &RestoreItemOptions<'a>) -> BoxClientResult<Self> {
+        validated(Self {
             name: options.name,
             parent: options
                 .parent_id
                 .map(|id| ParentReference { id: id.as_ref() }),
-        }
+        })
     }
 }
 
 impl BoxClient {
+    /// ゴミ箱内のフォルダ、ファイルまたはWebリンクを復元する（`POST /{collection}/{id}`）。
+    ///
+    /// [`BoxClient::restore_folder`]、[`BoxClient::restore_file`]および[`BoxClient::restore_web_link`]で共有する。
+    ///
+    /// # Errors
+    ///
+    /// `options.name`をBOXが拒否する場合は、リクエストを送信せずに[`BoxClientError::InvalidRequestBody`]を返す。
+    /// 再試行できないエラーが発生した場合、または再試行回数の上限に達した場合はエラーを返す。
+    async fn restore_item<T: DeserializeOwned>(
+        &self,
+        collection: &'static str,
+        id: &str,
+        options: &RestoreItemOptions<'_>,
+    ) -> BoxClientResult<T> {
+        let request = ApiRequest::post([collection, id]).json(&RestoreItemBody::new(options)?)?;
+        self.send_json(request).await
+    }
+
     /// ゴミ箱内のフォルダの情報を取得する。
     ///
     /// 取得できるのは、ゴミ箱に直接移動したフォルダだけである。
@@ -217,15 +247,15 @@ impl BoxClient {
     /// `options.parent_id`で指定したフォルダに復元する。
     ///
     /// 復元中は、復元するフォルダ、復元するフォルダの子孫にあたるすべての項目および復元先のフォルダをBOXがロックする。
-    /// ロックしている間は、それらのフォルダを対象とする移動、コピー、削除および復元を実行できない。
+    /// BOXがロックしている間、他の操作は、それらの項目を移動、コピー、削除および復元できない。
     ///
-    /// クライアントは、5xxを受け取った場合、またはタイムアウトした場合に、同じリクエストを再送して再試行する。
+    /// BOXクライアントは、冪等なリクエストであれば、5xxを受け取った場合、またはタイムアウトした場合に、同じリクエストを再送して再試行する。
     /// しかし、これらの場合は、BOXがフォルダの復元を完了している可能性がある。
     /// 復元に成功したフォルダはゴミ箱からなくなるため、BOXが復元した後にリクエストを再送すると、BOXは404を返す。
     /// その結果、復元に成功したにもかかわらず、復元に失敗したと誤って判断するおそれがある。
     /// したがって、このリクエストを冪等でないリクエストとして送信し、BOXがリクエストを処理していないことが
     /// 明らかな429、エラーコードが`operation_blocked_temporary`の409および接続エラーの後にのみ再試行する。
-    /// POSTリクエストは既定で冪等でないリクエストとして扱われるため、冪等性を上書きしていない。
+    /// POSTリクエストは既定で冪等でないリクエストとして扱われるため、このメソッドは冪等性を上書きしない。
     ///
     /// # Arguments
     ///
@@ -236,6 +266,7 @@ impl BoxClient {
     ///
     /// ルートフォルダはゴミ箱に移動できないため、ルートフォルダを指定した場合は、
     /// リクエストを送信せずに[`BoxClientError::InvalidArgument`]を返す。
+    /// `options.name`をBOXが拒否する場合は、リクエストを送信せずに[`BoxClientError::InvalidRequestBody`]を返す。
     /// BOXがエラーレスポンスを返した場合は、[`BoxClientError::Api`]を返す。主なステータスは次のとおり。
     ///
     /// - 403: ゴミ箱からフォルダを復元する権限がない、または復元先のフォルダにアクセスする権限がない。
@@ -260,9 +291,9 @@ impl BoxClient {
             ));
         }
 
-        let request = ApiRequest::post(["folders", folder_id.as_ref()])
-            .json(&RestoreItemBody::from(options))?;
-        let folder: Folder = self.send_json(request).await?;
+        let folder: Folder = self
+            .restore_item("folders", folder_id.as_ref(), options)
+            .await?;
 
         tracing::debug!(
             folder_id = folder_id.as_ref(),
@@ -279,13 +310,13 @@ impl BoxClient {
     /// BOXはファイルを元の親フォルダに復元する。元の親フォルダが存在しない場合に限り、
     /// `options.parent_id`で指定したフォルダに復元する。
     ///
-    /// クライアントは、5xxを受け取った場合、またはタイムアウトした場合に、同じリクエストを再送して再試行する。
+    /// BOXクライアントは、冪等なリクエストであれば、5xxを受け取った場合、またはタイムアウトした場合に、同じリクエストを再送して再試行する。
     /// しかし、これらの場合は、BOXがファイルの復元を完了している可能性がある。
     /// 復元に成功したファイルはゴミ箱からなくなるため、BOXが復元した後にリクエストを再送すると、BOXは404を返す。
     /// その結果、復元に成功したにもかかわらず、復元に失敗したと誤って判断するおそれがある。
     /// したがって、このリクエストを冪等でないリクエストとして送信し、BOXがリクエストを処理していないことが
     /// 明らかな429、エラーコードが`operation_blocked_temporary`の409および接続エラーの後にのみ再試行する。
-    /// POSTリクエストは既定で冪等でないリクエストとして扱われるため、冪等性を上書きしていない。
+    /// POSTリクエストは既定で冪等でないリクエストとして扱われるため、このメソッドは冪等性を上書きしない。
     ///
     /// # Arguments
     ///
@@ -294,11 +325,16 @@ impl BoxClient {
     ///
     /// # Errors
     ///
+    /// `options.name`をBOXが拒否する場合は、リクエストを送信せずに[`BoxClientError::InvalidRequestBody`]を返す。
     /// BOXがエラーレスポンスを返した場合は、[`BoxClientError::Api`]を返す。主なステータスは次のとおり。
     ///
     /// - 403: ゴミ箱からファイルを復元する権限がない、または復元先のフォルダにアクセスする権限がない。
     /// - 404: ファイルがゴミ箱にない。
-    /// - 409: 復元先に同じ名前のファイルがある。`options.name`に別の名前を指定して再度呼び出す。
+    /// - 409: 次のいずれかの理由で復元できない。
+    ///   - 復元先に同じ名前のファイルがある。`options.name`に別の名前を指定して再度呼び出す。
+    ///   - 移動、コピー、削除または復元の操作が、復元先のフォルダをロックしている。
+    ///     エラーコードは`operation_blocked_temporary`である。クライアントは再試行設定に従って再試行し、
+    ///     再試行回数の上限に達してもロックが解除されない場合にこのエラーを返す。
     ///
     /// 再試行できないエラーが発生した場合、または再試行回数の上限に達した場合はエラーを返す。
     /// 5xxまたはタイムアウトでエラーを返した場合は、BOXがファイルを復元した可能性があるため、
@@ -308,9 +344,9 @@ impl BoxClient {
         file_id: &FileId,
         options: &RestoreItemOptions<'_>,
     ) -> BoxClientResult<File> {
-        let request =
-            ApiRequest::post(["files", file_id.as_ref()]).json(&RestoreItemBody::from(options))?;
-        let file: File = self.send_json(request).await?;
+        let file: File = self
+            .restore_item("files", file_id.as_ref(), options)
+            .await?;
 
         tracing::debug!(
             file_id = file_id.as_ref(),
@@ -326,13 +362,13 @@ impl BoxClient {
     /// BOXはWebリンクを元の親フォルダに復元する。元の親フォルダが存在しない場合に限り、
     /// `options.parent_id`で指定したフォルダに復元する。
     ///
-    /// クライアントは、5xxを受け取った場合、またはタイムアウトした場合に、同じリクエストを再送して再試行する。
+    /// BOXクライアントは、冪等なリクエストであれば、5xxを受け取った場合、またはタイムアウトした場合に、同じリクエストを再送して再試行する。
     /// しかし、これらの場合は、BOXがWebリンクの復元を完了している可能性がある。
     /// 復元に成功したWebリンクはゴミ箱からなくなるため、BOXが復元した後にリクエストを再送すると、BOXは404を返す。
     /// その結果、復元に成功したにもかかわらず、復元に失敗したと誤って判断するおそれがある。
     /// したがって、このリクエストを冪等でないリクエストとして送信し、BOXがリクエストを処理していないことが
     /// 明らかな429、エラーコードが`operation_blocked_temporary`の409および接続エラーの後にのみ再試行する。
-    /// POSTリクエストは既定で冪等でないリクエストとして扱われるため、冪等性を上書きしていない。
+    /// POSTリクエストは既定で冪等でないリクエストとして扱われるため、このメソッドは冪等性を上書きしない。
     ///
     /// # Arguments
     ///
@@ -341,11 +377,16 @@ impl BoxClient {
     ///
     /// # Errors
     ///
+    /// `options.name`をBOXが拒否する場合は、リクエストを送信せずに[`BoxClientError::InvalidRequestBody`]を返す。
     /// BOXがエラーレスポンスを返した場合は、[`BoxClientError::Api`]を返す。主なステータスは次のとおり。
     ///
     /// - 403: ゴミ箱からWebリンクを復元する権限がない、または復元先のフォルダにアクセスする権限がない。
     /// - 404: Webリンクがゴミ箱にない。
-    /// - 409: 復元先に同じ名前のWebリンクがある。`options.name`に別の名前を指定して再度呼び出す。
+    /// - 409: 次のいずれかの理由で復元できない。
+    ///   - 復元先に同じ名前のWebリンクがある。`options.name`に別の名前を指定して再度呼び出す。
+    ///   - 移動、コピー、削除または復元の操作が、復元先のフォルダをロックしている。
+    ///     エラーコードは`operation_blocked_temporary`である。クライアントは再試行設定に従って再試行し、
+    ///     再試行回数の上限に達してもロックが解除されない場合にこのエラーを返す。
     ///
     /// 再試行できないエラーが発生した場合、または再試行回数の上限に達した場合はエラーを返す。
     /// 5xxまたはタイムアウトでエラーを返した場合は、BOXがWebリンクを復元した可能性があるため、
@@ -355,9 +396,9 @@ impl BoxClient {
         web_link_id: &WebLinkId,
         options: &RestoreItemOptions<'_>,
     ) -> BoxClientResult<WebLink> {
-        let request = ApiRequest::post(["web_links", web_link_id.as_ref()])
-            .json(&RestoreItemBody::from(options))?;
-        let web_link: WebLink = self.send_json(request).await?;
+        let web_link: WebLink = self
+            .restore_item("web_links", web_link_id.as_ref(), options)
+            .await?;
 
         tracing::debug!(
             web_link_id = web_link_id.as_ref(),
@@ -447,7 +488,9 @@ mod test_trashed_folder_information {
     use super::*;
     use crate::{
         ItemStatus,
-        test_support::{create_client, mount_token, request_count, short_retry},
+        test_support::{
+            create_client, mount_token, not_found_response, request_count, short_retry,
+        },
     };
 
     /// `GET /folders/{folder_id}/trash`を呼び出し、ゴミ箱に移動した日時と状態を含むフォルダ情報をデシリアライズすることを確認
@@ -518,12 +561,7 @@ mod test_trashed_folder_information {
         mount_token(&server).await;
         Mock::given(method("GET"))
             .and(path("/2.0/folders/999/trash"))
-            .respond_with(ResponseTemplate::new(404).set_body_json(json!({
-                "type": "error",
-                "status": 404,
-                "code": "not_found",
-                "message": "Not Found",
-            })))
+            .respond_with(not_found_response())
             .mount(&server)
             .await;
         let client = create_client(&server, short_retry(0)?).await?;
@@ -553,7 +591,7 @@ mod test_trashed_file_information {
     use super::*;
     use crate::{
         ItemStatus,
-        test_support::{create_client, mount_token, short_retry},
+        test_support::{create_client, mount_token, not_found_response, short_retry},
     };
 
     /// `GET /files/{file_id}/trash`を呼び出し、ゴミ箱に移動した日時と状態を含むファイル情報をデシリアライズすることを確認
@@ -614,12 +652,7 @@ mod test_trashed_file_information {
         mount_token(&server).await;
         Mock::given(method("GET"))
             .and(path("/2.0/files/999/trash"))
-            .respond_with(ResponseTemplate::new(404).set_body_json(json!({
-                "type": "error",
-                "status": 404,
-                "code": "not_found",
-                "message": "Not Found",
-            })))
+            .respond_with(not_found_response())
             .mount(&server)
             .await;
         let client = create_client(&server, short_retry(0)?).await?;
@@ -647,7 +680,7 @@ mod test_trashed_web_link_information {
     use super::*;
     use crate::{
         ItemStatus,
-        test_support::{create_client, mount_token, short_retry},
+        test_support::{create_client, mount_token, not_found_response, short_retry},
     };
 
     /// `GET /web_links/{web_link_id}/trash`を呼び出し、ゴミ箱に移動した日時と状態を含むWebリンク情報をデシリアライズすることを確認
@@ -711,12 +744,7 @@ mod test_trashed_web_link_information {
         mount_token(&server).await;
         Mock::given(method("GET"))
             .and(path("/2.0/web_links/999/trash"))
-            .respond_with(ResponseTemplate::new(404).set_body_json(json!({
-                "type": "error",
-                "status": 404,
-                "code": "not_found",
-                "message": "Not Found",
-            })))
+            .respond_with(not_found_response())
             .mount(&server)
             .await;
         let client = create_client(&server, short_retry(0)?).await?;
@@ -762,11 +790,30 @@ mod test_restore_item_body {
             parent_id: parent_id.as_ref(),
         };
 
-        let body = serde_json::to_value(RestoreItemBody::from(&options))?;
+        let body = serde_json::to_value(RestoreItemBody::new(&options)?)?;
 
         assert_eq!(body, expected);
 
         Ok(())
+    }
+
+    /// BOXが拒否する復元後の名前を指定した場合は、ボディの作成に失敗することを確認
+    ///
+    /// BOXは、使用できない文字を取り除いて復元するため、指定した名前と異なる名前で復元しないように拒否する。
+    #[rstest]
+    #[case::empty("")]
+    #[case::slash("a/b")]
+    #[case::dot_dot("..")]
+    #[case::too_long(&*"あ".repeat(MAX_NAME_CHARS + 1))]
+    fn test_restore_item_body_rejects_invalid_name(#[case] name: &str) {
+        let options = RestoreItemOptions::default().with_name(name);
+
+        let result = RestoreItemBody::new(&options);
+
+        assert!(
+            matches!(result, Err(BoxClientError::InvalidRequestBody(_))),
+            "result: {result:?}"
+        );
     }
 }
 
@@ -782,7 +829,10 @@ mod test_restore_folder {
     use super::*;
     use crate::{
         ItemStatus,
-        test_support::{create_client, mount_token, request_count, short_retry},
+        test_support::{
+            count_requests, create_client, mount_token, operation_blocked_response, request_count,
+            short_retry,
+        },
     };
 
     /// フォルダのAPIのパス
@@ -800,17 +850,6 @@ mod test_restore_folder {
             "parent": {"type": "folder", "id": "111", "etag": "0", "name": "Legal"},
             "item_status": "active",
         }))
-    }
-
-    /// フォルダのAPIへのPOSTリクエストの数を返す。
-    async fn post_count(server: &MockServer) -> usize {
-        server
-            .received_requests()
-            .await
-            .unwrap_or_default()
-            .iter()
-            .filter(|r| r.method.as_str() == "POST" && r.url.path() == FOLDER_PATH)
-            .count()
     }
 
     /// `POST /folders/{folder_id}`にオプションをボディとして送信し、復元したフォルダ情報を返すことを確認
@@ -897,7 +936,7 @@ mod test_restore_folder {
             matches!(&result, Err(BoxClientError::Api(e)) if e.status == status),
             "result: {result:?}"
         );
-        assert_eq!(post_count(&server).await, 1);
+        assert_eq!(count_requests(&server, "POST", FOLDER_PATH).await, 1);
 
         Ok(())
     }
@@ -909,12 +948,7 @@ mod test_restore_folder {
         mount_token(&server).await;
         Mock::given(method("POST"))
             .and(path(FOLDER_PATH))
-            .respond_with(ResponseTemplate::new(409).set_body_json(json!({
-                "type": "error",
-                "status": 409,
-                "code": "operation_blocked_temporary",
-                "message": "The operation is blocked by another on-going operation",
-            })))
+            .respond_with(operation_blocked_response())
             .up_to_n_times(1)
             .mount(&server)
             .await;
@@ -929,7 +963,7 @@ mod test_restore_folder {
             .restore_folder(&FolderId::new("123"), &RestoreItemOptions::default())
             .await?;
 
-        assert_eq!(post_count(&server).await, 2);
+        assert_eq!(count_requests(&server, "POST", FOLDER_PATH).await, 2);
 
         Ok(())
     }
@@ -960,7 +994,7 @@ mod test_restore_folder {
                 if e.status == 409 && e.code.as_deref() == Some("item_name_in_use")),
             "result: {result:?}"
         );
-        assert_eq!(post_count(&server).await, 1);
+        assert_eq!(count_requests(&server, "POST", FOLDER_PATH).await, 1);
 
         Ok(())
     }
@@ -988,7 +1022,7 @@ mod test_restore_folder {
             .restore_folder(&FolderId::new("123"), &RestoreItemOptions::default())
             .await?;
 
-        assert_eq!(post_count(&server).await, 2);
+        assert_eq!(count_requests(&server, "POST", FOLDER_PATH).await, 2);
 
         Ok(())
     }
@@ -1006,7 +1040,9 @@ mod test_restore_file {
     use super::*;
     use crate::{
         ItemStatus,
-        test_support::{create_client, mount_token, short_retry},
+        test_support::{
+            count_requests, create_client, mount_token, operation_blocked_response, short_retry,
+        },
     };
 
     /// ファイルのAPIのパス
@@ -1025,17 +1061,6 @@ mod test_restore_file {
             "parent": {"type": "folder", "id": "111", "etag": "0", "name": "Legal"},
             "item_status": "active",
         }))
-    }
-
-    /// ファイルのAPIへのPOSTリクエストの数を返す。
-    async fn post_count(server: &MockServer) -> usize {
-        server
-            .received_requests()
-            .await
-            .unwrap_or_default()
-            .iter()
-            .filter(|r| r.method.as_str() == "POST" && r.url.path() == FILE_PATH)
-            .count()
     }
 
     /// `POST /files/{file_id}`にオプションをボディとして送信し、復元したファイル情報を返すことを確認
@@ -1099,7 +1124,7 @@ mod test_restore_file {
             matches!(&result, Err(BoxClientError::Api(e)) if e.status == status),
             "result: {result:?}"
         );
-        assert_eq!(post_count(&server).await, 1);
+        assert_eq!(count_requests(&server, "POST", FILE_PATH).await, 1);
 
         Ok(())
     }
@@ -1107,12 +1132,7 @@ mod test_restore_file {
     /// 429または他の操作によるロックで409を受け取った場合は、冪等でないリクエストとして送信しても再試行することを確認
     #[rstest]
     #[case::too_many_requests(ResponseTemplate::new(429))]
-    #[case::operation_blocked_temporary(ResponseTemplate::new(409).set_body_json(json!({
-        "type": "error",
-        "status": 409,
-        "code": "operation_blocked_temporary",
-        "message": "The operation is blocked by another on-going operation",
-    })))]
+    #[case::operation_blocked_temporary(operation_blocked_response())]
     #[tokio::test]
     async fn test_restore_file_retries_request_not_processed(
         #[case] first_response: ResponseTemplate,
@@ -1137,7 +1157,7 @@ mod test_restore_file {
             .restore_file(&FileId::new("123"), &RestoreItemOptions::default())
             .await?;
 
-        assert_eq!(post_count(&server).await, 2);
+        assert_eq!(count_requests(&server, "POST", FILE_PATH).await, 2);
 
         Ok(())
     }
@@ -1155,7 +1175,9 @@ mod test_restore_web_link {
     use super::*;
     use crate::{
         ItemStatus,
-        test_support::{create_client, mount_token, short_retry},
+        test_support::{
+            count_requests, create_client, mount_token, operation_blocked_response, short_retry,
+        },
     };
 
     /// WebリンクのAPIのパス
@@ -1175,17 +1197,6 @@ mod test_restore_web_link {
             "parent": {"type": "folder", "id": "111", "etag": "0", "name": "Links"},
             "item_status": "active",
         }))
-    }
-
-    /// WebリンクのAPIへのPOSTリクエストの数を返す。
-    async fn post_count(server: &MockServer) -> usize {
-        server
-            .received_requests()
-            .await
-            .unwrap_or_default()
-            .iter()
-            .filter(|r| r.method.as_str() == "POST" && r.url.path() == WEB_LINK_PATH)
-            .count()
     }
 
     /// `POST /web_links/{web_link_id}`にオプションをボディとして送信し、復元したWebリンク情報を返すことを確認
@@ -1252,7 +1263,7 @@ mod test_restore_web_link {
             matches!(&result, Err(BoxClientError::Api(e)) if e.status == status),
             "result: {result:?}"
         );
-        assert_eq!(post_count(&server).await, 1);
+        assert_eq!(count_requests(&server, "POST", WEB_LINK_PATH).await, 1);
 
         Ok(())
     }
@@ -1260,12 +1271,7 @@ mod test_restore_web_link {
     /// 429または他の操作によるロックで409を受け取った場合は、冪等でないリクエストとして送信しても再試行することを確認
     #[rstest]
     #[case::too_many_requests(ResponseTemplate::new(429))]
-    #[case::operation_blocked_temporary(ResponseTemplate::new(409).set_body_json(json!({
-        "type": "error",
-        "status": 409,
-        "code": "operation_blocked_temporary",
-        "message": "The operation is blocked by another on-going operation",
-    })))]
+    #[case::operation_blocked_temporary(operation_blocked_response())]
     #[tokio::test]
     async fn test_restore_web_link_retries_request_not_processed(
         #[case] first_response: ResponseTemplate,
@@ -1290,7 +1296,7 @@ mod test_restore_web_link {
             .restore_web_link(&WebLinkId::new("123"), &RestoreItemOptions::default())
             .await?;
 
-        assert_eq!(post_count(&server).await, 2);
+        assert_eq!(count_requests(&server, "POST", WEB_LINK_PATH).await, 2);
 
         Ok(())
     }

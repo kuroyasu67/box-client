@@ -8,15 +8,14 @@ use time::OffsetDateTime;
 
 use crate::{
     BoxClient, BoxClientError, BoxClientResult, BoxItem, FolderId, FolderItem, Idempotency,
-    ItemStatus, MoveDestination, ParentFolder, UserMini, ValidationError,
+    ItemStatus, MoveDestination, ParentFolder, UserMini,
     api::types::{
-        MoveBody, PathCollection, RenameBody, SetDescriptionBody, UpdateItemOptions,
-        validate_item_name, validate_optional_item_name,
+        MAX_NAME_CHARS, MoveBody, PathCollection, RenameBody, SetDescriptionBody,
+        UpdateItemOptions, update_item_request, validate_item_name, validate_optional_item_name,
+        validated,
     },
     request::ApiRequest,
 };
-use reqwest::header::IF_MATCH;
-
 /// 1回のリクエストで取得できる項目数の上限
 pub const MAX_ITEMS_LIMIT: u32 = 1000;
 
@@ -180,7 +179,7 @@ pub struct ListItemsOptions {
     /// 並び替えに使用する属性
     ///
     /// BOXはルートフォルダでマーカー方式のページ送りと並び替えの併用を受け付けない。
-    /// このクライアントは常にマーカー方式でページを送るため、ルートフォルダでは指定できない。
+    /// BOXクライアントは常にマーカー方式でページを送るため、ルートフォルダでは指定できない。
     pub sort: Option<ItemSort>,
 
     /// 並び替えの方向
@@ -275,7 +274,7 @@ struct CreateFolderBody<'a> {
     /// フォルダ名
     ///
     /// BOXは、名前の長さを文字数で数える。
-    #[garde(length(chars, min = 1, max = 255), custom(validate_item_name))]
+    #[garde(length(chars, min = 1, max = MAX_NAME_CHARS), custom(validate_item_name))]
     name: &'a str,
 
     /// 親フォルダ
@@ -290,15 +289,12 @@ impl<'a> CreateFolderBody<'a> {
     ///
     /// フォルダ名をBOXが拒否する場合は、[`BoxClientError::InvalidRequestBody`]を返す。
     fn new(name: &'a str, parent_id: &FolderId) -> BoxClientResult<Self> {
-        let body = Self {
+        validated(Self {
             name,
             parent: ParentFolder {
                 id: parent_id.clone(),
             },
-        };
-        body.validate()
-            .map_err(|report| BoxClientError::InvalidRequestBody(ValidationError::new(report)))?;
-        Ok(body)
+        })
     }
 }
 
@@ -342,7 +338,7 @@ struct CopyFolderBody<'a> {
     /// `None`の場合は送信せず、BOXはコピー元のフォルダと同じ名前を付ける。
     /// `garde`は`None`の場合に`length`を検証しない。
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[garde(length(chars, min = 1, max = 255), custom(validate_optional_item_name))]
+    #[garde(length(chars, min = 1, max = MAX_NAME_CHARS), custom(validate_optional_item_name))]
     name: Option<&'a str>,
 }
 
@@ -353,15 +349,12 @@ impl<'a> CopyFolderBody<'a> {
     ///
     /// フォルダ名をBOXが拒否する場合は、[`BoxClientError::InvalidRequestBody`]を返す。
     fn new(parent_id: &FolderId, name: Option<&'a str>) -> BoxClientResult<Self> {
-        let body = Self {
+        validated(Self {
             parent: ParentFolder {
                 id: parent_id.clone(),
             },
             name,
-        };
-        body.validate()
-            .map_err(|report| BoxClientError::InvalidRequestBody(ValidationError::new(report)))?;
-        Ok(body)
+        })
     }
 }
 
@@ -607,7 +600,7 @@ impl BoxClient {
 
     /// フォルダ名を変更する。
     ///
-    /// クライアントは、5xxを受け取った場合、またはタイムアウトした場合に、同じリクエストを再送して再試行する。
+    /// BOXクライアントは、冪等なリクエストであれば、5xxを受け取った場合、またはタイムアウトした場合に、同じリクエストを再送して再試行する。
     /// しかし、これらの場合は、BOXがフォルダ名の変更を完了している可能性がある。
     /// `options.etag`を指定した場合は、名前の変更によって`ETag`が変わるため、再送すると412を受け取る。
     /// その結果、変更に成功したにもかかわらず、変更に失敗したと誤って判断するおそれがある。
@@ -652,12 +645,7 @@ impl BoxClient {
         }
 
         let body = RenameBody::new(name)?;
-        let mut request = ApiRequest::put(["folders", folder_id.as_ref()])
-            .idempotency(Idempotency::NonIdempotent)
-            .json(&body)?;
-        if let Some(etag) = options.etag {
-            request = request.header(IF_MATCH, etag)?;
-        }
+        let request = update_item_request("folders", folder_id.as_ref(), &body, options.etag)?;
 
         let folder: Folder = self.send_json(request).await?;
 
@@ -674,7 +662,7 @@ impl BoxClient {
     ///
     /// 説明を削除する場合は、`description`に空文字列を指定する。
     ///
-    /// クライアントは、5xxを受け取った場合、またはタイムアウトした場合に、同じリクエストを再送して再試行する。
+    /// BOXクライアントは、冪等なリクエストであれば、5xxを受け取った場合、またはタイムアウトした場合に、同じリクエストを再送して再試行する。
     /// しかし、これらの場合は、BOXが説明の設定を完了している可能性がある。
     /// `options.etag`を指定した場合は、説明の設定によって`ETag`が変わるため、再送すると412を受け取る。
     /// その結果、設定に成功したにもかかわらず、設定に失敗したと誤って判断するおそれがある。
@@ -719,12 +707,7 @@ impl BoxClient {
         }
 
         let body = SetDescriptionBody::new(description)?;
-        let mut request = ApiRequest::put(["folders", folder_id.as_ref()])
-            .idempotency(Idempotency::NonIdempotent)
-            .json(&body)?;
-        if let Some(etag) = options.etag {
-            request = request.header(IF_MATCH, etag)?;
-        }
+        let request = update_item_request("folders", folder_id.as_ref(), &body, options.etag)?;
 
         let folder = self.send_json(request).await?;
 
@@ -787,12 +770,7 @@ impl BoxClient {
         }
 
         let body = MoveBody::new(destination)?;
-        let mut request = ApiRequest::put(["folders", folder_id.as_ref()])
-            .idempotency(Idempotency::NonIdempotent)
-            .json(&body)?;
-        if let Some(etag) = options.etag {
-            request = request.header(IF_MATCH, etag)?;
-        }
+        let request = update_item_request("folders", folder_id.as_ref(), &body, options.etag)?;
 
         let folder = self.send_json(request).await?;
 
@@ -860,9 +838,7 @@ impl BoxClient {
         if options.recursive {
             request = request.query("recursive", "true");
         }
-        if let Some(etag) = options.etag {
-            request = request.header(IF_MATCH, etag)?;
-        }
+        request = request.if_match(options.etag)?;
 
         self.send_empty(request).await?;
 
@@ -1201,7 +1177,7 @@ mod test_folder_information {
     };
 
     use super::*;
-    use crate::test_support::{create_client, mount_token, short_retry};
+    use crate::test_support::{create_client, mount_token, not_found_response, short_retry};
 
     /// `GET /folders/{folder_id}`を呼び出し、フォルダ情報をデシリアライズすることを確認
     #[tokio::test]
@@ -1239,12 +1215,7 @@ mod test_folder_information {
         mount_token(&server).await;
         Mock::given(method("GET"))
             .and(path("/2.0/folders/999"))
-            .respond_with(ResponseTemplate::new(404).set_body_json(json!({
-                "type": "error",
-                "status": 404,
-                "code": "not_found",
-                "message": "Not Found",
-            })))
+            .respond_with(not_found_response())
             .mount(&server)
             .await;
         let client = create_client(&server, short_retry(0)?).await?;
@@ -1602,21 +1573,12 @@ mod test_create_folder {
     };
 
     use super::*;
-    use crate::test_support::{create_client, mount_token, request_count, short_retry};
+    use crate::test_support::{
+        count_requests, create_client, mount_token, request_count, short_retry,
+    };
 
     /// フォルダのAPIのパス
     const FOLDERS_PATH: &str = "/2.0/folders";
-
-    /// フォルダのAPIへのPOSTリクエストの数を返す。
-    async fn create_request_count(server: &MockServer) -> usize {
-        server
-            .received_requests()
-            .await
-            .unwrap_or_default()
-            .iter()
-            .filter(|r| r.method.as_str() == "POST" && r.url.path() == FOLDERS_PATH)
-            .count()
-    }
 
     /// `POST /folders`に名前と親フォルダを送信し、作成したフォルダをデシリアライズすることを確認
     #[tokio::test]
@@ -1693,7 +1655,7 @@ mod test_create_folder {
             matches!(&result, Err(BoxClientError::Api(e)) if e.status == status),
             "result: {result:?}"
         );
-        assert_eq!(create_request_count(&server).await, 1);
+        assert_eq!(count_requests(&server, "POST", FOLDERS_PATH).await, 1);
 
         Ok(())
     }
@@ -1709,21 +1671,12 @@ mod test_copy_folder {
     };
 
     use super::*;
-    use crate::test_support::{create_client, mount_token, request_count, short_retry};
+    use crate::test_support::{
+        count_requests, create_client, mount_token, request_count, short_retry,
+    };
 
     /// フォルダのコピーのAPIのパス
     const COPY_PATH: &str = "/2.0/folders/123/copy";
-
-    /// フォルダのコピーのAPIへのPOSTリクエストの数を返す。
-    async fn copy_request_count(server: &MockServer) -> usize {
-        server
-            .received_requests()
-            .await
-            .unwrap_or_default()
-            .iter()
-            .filter(|r| r.method.as_str() == "POST" && r.url.path() == COPY_PATH)
-            .count()
-    }
 
     /// コピー先の親フォルダと、指定した場合だけ名前を送信し、コピーしたフォルダをデシリアライズすることを確認
     #[rstest]
@@ -1836,7 +1789,7 @@ mod test_copy_folder {
             matches!(&result, Err(BoxClientError::Api(e)) if e.status == status),
             "result: {result:?}"
         );
-        assert_eq!(copy_request_count(&server).await, 1);
+        assert_eq!(count_requests(&server, "POST", COPY_PATH).await, 1);
 
         Ok(())
     }
@@ -1852,27 +1805,12 @@ mod test_rename_folder {
     };
 
     use super::*;
-    use crate::test_support::{create_client, mount_token, request_count, short_retry};
+    use crate::test_support::{
+        count_requests, create_client, if_match_headers, mount_token, request_count, short_retry,
+    };
 
     /// フォルダのAPIのパス
     const FOLDER_PATH: &str = "/2.0/folders/123";
-
-    /// フォルダのAPIへのPUTリクエストのIf-Matchヘッダーを返す。
-    async fn rename_requests(server: &MockServer) -> Vec<Option<String>> {
-        server
-            .received_requests()
-            .await
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|r| r.method.as_str() == "PUT" && r.url.path() == FOLDER_PATH)
-            .map(|r| {
-                r.headers
-                    .get("if-match")
-                    .and_then(|v| v.to_str().ok())
-                    .map(str::to_owned)
-            })
-            .collect()
-    }
 
     /// 新しい名前だけをボディで送信し、オプションに応じてIf-Matchヘッダーを送信することを確認
     #[rstest]
@@ -1905,7 +1843,7 @@ mod test_rename_folder {
 
         assert_eq!(folder.name, "Renamed");
         assert_eq!(
-            rename_requests(&server).await,
+            if_match_headers(&server, "PUT", FOLDER_PATH).await,
             vec![expected_if_match.map(str::to_owned)]
         );
 
@@ -1974,7 +1912,7 @@ mod test_rename_folder {
             matches!(&result, Err(BoxClientError::Api(e)) if e.status == status),
             "result: {result:?}"
         );
-        assert_eq!(rename_requests(&server).await.len(), 1);
+        assert_eq!(count_requests(&server, "PUT", FOLDER_PATH).await, 1);
 
         Ok(())
     }
@@ -1990,27 +1928,12 @@ mod test_set_folder_description {
     };
 
     use super::*;
-    use crate::test_support::{create_client, mount_token, request_count, short_retry};
+    use crate::test_support::{
+        count_requests, create_client, if_match_headers, mount_token, request_count, short_retry,
+    };
 
     /// フォルダのAPIのパス
     const FOLDER_PATH: &str = "/2.0/folders/123";
-
-    /// フォルダのAPIへのPUTリクエストのIf-Matchヘッダーを返す。
-    async fn update_requests(server: &MockServer) -> Vec<Option<String>> {
-        server
-            .received_requests()
-            .await
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|r| r.method.as_str() == "PUT" && r.url.path() == FOLDER_PATH)
-            .map(|r| {
-                r.headers
-                    .get("if-match")
-                    .and_then(|v| v.to_str().ok())
-                    .map(str::to_owned)
-            })
-            .collect()
-    }
 
     /// 説明だけをボディで送信し、オプションに応じてIf-Matchヘッダーを送信することを確認
     ///
@@ -2057,7 +1980,7 @@ mod test_set_folder_description {
 
         assert_eq!(folder.description.as_deref(), Some(description));
         assert_eq!(
-            update_requests(&server).await,
+            if_match_headers(&server, "PUT", FOLDER_PATH).await,
             vec![expected_if_match.map(str::to_owned)]
         );
 
@@ -2144,7 +2067,7 @@ mod test_set_folder_description {
             matches!(&result, Err(BoxClientError::Api(e)) if e.status == status),
             "result: {result:?}"
         );
-        assert_eq!(update_requests(&server).await.len(), 1);
+        assert_eq!(count_requests(&server, "PUT", FOLDER_PATH).await, 1);
 
         Ok(())
     }
@@ -2161,27 +2084,12 @@ mod test_move_folder {
 
     use super::*;
     use crate::UserId;
-    use crate::test_support::{create_client, mount_token, request_count, short_retry};
+    use crate::test_support::{
+        count_requests, create_client, if_match_headers, mount_token, request_count, short_retry,
+    };
 
     /// フォルダのAPIのパス
     const FOLDER_PATH: &str = "/2.0/folders/123";
-
-    /// フォルダのAPIへのPUTリクエストのIf-Matchヘッダーを返す。
-    async fn move_requests(server: &MockServer) -> Vec<Option<String>> {
-        server
-            .received_requests()
-            .await
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|r| r.method.as_str() == "PUT" && r.url.path() == FOLDER_PATH)
-            .map(|r| {
-                r.headers
-                    .get("if-match")
-                    .and_then(|v| v.to_str().ok())
-                    .map(str::to_owned)
-            })
-            .collect()
-    }
 
     /// 移動先の親フォルダだけをボディで送信し、オプションに応じてIf-Matchヘッダーを送信することを確認
     #[rstest]
@@ -2219,7 +2127,7 @@ mod test_move_folder {
 
         assert_eq!(folder.parent.map(|p| p.id), Some(FolderId::new("456")));
         assert_eq!(
-            move_requests(&server).await,
+            if_match_headers(&server, "PUT", FOLDER_PATH).await,
             vec![expected_if_match.map(str::to_owned)]
         );
 
@@ -2318,7 +2226,7 @@ mod test_move_folder {
             matches!(&result, Err(BoxClientError::Api(e)) if e.status == status),
             "result: {result:?}"
         );
-        assert_eq!(move_requests(&server).await.len(), 1);
+        assert_eq!(count_requests(&server, "PUT", FOLDER_PATH).await, 1);
 
         Ok(())
     }
@@ -2333,28 +2241,19 @@ mod test_delete_folder {
     };
 
     use super::*;
-    use crate::test_support::{create_client, mount_token, request_count, short_retry};
+    use crate::test_support::{
+        count_requests, create_client, if_match, mount_token, request_count, requests, short_retry,
+    };
 
     /// フォルダのAPIのパス
     const FOLDER_PATH: &str = "/2.0/folders/123";
 
-    /// フォルダのAPIへのリクエストのクエリ文字列とIf-Matchヘッダーを返す。
+    /// フォルダのAPIへのDELETEリクエストのクエリ文字列とIf-Matchヘッダーを返す。
     async fn delete_requests(server: &MockServer) -> Vec<(String, Option<String>)> {
-        server
-            .received_requests()
+        requests(server, "DELETE", FOLDER_PATH)
             .await
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|r| r.method.as_str() == "DELETE" && r.url.path() == FOLDER_PATH)
-            .map(|r| {
-                let query = r.url.query().unwrap_or_default().to_owned();
-                let if_match = r
-                    .headers
-                    .get("if-match")
-                    .and_then(|v| v.to_str().ok())
-                    .map(str::to_owned);
-                (query, if_match)
-            })
+            .iter()
+            .map(|r| (r.url.query().unwrap_or_default().to_owned(), if_match(r)))
             .collect()
     }
 
@@ -2456,7 +2355,7 @@ mod test_delete_folder {
             matches!(&result, Err(BoxClientError::Api(e)) if e.status == status),
             "result: {result:?}"
         );
-        assert_eq!(delete_requests(&server).await.len(), 1);
+        assert_eq!(count_requests(&server, "DELETE", FOLDER_PATH).await, 1);
 
         Ok(())
     }
@@ -2483,7 +2382,7 @@ mod test_delete_folder {
             .delete_folder(&FolderId::new("123"), &DeleteFolderOptions::default())
             .await?;
 
-        assert_eq!(delete_requests(&server).await.len(), 2);
+        assert_eq!(count_requests(&server, "DELETE", FOLDER_PATH).await, 2);
 
         Ok(())
     }
