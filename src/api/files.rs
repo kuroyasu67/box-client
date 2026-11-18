@@ -1,6 +1,6 @@
 //! ファイルに関するAPI
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
 use reqwest::header::IF_MATCH;
@@ -205,6 +205,19 @@ pub struct FileVersionsPage {
     pub offset: u64,
 }
 
+/// ファイルのバージョンの昇格リクエストのボディ
+#[derive(Debug, Serialize)]
+struct PromoteFileVersionBody<'a> {
+    /// 昇格するバージョンのID
+    id: &'a FileVersionId,
+
+    /// 昇格する項目の種類
+    ///
+    /// BOXは、`file_version`だけを受け付ける。
+    #[serde(rename = "type")]
+    item_type: &'static str,
+}
+
 impl BoxClient {
     /// ファイル情報を取得する。
     ///
@@ -348,6 +361,55 @@ impl BoxClient {
         );
 
         Ok(versions)
+    }
+
+    /// ファイルの過去のバージョンを昇格し、現在のバージョンにする。
+    ///
+    /// BOXは、指定したバージョンの複製を新しいバージョンとして作成し、バージョン履歴の先頭に置く。
+    /// 新しいバージョンは、指定したバージョンと同じ内容、ハッシュ値、`ETag`および名前を持つ。
+    /// コメントなどの他の属性は、昇格したバージョンの時点の値に戻らない。
+    /// BOXは、Box Notesの復元にこのAPIを使用しないように案内している。
+    ///
+    /// HTTPメソッドがPOSTであるため、冪等でないリクエストとして送信する。
+    /// 5xxまたはタイムアウトの後に再送すると、同じバージョンの複製を重複して作成するおそれがあるためである。
+    ///
+    /// # Arguments
+    ///
+    /// - `file_id`: ファイルのID
+    /// - `file_version_id`: 昇格する過去のバージョンのID。[`BoxClient::list_file_versions`]で取得できる。
+    ///
+    /// # Returns
+    ///
+    /// 昇格によって作成された、現在のバージョンを返す。昇格したバージョンとは異なるIDを持つ。
+    ///
+    /// # Errors
+    ///
+    /// ファイルまたはバージョンが存在しない場合、またはファイルを操作する権限がない場合は、
+    /// [`BoxClientError::Api`]を返す。
+    /// 再試行できないエラーが発生した場合、または再試行回数の上限に達した場合はエラーを返す。
+    /// 5xxまたはタイムアウトでエラーを返した場合は、BOXがバージョンを昇格した可能性がある。
+    /// したがって、[`BoxClient::file_information`]でファイルの現在のバージョンを確認する。
+    pub async fn promote_file_version(
+        &self,
+        file_id: &FileId,
+        file_version_id: &FileVersionId,
+    ) -> BoxClientResult<FileVersion> {
+        let request = ApiRequest::post(["files", file_id.as_ref(), "versions", "current"]).json(
+            &PromoteFileVersionBody {
+                id: file_version_id,
+                item_type: "file_version",
+            },
+        )?;
+        let version: FileVersion = self.send_json(request).await?;
+
+        tracing::debug!(
+            file_id = file_id.as_ref(),
+            promoted_version_id = file_version_id.as_ref(),
+            new_version_id = version.id.as_ref(),
+            "promoted file version"
+        );
+
+        Ok(version)
     }
 
     /// ファイルを削除する。
@@ -1022,6 +1084,85 @@ mod test_list_file_versions {
 
         assert!(
             matches!(result, Err(BoxClientError::UnexpectedResponse(_))),
+            "result: {result:?}"
+        );
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod test_promote_file_version {
+    use rstest::rstest;
+    use serde_json::json;
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{body_json, method, path},
+    };
+
+    use super::*;
+    use crate::test_support::{create_client, mount_token, short_retry};
+
+    /// ファイルの現在のバージョンのAPIのパス
+    const CURRENT_VERSION_PATH: &str = "/2.0/files/12345/versions/current";
+
+    /// 昇格するバージョンのIDと種類を送信し、作成された現在のバージョンを返すことを確認
+    #[tokio::test]
+    async fn test_promote_file_version() -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        Mock::given(method("POST"))
+            .and(path(CURRENT_VERSION_PATH))
+            .and(body_json(json!({"id": "67890", "type": "file_version"})))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+                "type": "file_version",
+                "id": "99999",
+                "sha1": "85136c79cbf9fe36bb9d05d0639c70c265c18d37",
+                "name": "Contract.pdf",
+                "version_number": "3",
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = create_client(&server, short_retry(0)?).await?;
+
+        let version = client
+            .promote_file_version(&FileId::new("12345"), &FileVersionId::new("67890"))
+            .await?;
+
+        assert_eq!(version.id, FileVersionId::new("99999"));
+        assert_eq!(version.version_number.as_deref(), Some("3"));
+
+        Ok(())
+    }
+
+    /// BOXのエラーレスポンスを、再試行せずにそのまま返すことを確認
+    ///
+    /// 昇格は冪等でないため、5xxの後に再送すると、同じバージョンの複製を重複して作成するおそれがある。
+    #[rstest]
+    #[case::not_found(404)]
+    #[case::internal_server_error(500)]
+    #[case::service_unavailable(503)]
+    #[tokio::test]
+    async fn test_promote_file_version_error_is_not_retried(
+        #[case] status: u16,
+    ) -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        Mock::given(method("POST"))
+            .and(path(CURRENT_VERSION_PATH))
+            .respond_with(ResponseTemplate::new(status))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = create_client(&server, short_retry(2)?).await?;
+
+        let result = client
+            .promote_file_version(&FileId::new("12345"), &FileVersionId::new("67890"))
+            .await;
+
+        assert!(
+            matches!(&result, Err(BoxClientError::Api(e)) if e.status == status),
             "result: {result:?}"
         );
 
