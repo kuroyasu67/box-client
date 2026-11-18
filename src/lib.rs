@@ -37,7 +37,7 @@ pub use api::folders::{
 };
 pub use api::trash::{ListTrashedItemsOptions, RestoreItemOptions};
 pub use api::types::{
-    BoxItem, FileId, FileItem, FileVersionId, FolderId, FolderItem, ItemStatus,
+    BoxItem, DeleteItemOptions, FileId, FileItem, FileVersionId, FolderId, FolderItem, ItemStatus,
     MAX_DESCRIPTION_CHARS, MAX_NAME_CHARS, MoveDestination, ParentFolder, PathCollection,
     UpdateItemOptions, UserId, WebLinkId, WebLinkItem,
 };

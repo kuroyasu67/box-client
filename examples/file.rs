@@ -19,8 +19,9 @@ use std::path::Path;
 use tokio::io::{AsyncBufReadExt as _, BufReader};
 
 use box_client::{
-    BoxClient, CopyFileOptions, DownloadFileOptions, File, FolderId, ListFileVersionsOptions,
-    MoveDestination, RestoreItemOptions, UpdateFileContentOptions, UploadFileOptions,
+    BoxClient, CopyFileOptions, DeleteItemOptions, DownloadFileOptions, File, FolderId,
+    ListFileVersionsOptions, MoveDestination, RestoreItemOptions, UpdateFileContentOptions,
+    UploadFileOptions,
 };
 
 /// 使用方法
@@ -139,7 +140,9 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // ファイルを削除し、ゴミ箱にある削除したファイルの情報を取得
-    client.delete_file(&file_id, None).await?;
+    client
+        .delete_file(&file_id, &DeleteItemOptions::default())
+        .await?;
     tracing::info!("file was deleted successfully");
     tokio::time::sleep(common::WAIT_FOR_TRASH).await;
     let file = client.trashed_file_information(&file_id).await?;
@@ -213,8 +216,12 @@ async fn operate_versions(client: &BoxClient, file: &File, file_path: &Path) -> 
     // 直前に取得した`ETag`を指定し、取得後にファイルが変更されていた場合は削除しない。
     // BOXは、削除したバージョンをゴミ箱に移動する。
     let file = client.file_information(file_id).await?;
+    let mut delete_options = DeleteItemOptions::default();
+    if let Some(etag) = file.etag.as_deref() {
+        delete_options = delete_options.with_etag(etag);
+    }
     client
-        .delete_file_version(file_id, &previous_version_id, file.etag.as_deref())
+        .delete_file_version(file_id, &previous_version_id, &delete_options)
         .await?;
     tracing::info!("file version was deleted successfully");
 

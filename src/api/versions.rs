@@ -6,7 +6,8 @@ use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
 use crate::{
-    BoxClient, BoxClientError, BoxClientResult, FileId, FileVersionId, Idempotency, UserMini,
+    BoxClient, BoxClientError, BoxClientResult, DeleteItemOptions, FileId, FileVersionId,
+    Idempotency, UserMini,
     api::folders::{MAX_ITEMS_LIMIT, validate_limit},
     request::ApiRequest,
 };
@@ -392,17 +393,17 @@ impl BoxClient {
     ///
     /// - `file_id`: ファイルのID
     /// - `file_version_id`: 削除するバージョンのID
-    /// - `etag`: 最後に取得したファイルの`ETag`。指定した場合は`If-Match`ヘッダーで送信し、
+    /// - `options`: `ETag`のオプション。`ETag`を指定した場合は`If-Match`ヘッダーで送信し、
     ///   ファイルが`ETag`の取得後に変更されていると、BOXはバージョンを削除せずに412を返す。
     ///
     /// # Errors
     ///
-    /// `etag`に使用できない文字が含まれる場合は、リクエストを送信せずに
+    /// `options.etag`に使用できない文字が含まれる場合は、リクエストを送信せずに
     /// [`BoxClientError::InvalidHeaderValue`]を返す。
     /// BOXがエラーレスポンスを返した場合は、[`BoxClientError::Api`]を返す。主なステータスは次のとおり。
     ///
     /// - 404: ファイルまたはバージョンが存在しない、またはファイルにアクセスする権限がない。
-    /// - 412: `etag`がファイルの現在の`ETag`と一致しない。
+    /// - 412: `options.etag`がファイルの現在の`ETag`と一致しない。
     ///
     /// 5xxまたはタイムアウトでエラーを返した場合は、BOXがバージョンを削除した可能性があるため、
     /// [`BoxClient::file_version`]でバージョンの`trashed_at`を確認する。
@@ -410,16 +411,16 @@ impl BoxClient {
         &self,
         file_id: &FileId,
         file_version_id: &FileVersionId,
-        etag: Option<&str>,
+        options: &DeleteItemOptions<'_>,
     ) -> BoxClientResult<()> {
-        let mut request = ApiRequest::delete([
+        let request = ApiRequest::delete([
             "files",
             file_id.as_ref(),
             "versions",
             file_version_id.as_ref(),
         ])
-        .idempotency(Idempotency::NonIdempotent);
-        request = request.if_match(etag)?;
+        .idempotency(Idempotency::NonIdempotent)
+        .if_match(options.etag)?;
 
         self.send_empty(request).await?;
 
@@ -925,7 +926,11 @@ mod test_delete_file_version {
         let client = create_client(&server, short_retry(0)?).await?;
 
         client
-            .delete_file_version(&FileId::new("12345"), &FileVersionId::new("67890"), etag)
+            .delete_file_version(
+                &FileId::new("12345"),
+                &FileVersionId::new("67890"),
+                &DeleteItemOptions { etag },
+            )
             .await?;
 
         assert_eq!(
@@ -958,7 +963,11 @@ mod test_delete_file_version {
         let client = create_client(&server, short_retry(2)?).await?;
 
         let result = client
-            .delete_file_version(&FileId::new("12345"), &FileVersionId::new("67890"), None)
+            .delete_file_version(
+                &FileId::new("12345"),
+                &FileVersionId::new("67890"),
+                &DeleteItemOptions::default(),
+            )
             .await;
 
         assert!(

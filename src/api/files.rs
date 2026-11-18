@@ -11,8 +11,8 @@ use crate::{
     BoxClient, BoxClientResult, FileId, FileVersion, FileVersionId, FolderId, FolderItem,
     Idempotency, ItemStatus, MoveDestination, ParentFolder, PathCollection, UserMini,
     api::types::{
-        MAX_NAME_CHARS, MoveBody, RenameBody, SetDescriptionBody, UpdateItemOptions,
-        update_item_request, validate_optional_item_name, validated,
+        DeleteItemOptions, MAX_NAME_CHARS, MoveBody, RenameBody, SetDescriptionBody,
+        UpdateItemOptions, update_item_request, validate_optional_item_name, validated,
     },
     request::ApiRequest,
 };
@@ -405,25 +405,29 @@ impl BoxClient {
     /// # Arguments
     ///
     /// - `file_id`: 削除するファイルのID
-    /// - `etag`: 最後に取得したファイルの`ETag`。指定した場合は`If-Match`ヘッダーで送信し、
+    /// - `options`: `ETag`のオプション。`ETag`を指定した場合は`If-Match`ヘッダーで送信し、
     ///   ファイルが`ETag`の取得後に変更されていると、BOXはファイルを削除せずに412を返す。
     ///
     /// # Errors
     ///
-    /// `etag`に使用できない文字が含まれる場合は、リクエストを送信せずに
+    /// `options.etag`に使用できない文字が含まれる場合は、リクエストを送信せずに
     /// [`BoxClientError::InvalidHeaderValue`]を返す。
     /// BOXがエラーレスポンスを返した場合は、[`BoxClientError::Api`]を返す。
     /// 主なステータスは次のとおり。
     ///
     /// - 404: ファイルが存在しない、ファイルが削除済みである、またはファイルにアクセスする権限がない。
-    /// - 412: `etag`がファイルの現在の`ETag`と一致しない。ファイルが`ETag`の取得後に変更されている。
+    /// - 412: `options.etag`がファイルの現在の`ETag`と一致しない。ファイルが`ETag`の取得後に変更されている。
     ///
     /// 5xxまたはタイムアウトでエラーを返した場合は、BOXがファイルを削除した可能性があるため、
     /// [`BoxClient::file_information`]でファイルの状態を確認する。
-    pub async fn delete_file(&self, file_id: &FileId, etag: Option<&str>) -> BoxClientResult<()> {
-        let mut request =
-            ApiRequest::delete(["files", file_id.as_ref()]).idempotency(Idempotency::NonIdempotent);
-        request = request.if_match(etag)?;
+    pub async fn delete_file(
+        &self,
+        file_id: &FileId,
+        options: &DeleteItemOptions<'_>,
+    ) -> BoxClientResult<()> {
+        let request = ApiRequest::delete(["files", file_id.as_ref()])
+            .idempotency(Idempotency::NonIdempotent)
+            .if_match(options.etag)?;
 
         self.send_empty(request).await?;
 
@@ -1199,7 +1203,9 @@ mod test_delete_file {
             .await;
         let client = create_client(&server, short_retry(0)?).await?;
 
-        client.delete_file(&FileId::new("123"), etag).await?;
+        let options = DeleteItemOptions { etag };
+
+        client.delete_file(&FileId::new("123"), &options).await?;
 
         assert_eq!(
             if_match_headers(&server, "DELETE", FILE_PATH).await,
@@ -1218,7 +1224,10 @@ mod test_delete_file {
         let requests_before = request_count(&server).await;
 
         let result = client
-            .delete_file(&FileId::new("123"), Some("1\r\nX-Injected: 1"))
+            .delete_file(
+                &FileId::new("123"),
+                &DeleteItemOptions::default().with_etag("1\r\nX-Injected: 1"),
+            )
             .await;
 
         assert!(
@@ -1250,7 +1259,9 @@ mod test_delete_file {
             .await;
         let client = create_client(&server, short_retry(2)?).await?;
 
-        let result = client.delete_file(&FileId::new("123"), None).await;
+        let result = client
+            .delete_file(&FileId::new("123"), &DeleteItemOptions::default())
+            .await;
 
         assert!(
             matches!(&result, Err(BoxClientError::Api(e)) if e.status == status),
@@ -1279,7 +1290,9 @@ mod test_delete_file {
             .await;
         let client = create_client(&server, short_retry(1)?).await?;
 
-        client.delete_file(&FileId::new("123"), None).await?;
+        client
+            .delete_file(&FileId::new("123"), &DeleteItemOptions::default())
+            .await?;
 
         assert_eq!(count_requests(&server, "DELETE", FILE_PATH).await, 2);
 

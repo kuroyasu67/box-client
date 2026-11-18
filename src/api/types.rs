@@ -266,6 +266,41 @@ impl<'a> UpdateItemOptions<'a> {
     }
 }
 
+/// ファイルまたはファイルのバージョンを削除するAPIのオプション
+///
+/// BOXは、ファイルの削除とファイルのバージョンの削除で、同じ形式の`If-Match`ヘッダーを受け付けるため、
+/// [`BoxClient::delete_file`](crate::BoxClient::delete_file)および
+/// [`BoxClient::delete_file_version`](crate::BoxClient::delete_file_version)で共有する。
+/// フォルダの削除は、空でないフォルダを削除するかどうかも指定するため、
+/// [`DeleteFolderOptions`](crate::DeleteFolderOptions)を使用する。
+///
+/// # Examples
+///
+/// ```
+/// use box_client::DeleteItemOptions;
+///
+/// let options = DeleteItemOptions::default().with_etag("1");
+/// assert_eq!(options.etag, Some("1"));
+/// ```
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct DeleteItemOptions<'a> {
+    /// 最後に取得したファイルの`ETag`
+    ///
+    /// 指定した場合は、`If-Match`ヘッダーで送信する。ファイルが`ETag`の取得後に変更されていると、
+    /// BOXはファイルまたはバージョンを削除せずに412を返す。
+    pub etag: Option<&'a str>,
+}
+
+impl<'a> DeleteItemOptions<'a> {
+    /// 最後に取得したファイルの`ETag`を設定する。
+    #[must_use]
+    pub fn with_etag(mut self, etag: &'a str) -> Self {
+        self.etag = Some(etag);
+        self
+    }
+}
+
 /// ファイル、フォルダまたはWebリンクの名前変更リクエストのボディ
 #[derive(Debug, Clone, Serialize, Validate)]
 pub(crate) struct RenameBody<'a> {

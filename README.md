@@ -147,7 +147,7 @@
 - BOX API: `DELETE /files/{file_id}/versions/{file_version_id}`
 - ファイルのバージョンを削除する。
   BOXは、削除したバージョンをゴミ箱に移動する。ゴミ箱に移動したバージョンは、`BoxClient::restore_file_version`で復元できる。
-- ETagを指定した場合は、`If-Match`ヘッダーで送信する。
+- ファイルのETagを`DeleteItemOptions`で指定した場合は、`If-Match`ヘッダーで送信する。
 - 冪等でないリクエストとして送信する。理由は「[冪等性の決定](#冪等性の決定)」を参照する。
 
 #### 削除したファイルのバージョンの復元
@@ -208,7 +208,7 @@
 - BOX API: `DELETE /files/{file_id}`
 - ファイルを削除する。
   BOXは、エンタープライズの設定に従って、ファイルをゴミ箱に移動するか、完全に削除する。
-- ETagを指定した場合は、`If-Match`ヘッダーで送信する。
+- ETagを`DeleteItemOptions`で指定した場合は、`If-Match`ヘッダーで送信する。
 - 冪等でないリクエストとして送信する。理由は「[冪等性の決定](#冪等性の決定)」を参照する。
 
 #### ファイルのアップロード
