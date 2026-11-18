@@ -27,6 +27,12 @@ async fn main() -> anyhow::Result<()> {
         options = options.with_name(name);
     }
 
+    // ファイルの内容を送信する前に、BOXがファイルを受け付けるかを確認
+    let upload_url = client
+        .preflight_upload_file(file_path, &parent_id, &options)
+        .await?;
+    tracing::info!("preflight check passed: {upload_url:?}");
+
     let file = client.upload_file(file_path, &parent_id, &options).await?;
     tracing::info!("uploaded file: {file:?}");
 

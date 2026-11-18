@@ -10,9 +10,10 @@ use bytes::Bytes;
 use futures_util::stream::{FuturesUnordered, StreamExt as _};
 use garde::Validate;
 use reqwest::{
-    Response, StatusCode,
+    Method, Response, StatusCode,
     header::{CONTENT_RANGE, HeaderName, HeaderValue, IF_MATCH},
 };
+use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 use sha1::{Digest as _, Sha1};
 use tokio::io::AsyncReadExt as _;
@@ -244,6 +245,59 @@ struct UploadVersionAttributes<'a> {
     name: Option<&'a str>,
 }
 
+/// プリフライトチェックのリクエストのボディ
+#[derive(Debug, Serialize)]
+struct PreflightUploadBody<'a> {
+    /// ファイル名
+    name: &'a str,
+
+    /// ファイルのバイト数
+    size: u64,
+
+    /// アップロード先の親フォルダ
+    parent: ParentFolder,
+}
+
+/// プリフライトチェックに合格した場合に、BOXが返すアップロード用のURLとアクセストークン
+///
+/// BOXのAPI仕様（OpenAPI）は、どちらの属性も必須としていないため、`Option`で受け取る。
+#[derive(Debug, Clone, Default, Deserialize)]
+#[non_exhaustive]
+pub struct UploadUrl {
+    /// ファイルをアップロードできるアップロードセッションのURL
+    pub upload_url: Option<String>,
+
+    /// ファイルのアップロードに使用できるアクセストークン
+    ///
+    /// アクセストークンをログやデバッグ出力に残さないように、[`SecretString`]で保持する。
+    pub upload_token: Option<SecretString>,
+}
+
+/// プリフライトチェックの成功レスポンスのボディを読み込む。
+///
+/// BOXのガイドは、成功レスポンスのボディを記載していない。
+/// ボディが空の場合も確認には合格しているため、すべての属性を`None`とした[`UploadUrl`]を返す。
+async fn read_upload_url(
+    response: Response,
+    idempotency: Idempotency,
+) -> Result<UploadUrl, AttemptError> {
+    let body = response.bytes().await.map_err(|error| {
+        if idempotency == Idempotency::Idempotent {
+            AttemptError::Retryable {
+                error: error.into(),
+                retry_after: None,
+            }
+        } else {
+            AttemptError::Fatal(error.into())
+        }
+    })?;
+    if body.iter().all(u8::is_ascii_whitespace) {
+        return Ok(UploadUrl::default());
+    }
+    serde_json::from_slice(&body)
+        .map_err(|e| AttemptError::Fatal(BoxClientError::DeserializeResponse(e)))
+}
+
 /// アップロードしたファイルのリスト
 #[derive(Debug, Deserialize)]
 struct FileCollection {
@@ -422,6 +476,28 @@ fn read_file_error(path: &Path) -> impl FnOnce(std::io::Error) -> BoxClientError
     }
 }
 
+/// 新しいファイルとしてアップロードする場合の、BOXに保存するファイル名を決めて検証する。
+///
+/// `options.name`を指定した場合はその名前を、指定しない場合はパスのファイル名を使用する。
+///
+/// # Errors
+///
+/// `options.name`を指定せず、パスからUTF-8のファイル名を取得できない場合は、[`BoxClientError::InvalidArgument`]を返す。
+/// ファイル名をBOXが拒否する場合は、[`BoxClientError::InvalidRequestBody`]を返す。
+fn upload_file_name<'a>(
+    path: &'a Path,
+    options: &UploadFileOptions<'a>,
+) -> BoxClientResult<&'a str> {
+    let name = match options.name {
+        Some(name) => name,
+        None => path.file_name().and_then(|name| name.to_str()).ok_or(
+            BoxClientError::InvalidArgument("the file name cannot be taken from the path"),
+        )?,
+    };
+    validate_file_name(name)?;
+    Ok(name)
+}
+
 /// `Digest`ヘッダーの値を返す。
 fn sha1_digest_header(digest: &[u8]) -> String {
     format!("sha={}", BASE64.encode(digest))
@@ -491,16 +567,77 @@ impl BoxClient {
         options: &UploadFileOptions<'_>,
         threshold: u64,
     ) -> BoxClientResult<File> {
-        let name = match options.name {
-            Some(name) => name,
-            None => path.file_name().and_then(|name| name.to_str()).ok_or(
-                BoxClientError::InvalidArgument("the file name cannot be taken from the path"),
-            )?,
-        };
-        validate_file_name(name)?;
+        let name = upload_file_name(path, options)?;
 
         self.upload(path, UploadTarget::NewFile { parent_id, name }, threshold)
             .await
+    }
+
+    /// ファイルをアップロードする前に、BOXがファイルを受け付けるかを確認する（プリフライトチェック）。
+    ///
+    /// ファイルの内容を送信せずに、ファイル名、ファイルサイズおよびアップロード先の親フォルダだけをBOXに送信し、
+    /// 実際のアップロードと同じ検査を受ける。BOXは、ファイル名の重複、ファイルサイズの上限、
+    /// およびフォルダとアカウントのストレージの容量を検査する。
+    /// 大きいファイルの内容を送信してから拒否されることを避けるために使用する。
+    ///
+    /// 引数は[`BoxClient::upload_file`]と同じであり、ファイル名とファイルサイズも`upload_file`と同じ方法で決める。
+    /// ファイルの内容は読み込まず、ファイルのメタデータだけを読み込む。
+    ///
+    /// 確認に合格した場合は、BOXが返すアップロード用のURLとアクセストークンを[`UploadUrl`]として返す。
+    /// [`BoxClient::upload_file`]はこれらを使用しないため、`upload_file`でアップロードする場合は戻り値を使用しなくてよい。
+    /// なお、確認に合格しても、その後のアップロードが成功するとは限らない。確認とアップロードの間に、
+    /// 同じ名前のファイルが作成される場合などがあるためである。
+    ///
+    /// HTTPメソッドがOPTIONSであり、BOXは状態を変更しないため、冪等なリクエストとして送信する。
+    ///
+    /// # Arguments
+    ///
+    /// - `path`: アップロードするファイルのパス
+    /// - `parent_id`: アップロード先の親フォルダのID
+    /// - `options`: BOXに保存するファイル名のオプション
+    ///
+    /// # Errors
+    ///
+    /// `options.name`を指定せず、パスからUTF-8のファイル名を取得できない場合は、
+    /// リクエストを送信せずに[`BoxClientError::InvalidArgument`]を返す。
+    /// ファイル名をBOXが拒否する場合は、リクエストを送信せずに[`BoxClientError::InvalidRequestBody`]を返す。
+    /// ファイルのメタデータを読み込めない場合は、[`BoxClientError::ReadFile`]を返す。
+    /// BOXがファイルを受け付けない場合は、[`BoxClientError::Api`]を返す。
+    /// 例えば、同じ名前のファイルが親フォルダに存在する場合、BOXは409を返す。
+    /// このとき、[`ApiError::body`](crate::ApiError::body)の`context_info.conflicts`に、名前が重複するファイルが含まれる。
+    ///
+    /// 再試行できないエラーが発生した場合、または再試行回数の上限に達した場合はエラーを返す。
+    pub async fn preflight_upload_file(
+        &self,
+        path: impl AsRef<Path>,
+        parent_id: &FolderId,
+        options: &UploadFileOptions<'_>,
+    ) -> BoxClientResult<UploadUrl> {
+        let path = path.as_ref();
+        let name = upload_file_name(path, options)?;
+        let size = tokio::fs::metadata(path)
+            .await
+            .map_err(read_file_error(path))?
+            .len();
+
+        let request =
+            ApiRequest::new(Method::OPTIONS, ["files", "content"]).json(&PreflightUploadBody {
+                name,
+                size,
+                parent: ParentFolder {
+                    id: parent_id.clone(),
+                },
+            })?;
+        let upload_url = self.send(request, read_upload_url).await?;
+
+        tracing::debug!(
+            path = %path.display(),
+            size,
+            parent_id = parent_id.as_ref(),
+            "preflight check passed"
+        );
+
+        Ok(upload_url)
     }
 
     /// ファイルの内容を更新する。
@@ -1552,6 +1689,205 @@ mod test_update_file_content {
         // アップロードセッションの作成では、`If-Match`ヘッダーを送信しない。
         let sessions = requests(&server, "POST", &upload_path("/files/123/upload_sessions")).await;
         assert!(sessions.iter().all(|r| if_match(r).is_none()));
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod test_preflight_upload_file {
+    use std::path::PathBuf;
+
+    use rstest::rstest;
+    use serde_json::json;
+    use tempfile::TempDir;
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{body_json, method, path},
+    };
+
+    use secrecy::ExposeSecret;
+
+    use super::*;
+    use crate::test_support::{create_client, mount_token, request_count, short_retry};
+
+    /// プリフライトチェックのAPIのパス
+    ///
+    /// アップロードと異なり、REST APIのホストで受け付ける。
+    const PREFLIGHT_PATH: &str = "/2.0/files/content";
+
+    /// 一時ディレクトリに、5バイトのファイルを作成する。
+    fn create_file() -> anyhow::Result<(TempDir, PathBuf)> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("report.txt");
+        std::fs::write(&path, b"hello")?;
+        Ok((dir, path))
+    }
+
+    /// REST APIのホストに、ファイル名、ファイルサイズおよび親フォルダをOPTIONSで送信することを確認
+    ///
+    /// ファイル名を指定しない場合は、パスのファイル名を送信することも確認する。
+    #[rstest]
+    #[case::name_from_path(None, "report.txt")]
+    #[case::name_from_options(Some("renamed.txt"), "renamed.txt")]
+    #[tokio::test]
+    async fn test_preflight_upload_file(
+        #[case] option_name: Option<&'static str>,
+        #[case] expected_name: &str,
+    ) -> anyhow::Result<()> {
+        let (_dir, file_path) = create_file()?;
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        Mock::given(method("OPTIONS"))
+            .and(path(PREFLIGHT_PATH))
+            .and(body_json(json!({
+                "name": expected_name,
+                "size": 5,
+                "parent": {"id": "456"},
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "upload_url": "https://upload.box.com/api/2.0/files/content?upload_session_id=1234",
+                "upload_token": "token",
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = create_client(&server, short_retry(0)?).await?;
+        let options = UploadFileOptions { name: option_name };
+
+        let upload_url = client
+            .preflight_upload_file(&file_path, &FolderId::new("456"), &options)
+            .await?;
+
+        assert_eq!(
+            upload_url.upload_url.as_deref(),
+            Some("https://upload.box.com/api/2.0/files/content?upload_session_id=1234")
+        );
+        assert_eq!(
+            upload_url
+                .upload_token
+                .as_ref()
+                .map(ExposeSecret::expose_secret),
+            Some("token")
+        );
+
+        Ok(())
+    }
+
+    /// 成功レスポンスのボディが空の場合、または属性が省略された場合は、その属性を`None`として返すことを確認
+    #[rstest]
+    #[case::empty("", None)]
+    #[case::without_token(
+        r#"{"upload_url":"https://upload.box.com/x"}"#,
+        Some("https://upload.box.com/x")
+    )]
+    #[tokio::test]
+    async fn test_preflight_upload_file_optional_fields(
+        #[case] body: &'static str,
+        #[case] expected_url: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let (_dir, file_path) = create_file()?;
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        Mock::given(method("OPTIONS"))
+            .and(path(PREFLIGHT_PATH))
+            .respond_with(ResponseTemplate::new(200).set_body_string(body))
+            .mount(&server)
+            .await;
+        let client = create_client(&server, short_retry(0)?).await?;
+
+        let upload_url = client
+            .preflight_upload_file(
+                &file_path,
+                &FolderId::new("456"),
+                &UploadFileOptions::default(),
+            )
+            .await?;
+
+        assert_eq!(upload_url.upload_url.as_deref(), expected_url);
+        assert!(upload_url.upload_token.is_none());
+
+        Ok(())
+    }
+
+    /// アクセストークンを`Debug`で出力しないことを確認
+    #[test]
+    fn test_upload_url_debug_does_not_expose_token() -> anyhow::Result<()> {
+        let upload_url: UploadUrl = serde_json::from_str(
+            r#"{"upload_url":"https://upload.box.com/x","upload_token":"secret-token"}"#,
+        )?;
+
+        let debug = format!("{upload_url:?}");
+
+        assert!(!debug.contains("secret-token"), "debug: {debug}");
+
+        Ok(())
+    }
+
+    /// BOXがファイルを受け付けない場合は、BOXのエラーレスポンスを返すことを確認
+    #[tokio::test]
+    async fn test_preflight_upload_file_conflict() -> anyhow::Result<()> {
+        let (_dir, file_path) = create_file()?;
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        Mock::given(method("OPTIONS"))
+            .and(path(PREFLIGHT_PATH))
+            .respond_with(ResponseTemplate::new(409).set_body_json(json!({
+                "type": "error",
+                "status": 409,
+                "code": "item_name_in_use",
+                "message": "Item with the same name already exists",
+                "context_info": {"conflicts": {"type": "file", "id": "11", "name": "report.txt"}},
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = create_client(&server, short_retry(2)?).await?;
+
+        let result = client
+            .preflight_upload_file(
+                &file_path,
+                &FolderId::new("456"),
+                &UploadFileOptions::default(),
+            )
+            .await;
+
+        assert!(
+            matches!(&result, Err(BoxClientError::Api(e))
+                if e.status == 409 && e.body.contains("conflicts")),
+            "result: {result:?}"
+        );
+
+        Ok(())
+    }
+
+    /// ファイル名が不正な場合、またはファイルが存在しない場合は、リクエストを送信せずにエラーを返すことを確認
+    #[rstest]
+    #[case::invalid_name(Some("a/b"), "report.txt", "InvalidRequestBody")]
+    #[case::missing_file(None, "missing.txt", "ReadFile")]
+    #[tokio::test]
+    async fn test_preflight_upload_file_rejects_without_request(
+        #[case] option_name: Option<&'static str>,
+        #[case] file_name: &str,
+        #[case] expected: &str,
+    ) -> anyhow::Result<()> {
+        let (dir, _) = create_file()?;
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        let client = create_client(&server, short_retry(0)?).await?;
+        let requests_before = request_count(&server).await;
+        let options = UploadFileOptions { name: option_name };
+
+        let result = client
+            .preflight_upload_file(dir.path().join(file_name), &FolderId::root(), &options)
+            .await;
+
+        let matched = match expected {
+            "ReadFile" => matches!(result, Err(BoxClientError::ReadFile { .. })),
+            _ => matches!(result, Err(BoxClientError::InvalidRequestBody(_))),
+        };
+        assert!(matched, "result: {result:?}");
+        assert_eq!(request_count(&server).await, requests_before);
 
         Ok(())
     }
