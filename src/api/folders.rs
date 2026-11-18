@@ -2,12 +2,15 @@
 
 use std::collections::HashSet;
 
-use serde::Deserialize;
+use garde::Validate;
+use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
 use crate::{
     BoxClient, BoxClientError, BoxClientResult, BoxItem, FolderId, FolderItem, Idempotency,
-    ItemStatus, UserMini, api::types::PathCollection, request::ApiRequest,
+    ItemStatus, ParentFolder, UserMini, ValidationError,
+    api::types::{PathCollection, validate_item_name},
+    request::ApiRequest,
 };
 use reqwest::header::IF_MATCH;
 
@@ -307,6 +310,39 @@ where
     Ok((items, pages))
 }
 
+/// フォルダ作成リクエストのボディ
+#[derive(Debug, Clone, Serialize, Validate)]
+struct CreateFolderBody<'a> {
+    /// フォルダ名
+    ///
+    /// BOXは、名前の長さを文字数で数える。
+    #[garde(length(chars, min = 1, max = 255), custom(validate_item_name))]
+    name: &'a str,
+
+    /// 親フォルダ
+    #[garde(skip)]
+    parent: ParentFolder,
+}
+
+impl<'a> CreateFolderBody<'a> {
+    /// ボディを作成して検証する。
+    ///
+    /// # Errors
+    ///
+    /// フォルダ名をBOXが拒否する場合は、[`BoxClientError::InvalidRequestBody`]を返す。
+    fn new(name: &'a str, parent_id: &FolderId) -> BoxClientResult<Self> {
+        let body = Self {
+            name,
+            parent: ParentFolder {
+                id: parent_id.clone(),
+            },
+        };
+        body.validate()
+            .map_err(|report| BoxClientError::InvalidRequestBody(ValidationError::new(report)))?;
+        Ok(body)
+    }
+}
+
 impl BoxClient {
     /// フォルダ情報を取得する。
     ///
@@ -321,6 +357,24 @@ impl BoxClient {
     /// 再試行できないエラーが発生した場合、または再試行回数の上限に達した場合はエラーを返す。
     pub async fn folder_information(&self, folder_id: &FolderId) -> BoxClientResult<Folder> {
         self.send_json(ApiRequest::get(["folders", folder_id.as_ref()]))
+            .await
+    }
+
+    /// フォルダを作成する。
+    ///
+    /// # Arguments
+    ///
+    /// - `name`: 作成するフォルダの名前
+    /// - `parent_id`: 作成するフォルダの親フォルダのID
+    ///
+    /// # Errors
+    ///
+    /// フォルダ名をBOXが拒否する場合は、リクエストを送信せずに[`BoxClientError::InvalidRequestBody`]を返す。
+    /// 同じ名前の項目が親フォルダに存在する場合は、[`BoxClientError::Api`]を返す。
+    /// 再試行できないエラーが発生した場合、または再試行回数の上限に達した場合はエラーを返す。
+    pub async fn create_folder(&self, name: &str, parent_id: &FolderId) -> BoxClientResult<Folder> {
+        let body = CreateFolderBody::new(name, parent_id)?;
+        self.send_json(ApiRequest::post(["folders"]).json(&body)?)
             .await
     }
 
@@ -855,6 +909,179 @@ mod test_delete_folder {
             .await?;
 
         assert_eq!(delete_requests(&server).await.len(), 2);
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod test_create_folder {
+    use rstest::rstest;
+    use serde_json::json;
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{body_json, method, path},
+    };
+
+    use super::*;
+    use crate::test_support::{create_client, mount_token, request_count, short_retry};
+
+    /// フォルダのAPIのパス
+    const FOLDERS_PATH: &str = "/2.0/folders";
+
+    /// フォルダのAPIへのPOSTリクエストの数を返す。
+    async fn create_request_count(server: &MockServer) -> usize {
+        server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .iter()
+            .filter(|r| r.method.as_str() == "POST" && r.url.path() == FOLDERS_PATH)
+            .count()
+    }
+
+    /// `POST /folders`に名前と親フォルダを送信し、作成したフォルダをデシリアライズすることを確認
+    #[tokio::test]
+    async fn test_create_folder() -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        Mock::given(method("POST"))
+            .and(path(FOLDERS_PATH))
+            .and(body_json(
+                json!({"name": "Contracts", "parent": {"id": "0"}}),
+            ))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+                "type": "folder",
+                "id": "12345",
+                "etag": "0",
+                "name": "Contracts",
+                "created_at": "2012-12-12T10:53:43-08:00",
+                "parent": {"type": "folder", "id": "0", "etag": null, "name": "All Files"},
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = create_client(&server, short_retry(0)?).await?;
+
+        let folder = client.create_folder("Contracts", &FolderId::root()).await?;
+
+        assert_eq!(folder.id, FolderId::new("12345"));
+        assert_eq!(folder.name, "Contracts");
+        assert_eq!(folder.parent.map(|p| p.id), Some(FolderId::root()));
+
+        Ok(())
+    }
+
+    /// BOXが拒否するフォルダ名を指定した場合は、リクエストを送信せずにエラーを返すことを確認
+    #[tokio::test]
+    async fn test_create_folder_rejects_invalid_name() -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        let client = create_client(&server, short_retry(0)?).await?;
+        let requests_before = request_count(&server).await;
+
+        let result = client.create_folder("a/b", &FolderId::root()).await;
+
+        assert!(
+            matches!(result, Err(BoxClientError::InvalidRequestBody(_))),
+            "result: {result:?}"
+        );
+        assert_eq!(request_count(&server).await, requests_before);
+
+        Ok(())
+    }
+
+    /// BOXのエラーレスポンスを、再試行せずにそのまま返すことを確認
+    ///
+    /// 作成は冪等でないため、5xxの後に再送すると同じフォルダを重複して作成するおそれがある。
+    #[rstest]
+    #[case::name_conflict(409)]
+    #[case::internal_server_error(500)]
+    #[case::service_unavailable(503)]
+    #[tokio::test]
+    async fn test_create_folder_error_is_not_retried(#[case] status: u16) -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        Mock::given(method("POST"))
+            .and(path(FOLDERS_PATH))
+            .respond_with(ResponseTemplate::new(status))
+            .mount(&server)
+            .await;
+        let client = create_client(&server, short_retry(2)?).await?;
+
+        let result = client.create_folder("Contracts", &FolderId::root()).await;
+
+        assert!(
+            matches!(&result, Err(BoxClientError::Api(e)) if e.status == status),
+            "result: {result:?}"
+        );
+        assert_eq!(create_request_count(&server).await, 1);
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod test_create_folder_body {
+    use rstest::rstest;
+
+    use super::*;
+
+    /// BOXが受け付けるフォルダ名で、ボディを作成できることを確認
+    #[rstest]
+    #[case::ascii("folder")]
+    #[case::max_ascii(&"a".repeat(255))]
+    #[case::max_japanese(&"あ".repeat(255))]
+    fn test_valid_name(#[case] name: &str) -> anyhow::Result<()> {
+        let body = CreateFolderBody::new(name, &FolderId::new("0"))?;
+
+        assert_eq!(body.name, name);
+
+        Ok(())
+    }
+
+    /// BOXが拒否するフォルダ名を、検証エラーとして返すことを確認
+    ///
+    /// 使用できない文字の詳細な検証は、`validate_item_name`のテストで確認する。
+    /// ここでは、長さの検証と、`validate_item_name`をフィールドに適用していることを確認する。
+    #[rstest]
+    #[case::empty("")]
+    #[case::too_long(&"a".repeat(256))]
+    #[case::too_long_japanese(&"あ".repeat(256))]
+    #[case::invalid_char("a/b")]
+    fn test_invalid_name(#[case] name: &str) {
+        let result = CreateFolderBody::new(name, &FolderId::new("0"));
+
+        assert!(
+            matches!(result, Err(BoxClientError::InvalidRequestBody(_))),
+            "result: {result:?}"
+        );
+    }
+
+    /// 検証エラーのメッセージに、検証に失敗したフィールドを含むことを確認
+    #[test]
+    fn test_error_message_contains_field() -> anyhow::Result<()> {
+        let Err(BoxClientError::InvalidRequestBody(error)) =
+            CreateFolderBody::new("a/b", &FolderId::new("0"))
+        else {
+            anyhow::bail!("validation must fail");
+        };
+
+        let message = error.to_string();
+        assert!(message.contains("name"), "message: {message}");
+
+        Ok(())
+    }
+
+    /// BOXが求める形式のJSONにシリアライズすることを確認
+    #[test]
+    fn test_serialize() -> anyhow::Result<()> {
+        let body = CreateFolderBody::new("folder", &FolderId::new("123"))?;
+
+        assert_eq!(
+            serde_json::to_value(&body)?,
+            serde_json::json!({"name": "folder", "parent": {"id": "123"}})
+        );
 
         Ok(())
     }

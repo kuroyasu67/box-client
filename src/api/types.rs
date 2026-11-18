@@ -1,4 +1,4 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// BOXの項目のIDを表す型を定義する。
 ///
@@ -12,7 +12,7 @@ macro_rules! box_item_struct {
             "空文字列などの不正なIDは、APIを呼び出したときに",
             "[`BoxClientError::InvalidPathSegment`](crate::BoxClientError::InvalidPathSegment)になる。",
         )]
-        #[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize)]
+        #[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize, Serialize)]
         pub struct $name(#[doc = "IDの文字列"] pub String);
 
         impl $name {
@@ -149,6 +149,80 @@ pub enum ItemStatus {
     /// BOXが状態を追加しても、項目の情報の取得を失敗させないために受け入れる。
     #[serde(other)]
     Unknown,
+}
+
+/// 親フォルダ
+#[derive(Debug, Clone, Serialize)]
+pub struct ParentFolder {
+    /// 親フォルダのID
+    pub id: FolderId,
+}
+
+/// ファイル名またはフォルダ名に使用できない文字が含まれていないか検証する。
+///
+/// BOXは、ファイル名とフォルダ名のどちらでも、ASCIIの非印字文字、`/`または`\`を含む名前、
+/// 末尾が空白の名前、`.`および`..`を拒否する。
+/// `garde`の`custom`バリデーターとして、`#[garde(custom(validate_item_name))]`のように使用する。
+///
+/// BOXは名前の長さも1文字以上255文字以下に制限する。長さは文字数で数えるため、
+/// このバリデーターでは検証せず、`#[garde(length(chars, min = 1, max = 255))]`と組み合わせて検証する。
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "gardeのcustomバリデーターは、コンテキストを参照で受け取るシグネチャを要求するため"
+)]
+pub(crate) fn validate_item_name(name: &str, _context: &()) -> garde::Result {
+    if name == "." || name == ".." {
+        return Err(garde::Error::new("must not be `.` or `..`"));
+    }
+    if let Some(c) = name
+        .chars()
+        .find(|c| c.is_ascii_control() || matches!(c, '/' | '\\'))
+    {
+        return Err(garde::Error::new(format!("must not contain {c:?}")));
+    }
+    if name.ends_with(' ') {
+        return Err(garde::Error::new("must not end with a space"));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod test_validate_item_name {
+    use rstest::rstest;
+
+    use super::*;
+
+    /// BOXが受け付ける名前を受け付けることを確認
+    #[rstest]
+    #[case::ascii("report.pdf")]
+    #[case::japanese("報告書.pdf")]
+    #[case::inner_space("my report.pdf")]
+    #[case::leading_space(" report.pdf")]
+    #[case::dots("...")]
+    #[case::dot_prefix(".gitignore")]
+    #[case::no_extension("README")]
+    fn test_valid(#[case] name: &str) {
+        let result = validate_item_name(name, &());
+
+        assert!(result.is_ok(), "result: {result:?}");
+    }
+
+    /// BOXが拒否する名前を拒否することを確認
+    #[rstest]
+    #[case::dot(".")]
+    #[case::dot_dot("..")]
+    #[case::slash("a/b")]
+    #[case::backslash("a\\b")]
+    #[case::newline("a\nb")]
+    #[case::tab("a\tb")]
+    #[case::nul("a\0b")]
+    #[case::del("a\u{7f}b")]
+    #[case::trailing_space("report.pdf ")]
+    fn test_invalid(#[case] name: &str) {
+        let result = validate_item_name(name, &());
+
+        assert!(result.is_err(), "result: {result:?}");
+    }
 }
 
 #[cfg(test)]

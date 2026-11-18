@@ -68,6 +68,12 @@ pub enum BoxClientError {
     #[error("Invalid header value")]
     InvalidHeaderValue(#[source] reqwest::header::InvalidHeaderValue),
 
+    /// リクエストボディの検証エラー
+    ///
+    /// BOXに送信する前に、BOXが拒否する値をクライアント側で検出した場合に返す。
+    #[error("Invalid request body")]
+    InvalidRequestBody(#[source] ValidationError),
+
     /// リクエストボディのシリアライズエラー
     #[error("Failed to serialize request body")]
     SerializeBody(#[source] serde_json::Error),
@@ -155,6 +161,29 @@ impl std::error::Error for CryptoError {
         self.0.source()
     }
 }
+
+/// リクエストボディの検証で発生したエラー
+///
+/// 原因となった`garde`のエラーの型を公開すると、`garde`のメジャーバージョンを上げたときに、
+/// このクレートの破壊的変更となる。利用者は原因の型を調べる必要がないため、型を隠して保持し、
+/// メッセージだけを公開する。メッセージは`name: ...`のように、検証に失敗したフィールドを含む。
+#[derive(Debug)]
+pub struct ValidationError(garde::Report);
+
+impl ValidationError {
+    /// `garde`の検証結果を包む。
+    pub(crate) fn new(report: garde::Report) -> Self {
+        Self(report)
+    }
+}
+
+impl fmt::Display for ValidationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&self.0, f)
+    }
+}
+
+impl std::error::Error for ValidationError {}
 
 /// BOXが返したエラーレスポンス
 ///

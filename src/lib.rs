@@ -36,13 +36,13 @@ pub use api::folders::{
 };
 pub use api::trash::{ListTrashedItemsOptions, RestoreItemOptions};
 pub use api::types::{
-    BoxItem, FileId, FileItem, FolderId, FolderItem, ItemStatus, PathCollection, WebLinkId,
-    WebLinkItem,
+    BoxItem, FileId, FileItem, FolderId, FolderItem, ItemStatus, ParentFolder, PathCollection,
+    WebLinkId, WebLinkItem,
 };
 pub use api::users::{User, UserMini};
 pub use api::web_links::WebLink;
 pub use client::{BoxClient, BoxClientBuilder, BoxClientTimeout, MAX_REFRESH_BEFORE_EXPIRY};
 pub use config::{BoxAppAuth, BoxAppSettings, BoxConfig};
-pub use errors::{ApiError, BoxClientError, BoxClientResult, CryptoError};
+pub use errors::{ApiError, BoxClientError, BoxClientResult, CryptoError, ValidationError};
 pub use request::ApiRequest;
 pub use retry::{Idempotency, RetryPolicy};
