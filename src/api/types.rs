@@ -307,6 +307,19 @@ impl<'a> MoveBody<'a> {
     }
 }
 
+/// 省略可能なファイル名またはフォルダ名に、使用できない文字が含まれていないか検証する。
+///
+/// `None`の場合は検証しない。`garde`の`custom`バリデーターは、フィールドの型の参照を受け取るため、
+/// `Option<&str>`のフィールドには[`validate_item_name`]を直接適用できない。
+#[expect(
+    clippy::ref_option_ref,
+    clippy::trivially_copy_pass_by_ref,
+    reason = "gardeのcustomバリデーターは、フィールドとコンテキストを参照で受け取るシグネチャを要求するため"
+)]
+pub(crate) fn validate_optional_item_name(name: &Option<&str>, context: &()) -> garde::Result {
+    name.map_or(Ok(()), |name| validate_item_name(name, context))
+}
+
 #[cfg(test)]
 mod test_validate_item_name {
     use rstest::rstest;

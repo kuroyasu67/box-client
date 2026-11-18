@@ -7,9 +7,10 @@ use time::OffsetDateTime;
 use reqwest::header::IF_MATCH;
 
 use crate::{
-    BoxClient, BoxClientError, BoxClientResult, FileId, FileVersion, FolderItem, Idempotency,
-    ItemStatus, MoveDestination, PathCollection, UserMini, ValidationError,
-    api::types::{MoveBody, SetDescriptionBody, validate_item_name},
+    BoxClient, BoxClientError, BoxClientResult, FileId, FileVersion, FileVersionId, FolderId,
+    FolderItem, Idempotency, ItemStatus, MoveDestination, ParentFolder, PathCollection, UserMini,
+    ValidationError,
+    api::types::{MoveBody, SetDescriptionBody, validate_item_name, validate_optional_item_name},
     request::ApiRequest,
 };
 
@@ -117,6 +118,92 @@ impl<'a> UpdateFileOptions<'a> {
     pub fn with_etag(mut self, etag: &'a str) -> Self {
         self.etag = Some(etag);
         self
+    }
+}
+
+/// ファイルのコピーのオプション
+///
+/// # Examples
+///
+/// ```
+/// use box_client::{CopyFileOptions, FileVersionId};
+///
+/// let version_id = FileVersionId::new("67890");
+/// let options = CopyFileOptions::default()
+///     .with_name("Contract (copy).pdf")
+///     .with_version(&version_id);
+/// assert_eq!(options.name, Some("Contract (copy).pdf"));
+/// ```
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct CopyFileOptions<'a> {
+    /// コピーしたファイルの名前
+    ///
+    /// `None`の場合、BOXはコピー元のファイルと同じ名前を付ける。
+    pub name: Option<&'a str>,
+
+    /// コピーするバージョンのID
+    ///
+    /// `None`の場合、BOXはファイルの現在のバージョンをコピーする。
+    pub version: Option<&'a FileVersionId>,
+}
+
+impl<'a> CopyFileOptions<'a> {
+    /// コピーしたファイルの名前を設定する。
+    #[must_use]
+    pub fn with_name(mut self, name: &'a str) -> Self {
+        self.name = Some(name);
+        self
+    }
+
+    /// コピーするバージョンのIDを設定する。
+    #[must_use]
+    pub fn with_version(mut self, version: &'a FileVersionId) -> Self {
+        self.version = Some(version);
+        self
+    }
+}
+
+/// ファイルコピーリクエストのボディ
+#[derive(Debug, Clone, Serialize, Validate)]
+struct CopyFileBody<'a> {
+    /// コピー先の親フォルダ
+    #[garde(skip)]
+    parent: ParentFolder,
+
+    /// コピーしたファイルの名前
+    ///
+    /// `None`の場合は送信せず、BOXはコピー元のファイルと同じ名前を付ける。
+    /// `garde`は`None`の場合に`length`を検証しない。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[garde(length(chars, min = 1, max = 255), custom(validate_optional_item_name))]
+    name: Option<&'a str>,
+
+    /// コピーするバージョンのID
+    ///
+    /// `None`の場合は送信せず、BOXはファイルの現在のバージョンをコピーする。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[garde(skip)]
+    version: Option<&'a FileVersionId>,
+}
+
+impl<'a> CopyFileBody<'a> {
+    /// ボディを作成して検証する。
+    ///
+    /// # Errors
+    ///
+    /// ファイル名をBOXが拒否する場合は、[`BoxClientError::InvalidRequestBody`]を返す。
+    fn new(parent_id: &FolderId, options: &CopyFileOptions<'a>) -> BoxClientResult<Self> {
+        let body = Self {
+            parent: ParentFolder {
+                id: parent_id.clone(),
+            },
+            name: options.name,
+            version: options.version,
+        };
+        body.validate()
+            .map_err(|report| BoxClientError::InvalidRequestBody(ValidationError::new(report)))?;
+        Ok(body)
     }
 }
 
@@ -262,6 +349,57 @@ impl BoxClient {
         let file = self.send_json(request).await?;
 
         tracing::debug!(file_id = file_id.as_ref(), ?destination, "moved file");
+
+        Ok(file)
+    }
+
+    /// ファイルを別のフォルダへコピーする。
+    ///
+    /// HTTPメソッドがPOSTであるため、冪等でないリクエストとして送信する。
+    /// 5xxまたはタイムアウトの後に再送すると、BOXがコピーを完了していた場合は409を受け取り、
+    /// 名前が異なる場合はファイルを重複してコピーするおそれがあるためである。
+    /// したがって、429、エラーコードが`operation_blocked_temporary`の409および接続エラーの後にのみ再試行する。
+    ///
+    /// # Arguments
+    ///
+    /// - `file_id`: コピーするファイルのID
+    /// - `parent_id`: コピー先の親フォルダのID。ルートフォルダへコピーする場合は[`FolderId::root`]を指定する。
+    /// - `options`: コピーしたファイルの名前、およびコピーするバージョンのオプション
+    ///
+    /// # Errors
+    ///
+    /// `options.name`をBOXが拒否する場合は、リクエストを送信せずに[`BoxClientError::InvalidRequestBody`]を返す。
+    /// BOXは使用できない文字を取り除いて受け付けるが、意図しない名前でコピーしないように、クライアントで拒否する。
+    /// BOXがエラーレスポンスを返した場合は、[`BoxClientError::Api`]を返す。主なステータスは次のとおり。
+    ///
+    /// - 400: パラメーターが不足している、または不正である。
+    /// - 403: ファイルをコピーする権限がない、または情報バリアがコピーを禁止している。
+    /// - 404: コピー元のファイルまたはコピー先の親フォルダが存在しない、またはアクセスする権限がない。
+    /// - 409: 同じ名前の項目がコピー先の親フォルダに存在する（`item_name_in_use`）。
+    ///   または、移動、コピーなど、他の操作がコピー元またはコピー先のフォルダをロックしている（`operation_blocked_temporary`）。
+    ///   後者の場合、クライアントは再試行設定に従って再試行し、再試行回数の上限に達してもロックが解除されない場合に
+    ///   このエラーを返す。
+    ///
+    /// 再試行できないエラーが発生した場合、または再試行回数の上限に達した場合はエラーを返す。
+    /// 5xxまたはタイムアウトでエラーを返した場合は、BOXがファイルをコピーした可能性がある。
+    /// したがって、[`BoxClient::list_items_in_folder`]でコピー先の親フォルダを確認する。
+    pub async fn copy_file(
+        &self,
+        file_id: &FileId,
+        parent_id: &FolderId,
+        options: &CopyFileOptions<'_>,
+    ) -> BoxClientResult<File> {
+        let body = CopyFileBody::new(parent_id, options)?;
+        let request = ApiRequest::post(["files", file_id.as_ref(), "copy"]).json(&body)?;
+
+        let file: File = self.send_json(request).await?;
+
+        tracing::debug!(
+            file_id = file_id.as_ref(),
+            parent_id = parent_id.as_ref(),
+            copied_file_id = file.id.as_ref(),
+            "copied file"
+        );
 
         Ok(file)
     }
@@ -1141,6 +1279,142 @@ mod test_move_file {
             "result: {result:?}"
         );
         assert_eq!(move_requests(&server).await.len(), 1);
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod test_copy_file {
+    use rstest::rstest;
+    use serde_json::json;
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{body_json, method, path},
+    };
+
+    use super::*;
+    use crate::test_support::{create_client, mount_token, request_count, short_retry};
+
+    /// ファイルのコピーのAPIのパス
+    const COPY_PATH: &str = "/2.0/files/12345/copy";
+
+    /// コピーするバージョンのID
+    const VERSION_ID: &str = "67890";
+
+    /// コピー先の親フォルダと、指定した場合だけ名前とバージョンを送信し、コピーしたファイルを返すことを確認
+    #[rstest]
+    #[case::default(None, None, json!({"parent": {"id": "456"}}))]
+    #[case::with_name(
+        Some("Contract (copy).pdf"),
+        None,
+        json!({"parent": {"id": "456"}, "name": "Contract (copy).pdf"})
+    )]
+    #[case::with_version(
+        None,
+        Some(VERSION_ID),
+        json!({"parent": {"id": "456"}, "version": VERSION_ID})
+    )]
+    #[tokio::test]
+    async fn test_copy_file(
+        #[case] name: Option<&'static str>,
+        #[case] version: Option<&'static str>,
+        #[case] expected_body: serde_json::Value,
+    ) -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        Mock::given(method("POST"))
+            .and(path(COPY_PATH))
+            .and(body_json(expected_body))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+                "type": "file",
+                "id": "99999",
+                "etag": "0",
+                "name": name.unwrap_or("Contract.pdf"),
+                "parent": {"type": "folder", "id": "456", "etag": "0", "name": "Archive"},
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = create_client(&server, short_retry(0)?).await?;
+        let version = version.map(FileVersionId::new);
+        let options = CopyFileOptions {
+            name,
+            version: version.as_ref(),
+        };
+
+        let file = client
+            .copy_file(&FileId::new("12345"), &FolderId::new("456"), &options)
+            .await?;
+
+        assert_eq!(file.id, FileId::new("99999"));
+        assert_eq!(file.parent.map(|p| p.id), Some(FolderId::new("456")));
+
+        Ok(())
+    }
+
+    /// BOXが拒否する名前を指定した場合は、リクエストを送信せずにエラーを返すことを確認
+    ///
+    /// 使用できない文字の詳細な検証は、`validate_item_name`のテストで確認する。
+    #[rstest]
+    #[case::empty("")]
+    #[case::too_long(&"あ".repeat(256))]
+    #[case::invalid_char("a/b")]
+    #[tokio::test]
+    async fn test_copy_file_rejects_invalid_name(#[case] name: &str) -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        let client = create_client(&server, short_retry(0)?).await?;
+        let requests_before = request_count(&server).await;
+
+        let result = client
+            .copy_file(
+                &FileId::new("12345"),
+                &FolderId::new("456"),
+                &CopyFileOptions::default().with_name(name),
+            )
+            .await;
+
+        assert!(
+            matches!(result, Err(BoxClientError::InvalidRequestBody(_))),
+            "result: {result:?}"
+        );
+        assert_eq!(request_count(&server).await, requests_before);
+
+        Ok(())
+    }
+
+    /// BOXのエラーレスポンスを、再試行せずにそのまま返すことを確認
+    ///
+    /// コピーは冪等でないため、5xxの後に再送すると、ファイルを重複してコピーするおそれがある。
+    #[rstest]
+    #[case::name_in_use(409)]
+    #[case::internal_server_error(500)]
+    #[case::service_unavailable(503)]
+    #[tokio::test]
+    async fn test_copy_file_error_is_not_retried(#[case] status: u16) -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        Mock::given(method("POST"))
+            .and(path(COPY_PATH))
+            .respond_with(ResponseTemplate::new(status))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = create_client(&server, short_retry(2)?).await?;
+
+        let result = client
+            .copy_file(
+                &FileId::new("12345"),
+                &FolderId::new("456"),
+                &CopyFileOptions::default(),
+            )
+            .await;
+
+        assert!(
+            matches!(&result, Err(BoxClientError::Api(e)) if e.status == status),
+            "result: {result:?}"
+        );
 
         Ok(())
     }
