@@ -43,7 +43,10 @@ pub use api::types::{
 pub use api::uploads::{CHUNKED_UPLOAD_THRESHOLD, UploadFileOptions};
 pub use api::users::{User, UserMini};
 pub use api::web_links::WebLink;
-pub use client::{BoxClient, BoxClientBuilder, BoxClientTimeout, MAX_REFRESH_BEFORE_EXPIRY};
+pub use client::{
+    BoxClient, BoxClientBuilder, BoxClientTimeout, DEFAULT_UPLOAD_CONCURRENCY,
+    MAX_REFRESH_BEFORE_EXPIRY, MAX_UPLOAD_CONCURRENCY, MIN_UPLOAD_CONCURRENCY,
+};
 pub use config::{BoxAppAuth, BoxAppSettings, BoxConfig};
 pub use errors::{ApiError, BoxClientError, BoxClientResult, CryptoError, ValidationError};
 pub use request::ApiRequest;

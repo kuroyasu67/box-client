@@ -46,6 +46,24 @@ const DEFAULT_REFRESH_BEFORE_EXPIRY: Duration = Duration::from_secs(60);
 /// したがって、この上限を有効期間の半分とし、トークン管理者に、取得したアクセストークンを少なくとも有効期間の半分は再利用させる。
 pub const MAX_REFRESH_BEFORE_EXPIRY: Duration = Duration::from_mins(30);
 
+/// 分割アップロードで、並列にアップロードする部分の数の既定値
+///
+/// <https://developer.box.com/guides/uploads/chunked/upload-part/>
+///
+/// 上記ドキュメントは、3から5の部分を並列にアップロードすることを推奨しているため、その中間の4とする。
+pub const DEFAULT_UPLOAD_CONCURRENCY: usize = 4;
+
+/// 分割アップロードで、並列にアップロードする部分の数の最小値
+///
+/// `0`ではアップロードが進まないため、部分を1つずつ順にアップロードする`1`を最小値とする。
+pub const MIN_UPLOAD_CONCURRENCY: usize = 1;
+
+/// 分割アップロードで、並列にアップロードする部分の数の最大値
+///
+/// BOXが推奨する並列数の上限である5を最大値とする。
+/// 並列にアップロードする部分はそれぞれメモリに読み込むため、上限を設けてメモリの使用量も抑える。
+pub const MAX_UPLOAD_CONCURRENCY: usize = 5;
+
 /// BOXクライアント
 ///
 /// BOXのAPIを呼び出すそれぞれのメソッドは、再試行設定に従って待機と再試行を行い、アクセストークンの
@@ -66,6 +84,9 @@ pub struct BoxClient {
     /// 再試行設定
     retry: RetryPolicy,
 
+    /// 分割アップロードで、並列にアップロードする部分の数
+    upload_concurrency: usize,
+
     /// トークン管理者
     ///
     /// アクセストークンをバックグラウンドで取得し直すタスクと共有するため、`Arc`で保持する。
@@ -79,6 +100,7 @@ impl std::fmt::Debug for BoxClient {
             .field("api_base_url", &self.api_base_url.as_str())
             .field("upload_base_url", &self.upload_base_url.as_str())
             .field("retry", &self.retry)
+            .field("upload_concurrency", &self.upload_concurrency)
             .finish_non_exhaustive()
     }
 }
@@ -96,6 +118,7 @@ impl BoxClient {
             timeout: BoxClientTimeout::default(),
             retry: RetryPolicy::default(),
             refresh_before_expiry: DEFAULT_REFRESH_BEFORE_EXPIRY,
+            upload_concurrency: DEFAULT_UPLOAD_CONCURRENCY,
             api_base_url: None,
             upload_base_url: None,
             token_url: None,
@@ -107,6 +130,12 @@ impl BoxClient {
     /// 1回のAPI呼び出しの外側で待機するAPIメソッドが、再試行設定に従って待機時間を決めるために使用する。
     pub(crate) fn retry_policy(&self) -> &RetryPolicy {
         &self.retry
+    }
+
+    /// 分割アップロードで、並列にアップロードする部分の数を返す。
+    #[must_use]
+    pub fn upload_concurrency(&self) -> usize {
+        self.upload_concurrency
     }
 
     /// リクエストを送信し、成功レスポンスのJSONボディをデシリアライズして返す。
@@ -245,6 +274,9 @@ pub struct BoxClientBuilder {
     /// アクセストークンを有効期限のどれだけ前に取得し直すか
     refresh_before_expiry: Duration,
 
+    /// 分割アップロードで、並列にアップロードする部分の数
+    upload_concurrency: usize,
+
     /// REST APIのベースURL。`None`の場合はBOXのURLを使用する。
     api_base_url: Option<Url>,
 
@@ -285,6 +317,28 @@ impl BoxClientBuilder {
     pub fn refresh_before_expiry(mut self, refresh_before_expiry: Duration) -> Self {
         self.refresh_before_expiry = refresh_before_expiry;
         self
+    }
+
+    /// 分割アップロードで、並列にアップロードする部分の数を指定する。既定値は[`DEFAULT_UPLOAD_CONCURRENCY`]とする。
+    ///
+    /// 並列にアップロードする部分は、それぞれメモリに読み込む。部分のサイズはBOXが決め、
+    /// 例えば8MiBの場合は、この値が4のときに最大32MiBをメモリに保持する。
+    /// `1`を指定すると、部分を1つずつ順にアップロードする。
+    ///
+    /// # Errors
+    ///
+    /// `upload_concurrency`が[`MIN_UPLOAD_CONCURRENCY`]以上[`MAX_UPLOAD_CONCURRENCY`]以下でない場合は、
+    /// [`BoxClientError::InvalidUploadConcurrency`]を返す。
+    pub fn upload_concurrency(mut self, upload_concurrency: usize) -> BoxClientResult<Self> {
+        if !(MIN_UPLOAD_CONCURRENCY..=MAX_UPLOAD_CONCURRENCY).contains(&upload_concurrency) {
+            return Err(BoxClientError::InvalidUploadConcurrency {
+                upload_concurrency,
+                min: MIN_UPLOAD_CONCURRENCY,
+                max: MAX_UPLOAD_CONCURRENCY,
+            });
+        }
+        self.upload_concurrency = upload_concurrency;
+        Ok(self)
     }
 
     /// テストでモックサーバーに接続できるように、REST APIとトークンエンドポイントのURLを指定する。
@@ -350,6 +404,7 @@ impl BoxClientBuilder {
             api_base_url,
             upload_base_url,
             retry: self.retry,
+            upload_concurrency: self.upload_concurrency,
             token_manager,
         })
     }
@@ -490,6 +545,38 @@ mod test_box_client {
         assert_eq!(token_request_count(&server).await, 1);
 
         Ok(())
+    }
+
+    /// 分割アップロードの並列数が最小値以上最大値以下の場合のみ、ビルダーに設定することを確認
+    #[rstest]
+    #[case::zero(0, false)]
+    #[case::min(MIN_UPLOAD_CONCURRENCY, true)]
+    #[case::default(DEFAULT_UPLOAD_CONCURRENCY, true)]
+    #[case::max(MAX_UPLOAD_CONCURRENCY, true)]
+    #[case::above_max(MAX_UPLOAD_CONCURRENCY + 1, false)]
+    fn test_builder_validates_upload_concurrency(
+        #[case] upload_concurrency: usize,
+        #[case] valid: bool,
+    ) {
+        let result = BoxClient::builder(test_config()).upload_concurrency(upload_concurrency);
+
+        if valid {
+            assert!(
+                matches!(&result, Ok(builder) if builder.upload_concurrency == upload_concurrency),
+                "result: {result:?}"
+            );
+        } else {
+            assert!(
+                matches!(
+                    &result,
+                    Err(BoxClientError::InvalidUploadConcurrency { upload_concurrency: u, min, max })
+                        if *u == upload_concurrency
+                            && *min == MIN_UPLOAD_CONCURRENCY
+                            && *max == MAX_UPLOAD_CONCURRENCY
+                ),
+                "result: {result:?}"
+            );
+        }
     }
 
     /// `refresh_before_expiry`が上限以下の場合のみ、BOXクライアントを作成することを確認

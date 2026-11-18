@@ -105,3 +105,22 @@ pub(crate) async fn create_client_with_timeout(
         .build()
         .await
 }
+
+/// 分割アップロードの並列数を指定して、モックサーバーに接続するBOXクライアントを作成する。
+pub(crate) async fn create_client_with_upload_concurrency(
+    server: &MockServer,
+    retry: RetryPolicy,
+    upload_concurrency: usize,
+) -> BoxClientResult<BoxClient> {
+    let api_base_url = Url::parse(&format!("{}/2.0", server.uri()))
+        .map_err(|e| BoxClientError::InvalidBaseUrl(e.to_string()))?;
+    let upload_base_url = Url::parse(&format!("{}{UPLOAD_BASE_PATH}", server.uri()))
+        .map_err(|e| BoxClientError::InvalidBaseUrl(e.to_string()))?;
+    BoxClient::builder(test_config())
+        .retry(retry)
+        .upload_concurrency(upload_concurrency)?
+        .endpoints(api_base_url, format!("{}{TOKEN_PATH}", server.uri()))
+        .upload_base_url(upload_base_url)
+        .build()
+        .await
+}

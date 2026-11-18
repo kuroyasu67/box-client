@@ -7,6 +7,7 @@ use std::path::Path;
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use bytes::Bytes;
+use futures_util::stream::{FuturesUnordered, StreamExt as _};
 use garde::Validate;
 use reqwest::{
     Response, StatusCode,
@@ -276,8 +277,9 @@ impl BoxClient {
     /// ファイルサイズが[`CHUNKED_UPLOAD_THRESHOLD`]以下の場合は、ファイル全体をメモリに読み込み、
     /// 1回のリクエストでアップロードする（`POST /files/content`）。
     /// [`CHUNKED_UPLOAD_THRESHOLD`]を超える場合は、分割アップロードのAPIを使用する。
-    /// 分割アップロードでは、アップロードセッションを作成し、BOXが指定したサイズの部分を順にアップロードしてから、
-    /// アップロードセッションをコミットする。メモリには1つの部分だけを読み込む。
+    /// 分割アップロードでは、アップロードセッションを作成し、BOXが指定したサイズの部分をアップロードしてから、
+    /// アップロードセッションをコミットする。部分は、[`BoxClient::upload_concurrency`]個まで並列にアップロードする。
+    /// メモリには、並列にアップロードしている部分だけを読み込む。
     ///
     /// 1回のリクエストでのアップロードとコミットは、HTTPメソッドがPOSTであるため、冪等でないリクエストとして送信する。
     /// 部分のアップロードは、HTTPメソッドがPUTであり、同じ範囲を同じ内容で送り直すため、冪等なリクエストとして送信する。
@@ -462,6 +464,9 @@ impl BoxClient {
     }
 
     /// ファイルを部分ごとにアップロードし、アップロードセッションをコミットする。
+    ///
+    /// ファイルを先頭から順に読み込みながら、[`BoxClient::upload_concurrency`]個までの部分を並列にアップロードする。
+    /// いずれかの部分のアップロードに失敗した場合は、アップロード中の部分を取り消してエラーを返す。
     async fn upload_parts_and_commit(
         &self,
         path: &Path,
@@ -476,48 +481,79 @@ impl BoxClient {
             ));
         }
 
+        let concurrency = self.upload_concurrency();
         // ファイルを先頭から順に読み込むため、部分を読み込むたびにファイル全体のハッシュも計算する。
         let mut file_hasher = Sha1::new();
         let mut parts = Vec::new();
+        let mut uploading = FuturesUnordered::new();
         let mut offset = 0;
-        while offset < size {
-            let part_size = session.part_size.min(size - offset);
-            let mut part = vec![
-                0;
-                usize::try_from(part_size).map_err(|_| {
-                    BoxClientError::UnexpectedResponse("upload session part_size is too large")
-                })?
-            ];
-            file.read_exact(&mut part)
-                .await
-                .map_err(read_file_error(path))?;
-            file_hasher.update(&part);
+        loop {
+            // 空きがある限り、次の部分を読み込んでアップロードを始める。
+            // 読み込みを待つ間はアップロード中の部分をポーリングしないが、ローカルのファイルの読み込みは
+            // 部分の送信より十分に短いため、送信の遅れは無視できる。
+            while uploading.len() < concurrency && offset < size {
+                let part_size = session.part_size.min(size - offset);
+                let mut part = vec![
+                    0;
+                    usize::try_from(part_size).map_err(|_| {
+                        BoxClientError::UnexpectedResponse("upload session part_size is too large")
+                    })?
+                ];
+                file.read_exact(&mut part)
+                    .await
+                    .map_err(read_file_error(path))?;
+                file_hasher.update(&part);
+                uploading.push(self.upload_part(session, offset, size, Bytes::from(part)));
+                offset += part_size;
+            }
 
-            let digest = sha1_digest_header(&Sha1::digest(&part));
-            let content_range = format!("bytes {offset}-{}/{size}", offset + part_size - 1);
-            let request = ApiRequest::put(["files", "upload_sessions", &session.id])
-                .upload_host()
-                .header(DIGEST, &digest)?
-                .header(CONTENT_RANGE, &content_range)?
-                .body(
-                    HeaderValue::from_static("application/octet-stream"),
-                    Bytes::from(part),
-                );
-            let uploaded: UploadPartResponse = self.send_json(request).await?;
-            parts.push(uploaded.into_part());
+            // アップロード中の部分がなければ、すべての部分のアップロードを終えている。
+            let Some(uploaded) = uploading.next().await else {
+                break;
+            };
+            let part = uploaded?;
             tracing::debug!(
                 upload_session_id = session.id,
-                part_number = parts.len(),
+                offset = part.offset,
+                size = part.size,
+                uploaded_parts = parts.len() + 1,
                 total_parts = session.total_parts,
-                content_range,
                 "uploaded part"
             );
-
-            offset += part_size;
+            parts.push(part);
         }
 
+        // 部分は完了した順に並ぶため、コミットの前にファイルの先頭からの位置の順に並べ替える。
+        parts.sort_by_key(|part| part.offset);
         let digest = sha1_digest_header(&file_hasher.finalize());
         self.commit_upload_session(session, &digest, &parts).await
+    }
+
+    /// 部分をアップロードする。
+    ///
+    /// # Arguments
+    ///
+    /// - `session`: アップロードセッション
+    /// - `offset`: ファイルの先頭からの部分の位置（バイト）
+    /// - `file_size`: ファイルのバイト数
+    /// - `part`: 部分の内容
+    async fn upload_part(
+        &self,
+        session: &UploadSession,
+        offset: u64,
+        file_size: u64,
+        part: Bytes,
+    ) -> BoxClientResult<UploadedPart> {
+        let digest = sha1_digest_header(&Sha1::digest(&part));
+        let last = offset + part.len() as u64 - 1;
+        let content_range = format!("bytes {offset}-{last}/{file_size}");
+        let request = ApiRequest::put(["files", "upload_sessions", &session.id])
+            .upload_host()
+            .header(DIGEST, &digest)?
+            .header(CONTENT_RANGE, &content_range)?
+            .body(HeaderValue::from_static("application/octet-stream"), part);
+        let uploaded: UploadPartResponse = self.send_json(request).await?;
+        Ok(uploaded.into_part())
     }
 
     /// アップロードセッションをコミットする。
@@ -584,7 +620,7 @@ impl BoxClient {
 
 #[cfg(test)]
 mod test_upload_file {
-    use std::path::PathBuf;
+    use std::{path::PathBuf, time::Duration};
 
     use rstest::rstest;
     use serde_json::json;
@@ -596,7 +632,8 @@ mod test_upload_file {
 
     use super::*;
     use crate::test_support::{
-        UPLOAD_BASE_PATH, create_client, mount_token, request_count, short_retry,
+        UPLOAD_BASE_PATH, create_client, create_client_with_upload_concurrency, mount_token,
+        request_count, short_retry,
     };
 
     /// 分割アップロードに切り替えるファイルサイズ
@@ -769,6 +806,11 @@ mod test_upload_file {
     ///
     /// BOXのAPIリファレンスとガイドで部分のレスポンスの形式が異なるため、最後の部分だけ`part`属性で包まずに返す。
     async fn mount_session_and_parts(server: &MockServer) {
+        mount_session_and_delayed_parts(server, [Duration::ZERO; 3]).await;
+    }
+
+    /// アップロードセッションの作成と、指定した時間だけ遅れて応答する部分のアップロードのモックを登録する。
+    async fn mount_session_and_delayed_parts(server: &MockServer, part_delays: [Duration; 3]) {
         Mock::given(method("POST"))
             .and(path(upload_path("/files/upload_sessions")))
             .and(body_json(json!({
@@ -789,7 +831,7 @@ mod test_upload_file {
 
         let chunks: Vec<&[u8]> = CHUNKED_CONTENT.chunks(PART_SIZE).collect();
         let last = chunks.len() - 1;
-        for (i, chunk) in chunks.into_iter().enumerate() {
+        for ((i, chunk), delay) in chunks.into_iter().enumerate().zip(part_delays) {
             let offset = i * PART_SIZE;
             let part = json!({
                 "part_id": format!("P{i}"),
@@ -820,7 +862,11 @@ mod test_upload_file {
                     sha1_digest_header(&Sha1::digest(chunk)).as_str(),
                 ))
                 .and(header("content-type", "application/octet-stream"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(body))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_json(body)
+                        .set_delay(delay),
+                )
                 .expect(1)
                 .mount(server)
                 .await;
@@ -916,6 +962,64 @@ mod test_upload_file {
 
         assert_eq!(file.name, "big.bin");
         assert_eq!(requests(&server, "POST", &commit_path).await.len(), 2);
+
+        Ok(())
+    }
+
+    /// 部分の応答の遅延
+    const PART_DELAY: Duration = Duration::from_millis(300);
+
+    /// 並列数に応じて部分を並列にアップロードし、完了の順によらず位置の順に部分をコミットすることを確認
+    ///
+    /// 各部分の応答を同じ時間だけ遅らせ、アップロードにかかった時間から並列にアップロードしたかを判定する。
+    /// 並列数が部分の数以上の場合は、最初の部分の応答を最も遅らせて、完了の順を位置の順と逆にする。
+    /// 並列数が1の場合は、すべての部分を順にアップロードするため、遅延の合計以上の時間がかかる。
+    #[rstest]
+    #[case::sequential(1, [PART_DELAY; 3], PART_DELAY * 3, None)]
+    #[case::parallel(
+        3,
+        [PART_DELAY * 2, PART_DELAY, Duration::ZERO],
+        PART_DELAY * 2,
+        Some(PART_DELAY * 3)
+    )]
+    #[tokio::test]
+    async fn test_upload_file_in_chunks_concurrently(
+        #[case] concurrency: usize,
+        #[case] part_delays: [Duration; 3],
+        #[case] min_elapsed: Duration,
+        #[case] max_elapsed: Option<Duration>,
+    ) -> anyhow::Result<()> {
+        let (_dir, file_path) = create_file("big.bin", CHUNKED_CONTENT)?;
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        mount_session_and_delayed_parts(&server, part_delays).await;
+        Mock::given(method("POST"))
+            .and(path(upload_path(&format!(
+                "/files/upload_sessions/{SESSION_ID}/commit"
+            ))))
+            .and(body_json(commit_body()))
+            .respond_with(ResponseTemplate::new(201).set_body_json(file_json("big.bin")))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client =
+            create_client_with_upload_concurrency(&server, short_retry(0)?, concurrency).await?;
+
+        let started_at = std::time::Instant::now();
+        client
+            .upload_file_with_threshold(
+                &file_path,
+                &FolderId::root(),
+                &UploadFileOptions::default(),
+                THRESHOLD,
+            )
+            .await?;
+        let elapsed = started_at.elapsed();
+
+        assert!(min_elapsed <= elapsed, "elapsed: {elapsed:?}");
+        if let Some(max_elapsed) = max_elapsed {
+            assert!(elapsed < max_elapsed, "elapsed: {elapsed:?}");
+        }
 
         Ok(())
     }

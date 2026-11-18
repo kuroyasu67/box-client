@@ -57,6 +57,19 @@ pub enum BoxClientError {
         source: std::io::Error,
     },
 
+    /// 分割アップロードで並列にアップロードする部分の数が範囲外であるエラー
+    #[error("upload_concurrency {upload_concurrency} is out of range {min}..={max}")]
+    InvalidUploadConcurrency {
+        /// 指定された値
+        upload_concurrency: usize,
+
+        /// 最小値
+        min: usize,
+
+        /// 最大値
+        max: usize,
+    },
+
     /// APIメソッドの引数の不正エラー
     #[error("Invalid argument: {0}")]
     InvalidArgument(&'static str),
