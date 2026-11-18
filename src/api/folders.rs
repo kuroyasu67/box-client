@@ -187,94 +187,6 @@ pub struct ListItemsOptions {
     pub direction: Option<SortDirection>,
 }
 
-/// フォルダを削除するときのオプション
-///
-/// 将来フィールドを追加しても利用者のコードが壊れないように、`#[non_exhaustive]`を付けている。
-/// そのため、クレートの外では構造体リテラルで作成できない。[`Default`]で作成し、`with_*`メソッドで値を設定する。
-///
-/// ```
-/// use box_client::DeleteFolderOptions;
-///
-/// let options = DeleteFolderOptions::default()
-///     .with_recursive(true)
-///     .with_etag("1");
-/// assert!(options.recursive);
-/// ```
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct DeleteFolderOptions<'a> {
-    /// 空でないフォルダを、フォルダ内のすべての項目とともに削除することを指示するフラグ
-    ///
-    /// `false`の場合に空でないフォルダを削除しようとすると、BOXは400（`folder_not_empty`）を返す。
-    pub recursive: bool,
-
-    /// 最後に取得したフォルダの`ETag`
-    ///
-    /// 指定した場合は、`If-Match`ヘッダーで送信する。フォルダが`ETag`の取得後に変更されていると、
-    /// BOXはフォルダを削除せずに412を返す。
-    pub etag: Option<&'a str>,
-}
-
-/// フォルダの情報を更新するAPI（`PUT /folders/{folder_id}`）のオプション
-///
-/// [`BoxClient::move_folder`]、[`BoxClient::rename_folder`]および
-/// [`BoxClient::set_folder_description`]で共通に使用する。
-///
-/// # Examples
-///
-/// ```
-/// use box_client::UpdateFolderOptions;
-///
-/// let options = UpdateFolderOptions::default().with_etag("1");
-/// assert_eq!(options.etag, Some("1"));
-/// ```
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct UpdateFolderOptions<'a> {
-    /// 最後に取得したフォルダの`ETag`
-    ///
-    /// 指定した場合は、`If-Match`ヘッダーで送信する。フォルダが`ETag`の取得後に変更されていると、
-    /// BOXはフォルダを更新せずに412を返す。
-    pub etag: Option<&'a str>,
-}
-
-impl<'a> UpdateFolderOptions<'a> {
-    /// 最後に取得したフォルダの`ETag`を設定する。
-    #[must_use]
-    pub fn with_etag(mut self, etag: &'a str) -> Self {
-        self.etag = Some(etag);
-        self
-    }
-}
-
-/// フォルダのコピーのオプション
-///
-/// # Examples
-///
-/// ```
-/// use box_client::CopyFolderOptions;
-///
-/// let options = CopyFolderOptions::default().with_name("Contracts (copy)");
-/// assert_eq!(options.name, Some("Contracts (copy)"));
-/// ```
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct CopyFolderOptions<'a> {
-    /// コピーしたフォルダの名前
-    ///
-    /// `None`の場合、BOXはコピー元のフォルダと同じ名前を付ける。
-    pub name: Option<&'a str>,
-}
-
-impl<'a> CopyFolderOptions<'a> {
-    /// コピーしたフォルダの名前を設定する。
-    #[must_use]
-    pub fn with_name(mut self, name: &'a str) -> Self {
-        self.name = Some(name);
-        self
-    }
-}
-
 impl ListItemsOptions {
     /// 1ページで取得する項目数の上限を設定する。
     ///
@@ -298,22 +210,6 @@ impl ListItemsOptions {
     #[must_use]
     pub fn with_direction(mut self, direction: SortDirection) -> Self {
         self.direction = Some(direction);
-        self
-    }
-}
-
-impl<'a> DeleteFolderOptions<'a> {
-    /// 空でないフォルダを、フォルダ内のすべての項目とともに削除するかどうかを設定する。
-    #[must_use]
-    pub fn with_recursive(mut self, recursive: bool) -> Self {
-        self.recursive = recursive;
-        self
-    }
-
-    /// 最後に取得したフォルダの`ETag`を設定する。
-    #[must_use]
-    pub fn with_etag(mut self, etag: &'a str) -> Self {
-        self.etag = Some(etag);
         self
     }
 }
@@ -406,27 +302,31 @@ impl<'a> CreateFolderBody<'a> {
     }
 }
 
-/// フォルダ名変更リクエストのボディ
-#[derive(Debug, Clone, Serialize, Validate)]
-struct RenameFolderBody<'a> {
-    /// 新しいフォルダ名
+/// フォルダのコピーのオプション
+///
+/// # Examples
+///
+/// ```
+/// use box_client::CopyFolderOptions;
+///
+/// let options = CopyFolderOptions::default().with_name("Contracts (copy)");
+/// assert_eq!(options.name, Some("Contracts (copy)"));
+/// ```
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct CopyFolderOptions<'a> {
+    /// コピーしたフォルダの名前
     ///
-    /// BOXは、名前の長さを文字数で数える。
-    #[garde(length(chars, min = 1, max = 255), custom(validate_item_name))]
-    name: &'a str,
+    /// `None`の場合、BOXはコピー元のフォルダと同じ名前を付ける。
+    pub name: Option<&'a str>,
 }
 
-impl<'a> RenameFolderBody<'a> {
-    /// ボディを作成して検証する。
-    ///
-    /// # Errors
-    ///
-    /// フォルダ名をBOXが拒否する場合は、[`BoxClientError::InvalidRequestBody`]を返す。
-    fn new(name: &'a str) -> BoxClientResult<Self> {
-        let body = Self { name };
-        body.validate()
-            .map_err(|report| BoxClientError::InvalidRequestBody(ValidationError::new(report)))?;
-        Ok(body)
+impl<'a> CopyFolderOptions<'a> {
+    /// コピーしたフォルダの名前を設定する。
+    #[must_use]
+    pub fn with_name(mut self, name: &'a str) -> Self {
+        self.name = Some(name);
+        self
     }
 }
 
@@ -465,6 +365,106 @@ impl<'a> CopyFolderBody<'a> {
     }
 }
 
+/// フォルダの情報を更新するAPI（`PUT /folders/{folder_id}`）のオプション
+///
+/// [`BoxClient::move_folder`]、[`BoxClient::rename_folder`]および
+/// [`BoxClient::set_folder_description`]で共通に使用する。
+///
+/// # Examples
+///
+/// ```
+/// use box_client::UpdateFolderOptions;
+///
+/// let options = UpdateFolderOptions::default().with_etag("1");
+/// assert_eq!(options.etag, Some("1"));
+/// ```
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct UpdateFolderOptions<'a> {
+    /// 最後に取得したフォルダの`ETag`
+    ///
+    /// 指定した場合は、`If-Match`ヘッダーで送信する。フォルダが`ETag`の取得後に変更されていると、
+    /// BOXはフォルダを更新せずに412を返す。
+    pub etag: Option<&'a str>,
+}
+
+impl<'a> UpdateFolderOptions<'a> {
+    /// 最後に取得したフォルダの`ETag`を設定する。
+    #[must_use]
+    pub fn with_etag(mut self, etag: &'a str) -> Self {
+        self.etag = Some(etag);
+        self
+    }
+}
+
+/// フォルダ名変更リクエストのボディ
+#[derive(Debug, Clone, Serialize, Validate)]
+struct RenameFolderBody<'a> {
+    /// 新しいフォルダ名
+    ///
+    /// BOXは、名前の長さを文字数で数える。
+    #[garde(length(chars, min = 1, max = 255), custom(validate_item_name))]
+    name: &'a str,
+}
+
+impl<'a> RenameFolderBody<'a> {
+    /// ボディを作成して検証する。
+    ///
+    /// # Errors
+    ///
+    /// フォルダ名をBOXが拒否する場合は、[`BoxClientError::InvalidRequestBody`]を返す。
+    fn new(name: &'a str) -> BoxClientResult<Self> {
+        let body = Self { name };
+        body.validate()
+            .map_err(|report| BoxClientError::InvalidRequestBody(ValidationError::new(report)))?;
+        Ok(body)
+    }
+}
+
+/// フォルダを削除するときのオプション
+///
+/// 将来フィールドを追加しても利用者のコードが壊れないように、`#[non_exhaustive]`を付けている。
+/// そのため、クレートの外では構造体リテラルで作成できない。[`Default`]で作成し、`with_*`メソッドで値を設定する。
+///
+/// ```
+/// use box_client::DeleteFolderOptions;
+///
+/// let options = DeleteFolderOptions::default()
+///     .with_recursive(true)
+///     .with_etag("1");
+/// assert!(options.recursive);
+/// ```
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct DeleteFolderOptions<'a> {
+    /// 空でないフォルダを、フォルダ内のすべての項目とともに削除することを指示するフラグ
+    ///
+    /// `false`の場合に空でないフォルダを削除しようとすると、BOXは400（`folder_not_empty`）を返す。
+    pub recursive: bool,
+
+    /// 最後に取得したフォルダの`ETag`
+    ///
+    /// 指定した場合は、`If-Match`ヘッダーで送信する。フォルダが`ETag`の取得後に変更されていると、
+    /// BOXはフォルダを削除せずに412を返す。
+    pub etag: Option<&'a str>,
+}
+
+impl<'a> DeleteFolderOptions<'a> {
+    /// 空でないフォルダを、フォルダ内のすべての項目とともに削除するかどうかを設定する。
+    #[must_use]
+    pub fn with_recursive(mut self, recursive: bool) -> Self {
+        self.recursive = recursive;
+        self
+    }
+
+    /// 最後に取得したフォルダの`ETag`を設定する。
+    #[must_use]
+    pub fn with_etag(mut self, etag: &'a str) -> Self {
+        self.etag = Some(etag);
+        self
+    }
+}
+
 impl BoxClient {
     /// フォルダ情報を取得する。
     ///
@@ -480,6 +480,95 @@ impl BoxClient {
     pub async fn folder_information(&self, folder_id: &FolderId) -> BoxClientResult<Folder> {
         self.send_json(ApiRequest::get(["folders", folder_id.as_ref()]))
             .await
+    }
+
+    /// フォルダ内の項目を1ページ分リストする。
+    ///
+    /// 1回の呼び出しで返す項目は最大で`limit`件であるため、フォルダに後続の項目が残っている
+    /// 場合がある。後続の項目がある場合は、戻り値の[`ItemsPage::next_marker`]が`Some`になる。
+    /// そのマーカーを`marker`に指定して再度呼び出すと、次のページを取得できる。
+    /// すべての項目が必要な場合は、[`BoxClient::list_all_items_in_folder`]を使用する。
+    ///
+    /// # Arguments
+    ///
+    /// - `folder_id`: 項目をリストするフォルダのID
+    /// - `marker`: 前のページの[`ItemsPage::next_marker`]。最初のページを取得する場合は`None`
+    /// - `options`: 項目数の上限、並び替えなどのオプション
+    ///
+    /// # Errors
+    ///
+    /// `options.limit`が範囲外の場合は、リクエストを送信せずに[`BoxClientError::InvalidArgument`]を返す。
+    /// ルートフォルダで`options.sort`を指定した場合も、リクエストを送信せずに[`BoxClientError::InvalidArgument`]を返す。
+    /// 再試行できないエラーが発生した場合、または再試行回数の上限に達した場合はエラーを返す。
+    pub async fn list_items_in_folder(
+        &self,
+        folder_id: &FolderId,
+        marker: Option<&str>,
+        options: &ListItemsOptions,
+    ) -> BoxClientResult<ItemsPage> {
+        if folder_id.is_root() && options.sort.is_some() {
+            return Err(BoxClientError::InvalidArgument(
+                "sort is not supported for marker-based pagination in the root folder",
+            ));
+        }
+
+        let mut request =
+            ApiRequest::get(["folders", folder_id.as_ref(), "items"]).query("usemarker", "true");
+        if let Some(limit) = options.limit {
+            request = request.query("limit", validate_limit(limit)?.to_string());
+        }
+        if let Some(marker) = marker {
+            request = request.query("marker", marker);
+        }
+        if let Some(sort) = options.sort {
+            request = request.query("sort", sort.as_str());
+        }
+        if let Some(direction) = options.direction {
+            request = request.query("direction", direction.as_str());
+        }
+
+        self.send_json(request).await
+    }
+
+    /// フォルダ内のすべての項目を、ページを送りながらリストする。
+    ///
+    /// `options.limit`が`None`の場合は、リクエスト数を減らすために1ページあたり
+    /// [`MAX_ITEMS_LIMIT`]件を取得する。すべての項目をメモリに保持するため、
+    /// 項目数が非常に多いフォルダでは[`BoxClient::list_items_in_folder`]でページごとに処理する。
+    ///
+    /// # Arguments
+    ///
+    /// - `folder_id`: 項目をリストするフォルダのID
+    /// - `options`: 項目数の上限、並び替えなどのオプション
+    ///
+    /// # Errors
+    ///
+    /// `options.limit`が範囲外の場合は、リクエストを送信せずに[`BoxClientError::InvalidArgument`]を返す。
+    /// ルートフォルダで`options.sort`を指定した場合も、リクエストを送信せずに[`BoxClientError::InvalidArgument`]を返す。
+    /// BOXが以前に返したマーカーを再び返した場合、このメソッドは無限ループを避けるため[`BoxClientError::UnexpectedResponse`]を返す。
+    /// いずれかのページの取得に失敗した場合は、取得済みの項目を破棄してエラーを返す。
+    pub async fn list_all_items_in_folder(
+        &self,
+        folder_id: &FolderId,
+        options: &ListItemsOptions,
+    ) -> BoxClientResult<Vec<BoxItem>> {
+        let options = ListItemsOptions {
+            limit: Some(options.limit.unwrap_or(MAX_ITEMS_LIMIT)),
+            ..*options
+        };
+        let (items, pages) = collect_all_pages(async |marker| {
+            self.list_items_in_folder(folder_id, marker, &options).await
+        })
+        .await?;
+
+        tracing::debug!(
+            folder_id = folder_id.as_ref(),
+            pages,
+            items = items.len(),
+            "listed all items in folder"
+        );
+
+        Ok(items)
     }
 
     /// フォルダを作成する。
@@ -509,70 +598,65 @@ impl BoxClient {
         Ok(folder)
     }
 
-    /// フォルダを、フォルダ内のすべての項目とともに別のフォルダへ移動する。
+    /// フォルダを、フォルダ内のすべての項目とともに別のフォルダへコピーする。
     ///
-    /// 項目の多いフォルダの移動には時間がかかる。BOXは移動に600秒以上かかると503を返すが、移動処理はその後も継続する。
-    /// ただし、[`BoxClientTimeout::request_timeout`](crate::BoxClientTimeout::request_timeout)の既定値は30秒であるため、
-    /// 通常はBOXが503を返す前にクライアントがタイムアウトする。タイムアウトした場合も、BOXは移動処理を継続している可能性がある。
+    /// BOXは、項目数が500以下のフォルダを同期的にコピーし、作成したフォルダを返す。
+    /// 項目数が500を超えるフォルダは非同期にコピーし、コピーの完了を待たずにフォルダを返す。
+    /// BOXはコピーの完了を確認するAPIを提供していない。
     ///
-    /// 503を受け取った後、またはタイムアウトの後に再送すると、継続中の移動処理がフォルダをロックしているため409を受け取る。
-    /// また、`options.etag`を指定した場合は、移動によって`ETag`が変わるため412を受け取る。
-    /// その結果、移動の結果を誤って判断するおそれがある。
-    /// したがって、HTTPメソッドがPUTであっても冪等でないリクエストとして送信し、
-    /// 429、エラーコードが`operation_blocked_temporary`の409および接続エラーの後にのみ再試行する。
+    /// コピーの間、BOXはコピー元のフォルダとその子孫、およびコピー先の親フォルダをロックする。
+    /// ロックの間は、これらのフォルダを移動、コピー、削除または復元できない。
+    ///
+    /// HTTPメソッドがPOSTであるため、冪等でないリクエストとして送信する。
+    /// 5xxまたはタイムアウトの後に再送すると、BOXがコピーを完了していた場合は409を受け取り、
+    /// 名前が異なる場合はフォルダを重複してコピーするおそれがあるためである。
+    /// したがって、429、エラーコードが`operation_blocked_temporary`の409および接続エラーの後にのみ再試行する。
     ///
     /// # Arguments
     ///
-    /// - `folder_id`: 移動するフォルダのID
-    /// - `destination`: 移動先。フォルダID、またはルートフォルダへ移動するユーザーのIDで指定する。
-    /// - `options`: `ETag`のオプション
+    /// - `folder_id`: コピーするフォルダのID
+    /// - `parent_id`: コピー先の親フォルダのID。ルートフォルダへコピーする場合は[`FolderId::root`]を指定する。
+    /// - `options`: コピーしたフォルダの名前のオプション
     ///
     /// # Errors
     ///
-    /// `folder_id`にルートフォルダを指定した場合、または`destination`のユーザーIDが空文字列の場合は、
-    /// リクエストを送信せずに[`BoxClientError::InvalidArgument`]を返す。
-    /// `options.etag`に使用できない文字が含まれる場合は、リクエストを送信せずに
-    /// [`BoxClientError::InvalidHeaderValue`]を返す。
+    /// `folder_id`にルートフォルダを指定した場合は、リクエストを送信せずに[`BoxClientError::InvalidArgument`]を返す。
+    /// BOXはルートフォルダのコピーに500を返すため、クライアントで検出する。
+    /// `options.name`をBOXが拒否する場合は、リクエストを送信せずに[`BoxClientError::InvalidRequestBody`]を返す。
     /// BOXがエラーレスポンスを返した場合は、[`BoxClientError::Api`]を返す。主なステータスは次のとおり。
     ///
-    /// - 400: パラメーターが不正である、またはフォルダのロックが移動を禁止している。
-    /// - 403: フォルダまたは移動先の親フォルダを操作する権限がない、またはフォルダのロックが移動を禁止している。
-    /// - 404: フォルダまたは移動先の親フォルダが存在しない、またはアクセスする権限がない。
-    /// - 409: 同じ名前の項目が移動先の親フォルダに存在する（`item_name_in_use`）。
-    ///   または、移動、コピーなど、他の操作がフォルダをロックしている（`operation_blocked_temporary`）。
-    ///   後者の場合、クライアントは再試行設定に従って再試行し、再試行回数の上限に達してもロックが解除されない場合に
-    ///   このエラーを返す。
-    /// - 412: `options.etag`がフォルダの現在の`ETag`と一致しない。
-    /// - 503: 移動に600秒以上かかっている。移動処理は継続している。
+    /// - 400: パラメーターが不足している、または不正である。
+    /// - 403: フォルダをコピーする権限がない、または情報バリアがコピーを禁止している。
+    /// - 404: コピー元のフォルダまたはコピー先の親フォルダが存在しない、またはアクセスする権限がない。
+    /// - 409: 同じ名前の項目がコピー先の親フォルダに存在する（`item_name_in_use`）、
+    ///   またはコピー先の親フォルダがロックされている。
     ///
     /// 再試行できないエラーが発生した場合、または再試行回数の上限に達した場合はエラーを返す。
-    /// タイムアウトした場合は、`is_timeout()`が`true`を返す[`BoxClientError::Http`]を返す。
-    ///
-    /// 5xxまたはタイムアウトでエラーを返した場合は、BOXがフォルダを移動したか、移動処理を継続している可能性がある。
-    /// したがって、[`BoxClient::folder_information`]でフォルダの親フォルダを確認する。
-    pub async fn move_folder(
+    /// 5xxまたはタイムアウトでエラーを返した場合は、BOXがフォルダをコピーした可能性がある。
+    /// したがって、[`BoxClient::list_items_in_folder`]でコピー先の親フォルダを確認する。
+    pub async fn copy_folder(
         &self,
         folder_id: &FolderId,
-        destination: &MoveDestination,
-        options: &UpdateFolderOptions<'_>,
+        parent_id: &FolderId,
+        options: &CopyFolderOptions<'_>,
     ) -> BoxClientResult<Folder> {
         if folder_id.is_root() {
             return Err(BoxClientError::InvalidArgument(
-                "the root folder cannot be moved",
+                "the root folder cannot be copied",
             ));
         }
 
-        let body = MoveBody::new(destination)?;
-        let mut request = ApiRequest::put(["folders", folder_id.as_ref()])
-            .idempotency(Idempotency::NonIdempotent)
-            .json(&body)?;
-        if let Some(etag) = options.etag {
-            request = request.header(IF_MATCH, etag)?;
-        }
+        let body = CopyFolderBody::new(parent_id, options.name)?;
+        let request = ApiRequest::post(["folders", folder_id.as_ref(), "copy"]).json(&body)?;
 
-        let folder = self.send_json(request).await?;
+        let folder: Folder = self.send_json(request).await?;
 
-        tracing::debug!(folder_id = folder_id.as_ref(), ?destination, "moved folder");
+        tracing::debug!(
+            folder_id = folder_id.as_ref(),
+            parent_id = parent_id.as_ref(),
+            copied_folder_id = folder.id.as_ref(),
+            "copied folder"
+        );
 
         Ok(folder)
     }
@@ -705,65 +789,70 @@ impl BoxClient {
         Ok(folder)
     }
 
-    /// フォルダを、フォルダ内のすべての項目とともに別のフォルダへコピーする。
+    /// フォルダを、フォルダ内のすべての項目とともに別のフォルダへ移動する。
     ///
-    /// BOXは、項目数が500以下のフォルダを同期的にコピーし、作成したフォルダを返す。
-    /// 項目数が500を超えるフォルダは非同期にコピーし、コピーの完了を待たずにフォルダを返す。
-    /// BOXはコピーの完了を確認するAPIを提供していない。
+    /// 項目の多いフォルダの移動には時間がかかる。BOXは移動に600秒以上かかると503を返すが、移動処理はその後も継続する。
+    /// ただし、[`BoxClientTimeout::request_timeout`](crate::BoxClientTimeout::request_timeout)の既定値は30秒であるため、
+    /// 通常はBOXが503を返す前にクライアントがタイムアウトする。タイムアウトした場合も、BOXは移動処理を継続している可能性がある。
     ///
-    /// コピーの間、BOXはコピー元のフォルダとその子孫、およびコピー先の親フォルダをロックする。
-    /// ロックの間は、これらのフォルダを移動、コピー、削除または復元できない。
-    ///
-    /// HTTPメソッドがPOSTであるため、冪等でないリクエストとして送信する。
-    /// 5xxまたはタイムアウトの後に再送すると、BOXがコピーを完了していた場合は409を受け取り、
-    /// 名前が異なる場合はフォルダを重複してコピーするおそれがあるためである。
-    /// したがって、429、エラーコードが`operation_blocked_temporary`の409および接続エラーの後にのみ再試行する。
+    /// 503を受け取った後、またはタイムアウトの後に再送すると、継続中の移動処理がフォルダをロックしているため409を受け取る。
+    /// また、`options.etag`を指定した場合は、移動によって`ETag`が変わるため412を受け取る。
+    /// その結果、移動の結果を誤って判断するおそれがある。
+    /// したがって、HTTPメソッドがPUTであっても冪等でないリクエストとして送信し、
+    /// 429、エラーコードが`operation_blocked_temporary`の409および接続エラーの後にのみ再試行する。
     ///
     /// # Arguments
     ///
-    /// - `folder_id`: コピーするフォルダのID
-    /// - `parent_id`: コピー先の親フォルダのID。ルートフォルダへコピーする場合は[`FolderId::root`]を指定する。
-    /// - `options`: コピーしたフォルダの名前のオプション
+    /// - `folder_id`: 移動するフォルダのID
+    /// - `destination`: 移動先。フォルダID、またはルートフォルダへ移動するユーザーのIDで指定する。
+    /// - `options`: `ETag`のオプション
     ///
     /// # Errors
     ///
-    /// `folder_id`にルートフォルダを指定した場合は、リクエストを送信せずに[`BoxClientError::InvalidArgument`]を返す。
-    /// BOXはルートフォルダのコピーに500を返すため、クライアントで検出する。
-    /// `options.name`をBOXが拒否する場合は、リクエストを送信せずに[`BoxClientError::InvalidRequestBody`]を返す。
+    /// `folder_id`にルートフォルダを指定した場合、または`destination`のユーザーIDが空文字列の場合は、
+    /// リクエストを送信せずに[`BoxClientError::InvalidArgument`]を返す。
+    /// `options.etag`に使用できない文字が含まれる場合は、リクエストを送信せずに
+    /// [`BoxClientError::InvalidHeaderValue`]を返す。
     /// BOXがエラーレスポンスを返した場合は、[`BoxClientError::Api`]を返す。主なステータスは次のとおり。
     ///
-    /// - 400: パラメーターが不足している、または不正である。
-    /// - 403: フォルダをコピーする権限がない、または情報バリアがコピーを禁止している。
-    /// - 404: コピー元のフォルダまたはコピー先の親フォルダが存在しない、またはアクセスする権限がない。
-    /// - 409: 同じ名前の項目がコピー先の親フォルダに存在する（`item_name_in_use`）、
-    ///   またはコピー先の親フォルダがロックされている。
+    /// - 400: パラメーターが不正である、またはフォルダのロックが移動を禁止している。
+    /// - 403: フォルダまたは移動先の親フォルダを操作する権限がない、またはフォルダのロックが移動を禁止している。
+    /// - 404: フォルダまたは移動先の親フォルダが存在しない、またはアクセスする権限がない。
+    /// - 409: 同じ名前の項目が移動先の親フォルダに存在する（`item_name_in_use`）。
+    ///   または、移動、コピーなど、他の操作がフォルダをロックしている（`operation_blocked_temporary`）。
+    ///   後者の場合、クライアントは再試行設定に従って再試行し、再試行回数の上限に達してもロックが解除されない場合に
+    ///   このエラーを返す。
+    /// - 412: `options.etag`がフォルダの現在の`ETag`と一致しない。
+    /// - 503: 移動に600秒以上かかっている。移動処理は継続している。
     ///
     /// 再試行できないエラーが発生した場合、または再試行回数の上限に達した場合はエラーを返す。
-    /// 5xxまたはタイムアウトでエラーを返した場合は、BOXがフォルダをコピーした可能性がある。
-    /// したがって、[`BoxClient::list_items_in_folder`]でコピー先の親フォルダを確認する。
-    pub async fn copy_folder(
+    /// タイムアウトした場合は、`is_timeout()`が`true`を返す[`BoxClientError::Http`]を返す。
+    ///
+    /// 5xxまたはタイムアウトでエラーを返した場合は、BOXがフォルダを移動したか、移動処理を継続している可能性がある。
+    /// したがって、[`BoxClient::folder_information`]でフォルダの親フォルダを確認する。
+    pub async fn move_folder(
         &self,
         folder_id: &FolderId,
-        parent_id: &FolderId,
-        options: &CopyFolderOptions<'_>,
+        destination: &MoveDestination,
+        options: &UpdateFolderOptions<'_>,
     ) -> BoxClientResult<Folder> {
         if folder_id.is_root() {
             return Err(BoxClientError::InvalidArgument(
-                "the root folder cannot be copied",
+                "the root folder cannot be moved",
             ));
         }
 
-        let body = CopyFolderBody::new(parent_id, options.name)?;
-        let request = ApiRequest::post(["folders", folder_id.as_ref(), "copy"]).json(&body)?;
+        let body = MoveBody::new(destination)?;
+        let mut request = ApiRequest::put(["folders", folder_id.as_ref()])
+            .idempotency(Idempotency::NonIdempotent)
+            .json(&body)?;
+        if let Some(etag) = options.etag {
+            request = request.header(IF_MATCH, etag)?;
+        }
 
-        let folder: Folder = self.send_json(request).await?;
+        let folder = self.send_json(request).await?;
 
-        tracing::debug!(
-            folder_id = folder_id.as_ref(),
-            parent_id = parent_id.as_ref(),
-            copied_folder_id = folder.id.as_ref(),
-            "copied folder"
-        );
+        tracing::debug!(folder_id = folder_id.as_ref(), ?destination, "moved folder");
 
         Ok(folder)
     }
@@ -840,95 +929,6 @@ impl BoxClient {
         );
 
         Ok(())
-    }
-
-    /// フォルダ内の項目を1ページ分リストする。
-    ///
-    /// 1回の呼び出しで返す項目は最大で`limit`件であるため、フォルダに後続の項目が残っている
-    /// 場合がある。後続の項目がある場合は、戻り値の[`ItemsPage::next_marker`]が`Some`になる。
-    /// そのマーカーを`marker`に指定して再度呼び出すと、次のページを取得できる。
-    /// すべての項目が必要な場合は、[`BoxClient::list_all_items_in_folder`]を使用する。
-    ///
-    /// # Arguments
-    ///
-    /// - `folder_id`: 項目をリストするフォルダのID
-    /// - `marker`: 前のページの[`ItemsPage::next_marker`]。最初のページを取得する場合は`None`
-    /// - `options`: 項目数の上限、並び替えなどのオプション
-    ///
-    /// # Errors
-    ///
-    /// `options.limit`が範囲外の場合は、リクエストを送信せずに[`BoxClientError::InvalidArgument`]を返す。
-    /// ルートフォルダで`options.sort`を指定した場合も、リクエストを送信せずに[`BoxClientError::InvalidArgument`]を返す。
-    /// 再試行できないエラーが発生した場合、または再試行回数の上限に達した場合はエラーを返す。
-    pub async fn list_items_in_folder(
-        &self,
-        folder_id: &FolderId,
-        marker: Option<&str>,
-        options: &ListItemsOptions,
-    ) -> BoxClientResult<ItemsPage> {
-        if folder_id.is_root() && options.sort.is_some() {
-            return Err(BoxClientError::InvalidArgument(
-                "sort is not supported for marker-based pagination in the root folder",
-            ));
-        }
-
-        let mut request =
-            ApiRequest::get(["folders", folder_id.as_ref(), "items"]).query("usemarker", "true");
-        if let Some(limit) = options.limit {
-            request = request.query("limit", validate_limit(limit)?.to_string());
-        }
-        if let Some(marker) = marker {
-            request = request.query("marker", marker);
-        }
-        if let Some(sort) = options.sort {
-            request = request.query("sort", sort.as_str());
-        }
-        if let Some(direction) = options.direction {
-            request = request.query("direction", direction.as_str());
-        }
-
-        self.send_json(request).await
-    }
-
-    /// フォルダ内のすべての項目を、ページを送りながらリストする。
-    ///
-    /// `options.limit`が`None`の場合は、リクエスト数を減らすために1ページあたり
-    /// [`MAX_ITEMS_LIMIT`]件を取得する。すべての項目をメモリに保持するため、
-    /// 項目数が非常に多いフォルダでは[`BoxClient::list_items_in_folder`]でページごとに処理する。
-    ///
-    /// # Arguments
-    ///
-    /// - `folder_id`: 項目をリストするフォルダのID
-    /// - `options`: 項目数の上限、並び替えなどのオプション
-    ///
-    /// # Errors
-    ///
-    /// `options.limit`が範囲外の場合は、リクエストを送信せずに[`BoxClientError::InvalidArgument`]を返す。
-    /// ルートフォルダで`options.sort`を指定した場合も、リクエストを送信せずに[`BoxClientError::InvalidArgument`]を返す。
-    /// BOXが以前に返したマーカーを再び返した場合、このメソッドは無限ループを避けるため[`BoxClientError::UnexpectedResponse`]を返す。
-    /// いずれかのページの取得に失敗した場合は、取得済みの項目を破棄してエラーを返す。
-    pub async fn list_all_items_in_folder(
-        &self,
-        folder_id: &FolderId,
-        options: &ListItemsOptions,
-    ) -> BoxClientResult<Vec<BoxItem>> {
-        let options = ListItemsOptions {
-            limit: Some(options.limit.unwrap_or(MAX_ITEMS_LIMIT)),
-            ..*options
-        };
-        let (items, pages) = collect_all_pages(async |marker| {
-            self.list_items_in_folder(folder_id, marker, &options).await
-        })
-        .await?;
-
-        tracing::debug!(
-            folder_id = folder_id.as_ref(),
-            pages,
-            items = items.len(),
-            "listed all items in folder"
-        );
-
-        Ok(items)
     }
 }
 
@@ -1072,6 +1072,183 @@ mod test_folder {
 }
 
 #[cfg(test)]
+mod test_items_page {
+    use serde_json::json;
+
+    use crate::{
+        FileItem, FolderItem, WebLinkItem,
+        api::types::{FileId, FolderId, WebLinkId},
+    };
+
+    use super::*;
+
+    /// type属性に従って項目をデシリアライズし、知らない種類の項目を受け入れることを確認
+    #[test]
+    fn test_deserialize() -> anyhow::Result<()> {
+        let page: ItemsPage = serde_json::from_value(json!({
+            "entries": [
+                {"type": "file", "id": "1", "name": "a.txt", "etag": "0"},
+                {"type": "folder", "id": "2", "name": "docs", "etag": null},
+                {"type": "web_link", "id": "3", "name": "link", "etag": "1"},
+                {"type": "hubs", "id": "4", "name": "hub"},
+            ],
+            "limit": 100,
+            "next_marker": "m1",
+        }))?;
+
+        assert_eq!(
+            page,
+            ItemsPage {
+                entries: vec![
+                    BoxItem::File(FileItem {
+                        id: FileId::new("1"),
+                        name: "a.txt".to_owned(),
+                        etag: Some("0".to_owned()),
+                    }),
+                    BoxItem::Folder(FolderItem {
+                        id: FolderId::new("2"),
+                        name: "docs".to_owned(),
+                        etag: None,
+                    }),
+                    BoxItem::WebLink(WebLinkItem {
+                        id: WebLinkId::new("3"),
+                        name: "link".to_owned(),
+                        etag: Some("1".to_owned()),
+                    }),
+                    BoxItem::Unknown,
+                ],
+                limit: 100,
+                next_marker: Some("m1".to_owned()),
+            }
+        );
+
+        Ok(())
+    }
+
+    /// `next_marker`がnullの場合と省略された場合に、後続がないと判定することを確認
+    #[test]
+    fn test_deserialize_without_next_marker() -> anyhow::Result<()> {
+        let null_marker: ItemsPage =
+            serde_json::from_value(json!({"entries": [], "limit": 100, "next_marker": null}))?;
+        let missing_marker: ItemsPage =
+            serde_json::from_value(json!({"entries": [], "limit": 100}))?;
+
+        assert_eq!(null_marker.next_marker, None);
+        assert_eq!(missing_marker.next_marker, None);
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod test_validate_limit {
+    use rstest::rstest;
+
+    use super::*;
+
+    /// 1以上1000以下の項目数の上限だけを受け付けることを確認
+    #[rstest]
+    #[case::zero(0, false)]
+    #[case::min(1, true)]
+    #[case::max(1000, true)]
+    #[case::over_max(1001, false)]
+    fn test_validate_limit(#[case] limit: u32, #[case] valid: bool) {
+        let result = validate_limit(limit);
+
+        if valid {
+            assert!(matches!(result, Ok(l) if l == limit), "result: {result:?}");
+        } else {
+            assert!(
+                matches!(result, Err(BoxClientError::InvalidArgument(_))),
+                "result: {result:?}"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod test_collect_all_pages {
+    use rstest::rstest;
+
+    use super::*;
+
+    /// `next_markers`の順に`next_marker`を返すページを取得し、`fetch_page`に渡されたマーカーを記録する。
+    ///
+    /// 用意したページを使い切った後に呼び出された場合は、無限ループでテストが終わらなくなるのを防ぐため、エラーを返す。
+    async fn collect(
+        next_markers: &[Option<&str>],
+    ) -> (BoxClientResult<(Vec<BoxItem>, u32)>, Vec<Option<String>>) {
+        let mut received_markers = Vec::new();
+        let mut remaining = next_markers.iter();
+        let result = collect_all_pages(async |marker: Option<&str>| {
+            received_markers.push(marker.map(str::to_owned));
+            let Some(next_marker) = remaining.next() else {
+                return Err(BoxClientError::InvalidArgument("no more pages"));
+            };
+            Ok(ItemsPage {
+                entries: vec![BoxItem::Unknown],
+                limit: 1,
+                next_marker: next_marker.map(str::to_owned),
+            })
+        })
+        .await;
+
+        (result, received_markers)
+    }
+
+    /// 終端までマーカーが重複しない場合は、すべてのページの項目とページ数を返し、前のページのマーカーを渡すことを確認
+    #[rstest]
+    #[case::single_page(vec![None], vec![None])]
+    #[case::empty_marker_terminates(vec![Some("")], vec![None])]
+    #[case::three_pages(
+        vec![Some("m1"), Some("m2"), None],
+        vec![None, Some("m1"), Some("m2")]
+    )]
+    #[tokio::test]
+    async fn test_collect_all_pages(
+        #[case] next_markers: Vec<Option<&str>>,
+        #[case] expected_markers: Vec<Option<&str>>,
+    ) -> anyhow::Result<()> {
+        let (result, received_markers) = collect(&next_markers).await;
+
+        let (items, pages) = result?;
+        assert_eq!(items.len(), next_markers.len());
+        assert_eq!(pages as usize, next_markers.len());
+        assert_eq!(
+            received_markers,
+            expected_markers
+                .into_iter()
+                .map(|m| m.map(str::to_owned))
+                .collect::<Vec<_>>()
+        );
+
+        Ok(())
+    }
+
+    /// BOXが以前に返したマーカーを再び返した場合は、そのマーカーでページを取得せずにエラーを返すことを確認
+    #[rstest]
+    // 直前のマーカーと同じマーカーを返す
+    #[case::same_as_previous(vec![Some("m1"), Some("m1")], 2)]
+    // 2つ前のマーカーに戻る
+    #[case::two_page_cycle(vec![Some("m1"), Some("m2"), Some("m1")], 3)]
+    // 最初のマーカーに戻る
+    #[case::back_to_first(vec![Some("m1"), Some("m2"), Some("m3"), Some("m1")], 4)]
+    #[tokio::test]
+    async fn test_collect_all_pages_detects_repeated_marker(
+        #[case] next_markers: Vec<Option<&str>>,
+        #[case] expected_fetches: usize,
+    ) {
+        let (result, received_markers) = collect(&next_markers).await;
+
+        assert!(
+            matches!(result, Err(BoxClientError::UnexpectedResponse(_))),
+            "result: {result:?}"
+        );
+        assert_eq!(received_markers.len(), expected_fetches);
+    }
+}
+
+#[cfg(test)]
 mod test_folder_information {
     use serde_json::json;
     use wiremock::{
@@ -1140,165 +1317,332 @@ mod test_folder_information {
 }
 
 #[cfg(test)]
-mod test_delete_folder {
+mod test_list_items_in_folder {
     use rstest::rstest;
+    use serde_json::json;
     use wiremock::{
         Mock, MockServer, ResponseTemplate,
         matchers::{method, path},
     };
 
     use super::*;
-    use crate::test_support::{create_client, mount_token, request_count, short_retry};
+    use crate::test_support::{create_client, mount_token, short_retry};
 
-    /// フォルダのAPIのパス
-    const FOLDER_PATH: &str = "/2.0/folders/123";
+    /// 項目のAPIのパス
+    const ITEMS_PATH: &str = "/2.0/folders/123/items";
 
-    /// フォルダのAPIへのリクエストのクエリ文字列とIf-Matchヘッダーを返す。
-    async fn delete_requests(server: &MockServer) -> Vec<(String, Option<String>)> {
+    /// 項目のAPIへのリクエストのクエリ文字列を返す。
+    async fn items_queries(server: &MockServer) -> Vec<String> {
         server
             .received_requests()
             .await
             .unwrap_or_default()
             .into_iter()
-            .filter(|r| r.method.as_str() == "DELETE" && r.url.path() == FOLDER_PATH)
-            .map(|r| {
-                let query = r.url.query().unwrap_or_default().to_owned();
-                let if_match = r
-                    .headers
-                    .get("if-match")
-                    .and_then(|v| v.to_str().ok())
-                    .map(str::to_owned);
-                (query, if_match)
-            })
+            .filter(|r| r.url.path() == ITEMS_PATH)
+            .map(|r| r.url.query().unwrap_or_default().to_owned())
             .collect()
     }
 
-    /// オプションに応じて、recursiveクエリパラメーターとIf-Matchヘッダーを送信することを確認
+    /// マーカーとオプションをクエリパラメーターに変換し、ページを返すことを確認
     #[rstest]
-    #[case::default(DeleteFolderOptions::default(), "", None)]
-    #[case::recursive(
-        DeleteFolderOptions { recursive: true, etag: None },
-        "recursive=true",
-        None
-    )]
-    #[case::etag(
-        DeleteFolderOptions { recursive: false, etag: Some("1") },
-        "",
-        Some("1")
-    )]
-    #[case::recursive_and_etag(
-        DeleteFolderOptions { recursive: true, etag: Some("1") },
-        "recursive=true",
-        Some("1")
+    #[case::default(None, ListItemsOptions::default(), "usemarker=true")]
+    #[case::all(
+        Some("m1"),
+        ListItemsOptions {
+            limit: Some(1000),
+            sort: Some(ItemSort::Name),
+            direction: Some(SortDirection::Desc),
+        },
+        "usemarker=true&limit=1000&marker=m1&sort=name&direction=DESC"
     )]
     #[tokio::test]
-    async fn test_delete_folder(
-        #[case] options: DeleteFolderOptions<'static>,
+    async fn test_list_items_in_folder(
+        #[case] marker: Option<&str>,
+        #[case] options: ListItemsOptions,
         #[case] expected_query: &str,
-        #[case] expected_if_match: Option<&str>,
     ) -> anyhow::Result<()> {
         let server = MockServer::start().await;
         mount_token(&server).await;
-        Mock::given(method("DELETE"))
-            .and(path(FOLDER_PATH))
-            .respond_with(ResponseTemplate::new(204))
+        Mock::given(method("GET"))
+            .and(path(ITEMS_PATH))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "entries": [{"type": "file", "id": "1", "name": "a.txt", "etag": "0"}],
+                "limit": 100,
+                "next_marker": "m2",
+            })))
             .mount(&server)
             .await;
         let client = create_client(&server, short_retry(0)?).await?;
 
-        client
-            .delete_folder(&FolderId::new("123"), &options)
+        let page = client
+            .list_items_in_folder(&FolderId::new("123"), marker, &options)
             .await?;
 
-        assert_eq!(
-            delete_requests(&server).await,
-            vec![(
-                expected_query.to_owned(),
-                expected_if_match.map(str::to_owned)
-            )]
-        );
+        assert_eq!(page.entries.len(), 1);
+        assert_eq!(page.next_marker.as_deref(), Some("m2"));
+        assert_eq!(items_queries(&server).await, vec![expected_query]);
 
         Ok(())
     }
 
-    /// ルートフォルダを指定した場合は、リクエストを送信せずにエラーを返すことを確認
+    /// 項目数の上限が範囲外の場合は、リクエストを送信せずにエラーを返すことを確認
+    #[rstest]
+    #[case::zero(0)]
+    #[case::over_max(1001)]
     #[tokio::test]
-    async fn test_delete_folder_rejects_root() -> anyhow::Result<()> {
+    async fn test_list_items_in_folder_invalid_limit(#[case] limit: u32) -> anyhow::Result<()> {
         let server = MockServer::start().await;
         mount_token(&server).await;
         let client = create_client(&server, short_retry(0)?).await?;
-        let requests_before = request_count(&server).await;
+        let options = ListItemsOptions {
+            limit: Some(limit),
+            ..ListItemsOptions::default()
+        };
 
         let result = client
-            .delete_folder(&FolderId::root(), &DeleteFolderOptions::default())
+            .list_items_in_folder(&FolderId::new("123"), None, &options)
             .await;
 
         assert!(
             matches!(result, Err(BoxClientError::InvalidArgument(_))),
             "result: {result:?}"
         );
-        assert_eq!(request_count(&server).await, requests_before);
+        assert_eq!(items_queries(&server).await, Vec::<String>::new());
 
         Ok(())
     }
 
-    /// BOXのエラーレスポンスを、再試行せずにそのまま返すことを確認
-    ///
-    /// 503は削除処理が継続していることを示すため、再試行の上限に余裕があっても再送しない。
-    #[rstest]
-    #[case::not_empty(400)]
-    #[case::not_found(404)]
-    #[case::locked(409)]
-    #[case::etag_mismatch(412)]
-    #[case::internal_server_error(500)]
-    #[case::still_deleting(503)]
+    /// ルートフォルダの項目のAPIのパス
+    const ROOT_ITEMS_PATH: &str = "/2.0/folders/0/items";
+
+    /// ルートフォルダの項目のAPIへのリクエストのクエリ文字列を返す。
+    async fn root_items_queries(server: &MockServer) -> Vec<String> {
+        server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|r| r.url.path() == ROOT_ITEMS_PATH)
+            .map(|r| r.url.query().unwrap_or_default().to_owned())
+            .collect()
+    }
+
+    /// ルートフォルダで並び替えに使用する属性を指定した場合は、リクエストを送信せずにエラーを返すことを確認
     #[tokio::test]
-    async fn test_delete_folder_error_is_not_retried(#[case] status: u16) -> anyhow::Result<()> {
+    async fn test_list_items_in_folder_root_with_sort() -> anyhow::Result<()> {
         let server = MockServer::start().await;
         mount_token(&server).await;
-        Mock::given(method("DELETE"))
-            .and(path(FOLDER_PATH))
-            .respond_with(ResponseTemplate::new(status))
-            .mount(&server)
-            .await;
-        let client = create_client(&server, short_retry(2)?).await?;
+        let client = create_client(&server, short_retry(0)?).await?;
+        let options = ListItemsOptions {
+            sort: Some(ItemSort::Name),
+            ..ListItemsOptions::default()
+        };
 
         let result = client
-            .delete_folder(&FolderId::new("123"), &DeleteFolderOptions::default())
+            .list_items_in_folder(&FolderId::root(), None, &options)
             .await;
 
         assert!(
-            matches!(&result, Err(BoxClientError::Api(e)) if e.status == status),
+            matches!(result, Err(BoxClientError::InvalidArgument(_))),
             "result: {result:?}"
         );
-        assert_eq!(delete_requests(&server).await.len(), 1);
+        assert_eq!(root_items_queries(&server).await, Vec::<String>::new());
 
         Ok(())
     }
 
-    /// 429の場合は、冪等でないリクエストとして送信しても再試行することを確認
+    /// ルートフォルダでも、並び替えに使用する属性を指定しなければ、並び替えの方向とともにリストできることを確認
     #[tokio::test]
-    async fn test_delete_folder_retries_too_many_requests() -> anyhow::Result<()> {
+    async fn test_list_items_in_folder_root_without_sort() -> anyhow::Result<()> {
         let server = MockServer::start().await;
         mount_token(&server).await;
-        Mock::given(method("DELETE"))
-            .and(path(FOLDER_PATH))
-            .respond_with(ResponseTemplate::new(429))
-            .up_to_n_times(1)
+        Mock::given(method("GET"))
+            .and(path(ROOT_ITEMS_PATH))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "entries": [],
+                "limit": 100,
+                "next_marker": null,
+            })))
             .mount(&server)
             .await;
-        Mock::given(method("DELETE"))
-            .and(path(FOLDER_PATH))
-            .respond_with(ResponseTemplate::new(204))
-            .mount(&server)
-            .await;
-        let client = create_client(&server, short_retry(1)?).await?;
+        let client = create_client(&server, short_retry(0)?).await?;
+        let options = ListItemsOptions {
+            direction: Some(SortDirection::Desc),
+            ..ListItemsOptions::default()
+        };
 
-        client
-            .delete_folder(&FolderId::new("123"), &DeleteFolderOptions::default())
+        let page = client
+            .list_items_in_folder(&FolderId::root(), None, &options)
             .await?;
 
-        assert_eq!(delete_requests(&server).await.len(), 2);
+        assert_eq!(page.entries, Vec::<BoxItem>::new());
+        assert_eq!(
+            root_items_queries(&server).await,
+            vec!["usemarker=true&direction=DESC"]
+        );
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod test_list_all_items_in_folder {
+    use rstest::rstest;
+    use serde_json::{Value, json};
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{method, path, query_param, query_param_is_missing},
+    };
+
+    use super::*;
+    use crate::test_support::{create_client, mount_token, short_retry};
+
+    /// 項目のAPIのパス
+    const ITEMS_PATH: &str = "/2.0/folders/123/items";
+
+    /// 指定した名前のファイルだけを含むページのレスポンスを返す。
+    fn page_response(name: &str, next_marker: &Value) -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_json(json!({
+            "entries": [{"type": "file", "id": name, "name": name, "etag": "0"}],
+            "limit": 1000,
+            "next_marker": next_marker,
+        }))
+    }
+
+    /// 項目の名前を返す。
+    fn item_name(item: &BoxItem) -> Option<&str> {
+        match item {
+            BoxItem::File(file) => Some(&file.name),
+            BoxItem::Folder(folder) => Some(&folder.name),
+            BoxItem::WebLink(link) => Some(&link.name),
+            BoxItem::Unknown => None,
+        }
+    }
+
+    /// `next_marker`がnullまたは空文字列になるまでページを送り、すべての項目を返すことを確認
+    #[rstest]
+    #[case::null(Value::Null)]
+    #[case::empty(json!(""))]
+    #[tokio::test]
+    async fn test_list_all_items_in_folder(#[case] last_marker: Value) -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        // 項目数の上限を省略した場合は、上限の1000件ずつ取得する。
+        Mock::given(method("GET"))
+            .and(path(ITEMS_PATH))
+            .and(query_param("limit", "1000"))
+            .and(query_param_is_missing("marker"))
+            .respond_with(page_response("first", &json!("m1")))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(ITEMS_PATH))
+            .and(query_param("limit", "1000"))
+            .and(query_param("marker", "m1"))
+            .respond_with(page_response("second", &last_marker))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = create_client(&server, short_retry(0)?).await?;
+
+        let items = client
+            .list_all_items_in_folder(&FolderId::new("123"), &ListItemsOptions::default())
+            .await?;
+
+        let names: Vec<_> = items.iter().filter_map(item_name).collect();
+        assert_eq!(names, vec!["first", "second"]);
+
+        Ok(())
+    }
+
+    /// BOXが同じマーカーを続けて返す場合は、無限ループせずにエラーを返すことを確認
+    #[tokio::test]
+    async fn test_list_all_items_in_folder_marker_not_advanced() -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        Mock::given(method("GET"))
+            .and(path(ITEMS_PATH))
+            .respond_with(page_response("same", &json!("m1")))
+            .expect(2)
+            .mount(&server)
+            .await;
+        let client = create_client(&server, short_retry(0)?).await?;
+
+        let result = client
+            .list_all_items_in_folder(&FolderId::new("123"), &ListItemsOptions::default())
+            .await;
+
+        assert!(
+            matches!(result, Err(BoxClientError::UnexpectedResponse(_))),
+            "result: {result:?}"
+        );
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod test_create_folder_body {
+    use rstest::rstest;
+
+    use super::*;
+
+    /// BOXが受け付けるフォルダ名で、ボディを作成できることを確認
+    #[rstest]
+    #[case::ascii("folder")]
+    #[case::max_ascii(&"a".repeat(255))]
+    #[case::max_japanese(&"あ".repeat(255))]
+    fn test_valid_name(#[case] name: &str) -> anyhow::Result<()> {
+        let body = CreateFolderBody::new(name, &FolderId::new("0"))?;
+
+        assert_eq!(body.name, name);
+
+        Ok(())
+    }
+
+    /// BOXが拒否するフォルダ名を、検証エラーとして返すことを確認
+    ///
+    /// 使用できない文字の詳細な検証は、`validate_item_name`のテストで確認する。
+    /// ここでは、長さの検証と、`validate_item_name`をフィールドに適用していることを確認する。
+    #[rstest]
+    #[case::empty("")]
+    #[case::too_long(&"a".repeat(256))]
+    #[case::too_long_japanese(&"あ".repeat(256))]
+    #[case::invalid_char("a/b")]
+    fn test_invalid_name(#[case] name: &str) {
+        let result = CreateFolderBody::new(name, &FolderId::new("0"));
+
+        assert!(
+            matches!(result, Err(BoxClientError::InvalidRequestBody(_))),
+            "result: {result:?}"
+        );
+    }
+
+    /// 検証エラーのメッセージに、検証に失敗したフィールドを含むことを確認
+    #[test]
+    fn test_error_message_contains_field() -> anyhow::Result<()> {
+        let Err(BoxClientError::InvalidRequestBody(error)) =
+            CreateFolderBody::new("a/b", &FolderId::new("0"))
+        else {
+            anyhow::bail!("validation must fail");
+        };
+
+        let message = error.to_string();
+        assert!(message.contains("name"), "message: {message}");
+
+        Ok(())
+    }
+
+    /// BOXが求める形式のJSONにシリアライズすることを確認
+    #[test]
+    fn test_serialize() -> anyhow::Result<()> {
+        let body = CreateFolderBody::new("folder", &FolderId::new("123"))?;
+
+        assert_eq!(
+            serde_json::to_value(&body)?,
+            serde_json::json!({"name": "folder", "parent": {"id": "123"}})
+        );
 
         Ok(())
     }
@@ -1412,7 +1756,7 @@ mod test_create_folder {
 }
 
 #[cfg(test)]
-mod test_move_folder {
+mod test_copy_folder {
     use rstest::rstest;
     use serde_json::json;
     use wiremock::{
@@ -1421,48 +1765,50 @@ mod test_move_folder {
     };
 
     use super::*;
-    use crate::UserId;
     use crate::test_support::{create_client, mount_token, request_count, short_retry};
 
-    /// フォルダのAPIのパス
-    const FOLDER_PATH: &str = "/2.0/folders/123";
+    /// フォルダのコピーのAPIのパス
+    const COPY_PATH: &str = "/2.0/folders/123/copy";
 
-    /// フォルダのAPIへのPUTリクエストのIf-Matchヘッダーを返す。
-    async fn move_requests(server: &MockServer) -> Vec<Option<String>> {
+    /// フォルダのコピーのAPIへのPOSTリクエストの数を返す。
+    async fn copy_request_count(server: &MockServer) -> usize {
         server
             .received_requests()
             .await
             .unwrap_or_default()
-            .into_iter()
-            .filter(|r| r.method.as_str() == "PUT" && r.url.path() == FOLDER_PATH)
-            .map(|r| {
-                r.headers
-                    .get("if-match")
-                    .and_then(|v| v.to_str().ok())
-                    .map(str::to_owned)
-            })
-            .collect()
+            .iter()
+            .filter(|r| r.method.as_str() == "POST" && r.url.path() == COPY_PATH)
+            .count()
     }
 
-    /// 移動先の親フォルダだけをボディで送信し、オプションに応じてIf-Matchヘッダーを送信することを確認
+    /// コピー先の親フォルダと、指定した場合だけ名前を送信し、コピーしたフォルダをデシリアライズすることを確認
     #[rstest]
-    #[case::default(UpdateFolderOptions::default(), None)]
-    #[case::etag(UpdateFolderOptions { etag: Some("1") }, Some("1"))]
+    #[case::without_name(
+        CopyFolderOptions::default(),
+        json!({"parent": {"id": "456"}}),
+        "Contracts"
+    )]
+    #[case::with_name(
+        CopyFolderOptions::default().with_name("Contracts (copy)"),
+        json!({"parent": {"id": "456"}, "name": "Contracts (copy)"}),
+        "Contracts (copy)"
+    )]
     #[tokio::test]
-    async fn test_move_folder(
-        #[case] options: UpdateFolderOptions<'static>,
-        #[case] expected_if_match: Option<&str>,
+    async fn test_copy_folder(
+        #[case] options: CopyFolderOptions<'static>,
+        #[case] expected_body: serde_json::Value,
+        #[case] copied_name: &str,
     ) -> anyhow::Result<()> {
         let server = MockServer::start().await;
         mount_token(&server).await;
-        Mock::given(method("PUT"))
-            .and(path(FOLDER_PATH))
-            .and(body_json(json!({"parent": {"id": "456"}})))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+        Mock::given(method("POST"))
+            .and(path(COPY_PATH))
+            .and(body_json(expected_body))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({
                 "type": "folder",
-                "id": "123",
-                "etag": "2",
-                "name": "Contracts",
+                "id": "789",
+                "etag": "0",
+                "name": copied_name,
                 "parent": {"type": "folder", "id": "456", "etag": "0", "name": "Archive"},
             })))
             .expect(1)
@@ -1471,78 +1817,46 @@ mod test_move_folder {
         let client = create_client(&server, short_retry(0)?).await?;
 
         let folder = client
-            .move_folder(
-                &FolderId::new("123"),
-                &MoveDestination::Folder(FolderId::new("456")),
-                &options,
-            )
+            .copy_folder(&FolderId::new("123"), &FolderId::new("456"), &options)
             .await?;
 
+        assert_eq!(folder.id, FolderId::new("789"));
+        assert_eq!(folder.name, copied_name);
         assert_eq!(folder.parent.map(|p| p.id), Some(FolderId::new("456")));
-        assert_eq!(
-            move_requests(&server).await,
-            vec![expected_if_match.map(str::to_owned)]
-        );
 
         Ok(())
     }
 
-    /// ユーザーを指定した場合は、ルートフォルダのIDとユーザーIDを送信することを確認
-    #[tokio::test]
-    async fn test_move_folder_to_user_root() -> anyhow::Result<()> {
-        let server = MockServer::start().await;
-        mount_token(&server).await;
-        Mock::given(method("PUT"))
-            .and(path(FOLDER_PATH))
-            .and(body_json(json!({"parent": {"id": "0", "user_id": "789"}})))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "type": "folder",
-                "id": "123",
-                "etag": "2",
-                "name": "Contracts",
-                "parent": {"type": "folder", "id": "0", "etag": null, "name": "All Files"},
-            })))
-            .expect(1)
-            .mount(&server)
-            .await;
-        let client = create_client(&server, short_retry(0)?).await?;
-
-        let folder = client
-            .move_folder(
-                &FolderId::new("123"),
-                &MoveDestination::User(UserId::new("789")),
-                &UpdateFolderOptions::default(),
-            )
-            .await?;
-
-        assert_eq!(folder.parent.map(|p| p.id), Some(FolderId::root()));
-
-        Ok(())
-    }
-
-    /// ルートフォルダを移動しようとした場合、またはユーザーIDが空文字列の場合は、
-    /// リクエストを送信せずにエラーを返すことを確認
+    /// ルートフォルダ、またはBOXが拒否する名前を指定した場合は、リクエストを送信せずにエラーを返すことを確認
+    ///
+    /// 使用できない文字の詳細な検証は、`validate_item_name`のテストで確認する。
+    /// ここでは、名前を指定した場合に長さと`validate_item_name`の検証を適用していることを確認する。
     #[rstest]
-    #[case::root_folder(FolderId::root(), MoveDestination::Folder(FolderId::new("456")))]
-    #[case::empty_user_id(FolderId::new("123"), MoveDestination::User(UserId::new("")))]
+    #[case::root(FolderId::root(), None, "InvalidArgument")]
+    #[case::empty_name(FolderId::new("123"), Some(""), "InvalidRequestBody")]
+    #[case::too_long_name(FolderId::new("123"), Some(&*"あ".repeat(256)), "InvalidRequestBody")]
+    #[case::invalid_char(FolderId::new("123"), Some("a/b"), "InvalidRequestBody")]
     #[tokio::test]
-    async fn test_move_folder_rejects_without_request(
+    async fn test_copy_folder_rejects_without_request(
         #[case] folder_id: FolderId,
-        #[case] destination: MoveDestination,
+        #[case] name: Option<&str>,
+        #[case] expected: &str,
     ) -> anyhow::Result<()> {
         let server = MockServer::start().await;
         mount_token(&server).await;
         let client = create_client(&server, short_retry(0)?).await?;
         let requests_before = request_count(&server).await;
+        let options = CopyFolderOptions { name };
 
         let result = client
-            .move_folder(&folder_id, &destination, &UpdateFolderOptions::default())
+            .copy_folder(&folder_id, &FolderId::new("456"), &options)
             .await;
 
-        assert!(
-            matches!(result, Err(BoxClientError::InvalidArgument(_))),
-            "result: {result:?}"
-        );
+        let matched = match expected {
+            "InvalidArgument" => matches!(result, Err(BoxClientError::InvalidArgument(_))),
+            _ => matches!(result, Err(BoxClientError::InvalidRequestBody(_))),
+        };
+        assert!(matched, "result: {result:?}");
         assert_eq!(request_count(&server).await, requests_before);
 
         Ok(())
@@ -1550,28 +1864,27 @@ mod test_move_folder {
 
     /// BOXのエラーレスポンスを、再試行せずにそのまま返すことを確認
     ///
-    /// 503は移動処理が継続していることを示すため、再試行の上限に余裕があっても再送しない。
+    /// コピーは冪等でないため、5xxの後に再送すると、フォルダを重複してコピーするおそれがある。
     #[rstest]
     #[case::name_in_use(409)]
-    #[case::etag_mismatch(412)]
     #[case::internal_server_error(500)]
-    #[case::still_moving(503)]
+    #[case::service_unavailable(503)]
     #[tokio::test]
-    async fn test_move_folder_error_is_not_retried(#[case] status: u16) -> anyhow::Result<()> {
+    async fn test_copy_folder_error_is_not_retried(#[case] status: u16) -> anyhow::Result<()> {
         let server = MockServer::start().await;
         mount_token(&server).await;
-        Mock::given(method("PUT"))
-            .and(path(FOLDER_PATH))
+        Mock::given(method("POST"))
+            .and(path(COPY_PATH))
             .respond_with(ResponseTemplate::new(status))
             .mount(&server)
             .await;
         let client = create_client(&server, short_retry(2)?).await?;
 
         let result = client
-            .move_folder(
+            .copy_folder(
                 &FolderId::new("123"),
-                &MoveDestination::Folder(FolderId::new("456")),
-                &UpdateFolderOptions::default(),
+                &FolderId::new("456"),
+                &CopyFolderOptions::default(),
             )
             .await;
 
@@ -1579,7 +1892,7 @@ mod test_move_folder {
             matches!(&result, Err(BoxClientError::Api(e)) if e.status == status),
             "result: {result:?}"
         );
-        assert_eq!(move_requests(&server).await.len(), 1);
+        assert_eq!(copy_request_count(&server).await, 1);
 
         Ok(())
     }
@@ -1894,7 +2207,7 @@ mod test_set_folder_description {
 }
 
 #[cfg(test)]
-mod test_copy_folder {
+mod test_move_folder {
     use rstest::rstest;
     use serde_json::json;
     use wiremock::{
@@ -1903,50 +2216,48 @@ mod test_copy_folder {
     };
 
     use super::*;
+    use crate::UserId;
     use crate::test_support::{create_client, mount_token, request_count, short_retry};
 
-    /// フォルダのコピーのAPIのパス
-    const COPY_PATH: &str = "/2.0/folders/123/copy";
+    /// フォルダのAPIのパス
+    const FOLDER_PATH: &str = "/2.0/folders/123";
 
-    /// フォルダのコピーのAPIへのPOSTリクエストの数を返す。
-    async fn copy_request_count(server: &MockServer) -> usize {
+    /// フォルダのAPIへのPUTリクエストのIf-Matchヘッダーを返す。
+    async fn move_requests(server: &MockServer) -> Vec<Option<String>> {
         server
             .received_requests()
             .await
             .unwrap_or_default()
-            .iter()
-            .filter(|r| r.method.as_str() == "POST" && r.url.path() == COPY_PATH)
-            .count()
+            .into_iter()
+            .filter(|r| r.method.as_str() == "PUT" && r.url.path() == FOLDER_PATH)
+            .map(|r| {
+                r.headers
+                    .get("if-match")
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_owned)
+            })
+            .collect()
     }
 
-    /// コピー先の親フォルダと、指定した場合だけ名前を送信し、コピーしたフォルダをデシリアライズすることを確認
+    /// 移動先の親フォルダだけをボディで送信し、オプションに応じてIf-Matchヘッダーを送信することを確認
     #[rstest]
-    #[case::without_name(
-        CopyFolderOptions::default(),
-        json!({"parent": {"id": "456"}}),
-        "Contracts"
-    )]
-    #[case::with_name(
-        CopyFolderOptions::default().with_name("Contracts (copy)"),
-        json!({"parent": {"id": "456"}, "name": "Contracts (copy)"}),
-        "Contracts (copy)"
-    )]
+    #[case::default(UpdateFolderOptions::default(), None)]
+    #[case::etag(UpdateFolderOptions { etag: Some("1") }, Some("1"))]
     #[tokio::test]
-    async fn test_copy_folder(
-        #[case] options: CopyFolderOptions<'static>,
-        #[case] expected_body: serde_json::Value,
-        #[case] copied_name: &str,
+    async fn test_move_folder(
+        #[case] options: UpdateFolderOptions<'static>,
+        #[case] expected_if_match: Option<&str>,
     ) -> anyhow::Result<()> {
         let server = MockServer::start().await;
         mount_token(&server).await;
-        Mock::given(method("POST"))
-            .and(path(COPY_PATH))
-            .and(body_json(expected_body))
-            .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+        Mock::given(method("PUT"))
+            .and(path(FOLDER_PATH))
+            .and(body_json(json!({"parent": {"id": "456"}})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "type": "folder",
-                "id": "789",
-                "etag": "0",
-                "name": copied_name,
+                "id": "123",
+                "etag": "2",
+                "name": "Contracts",
                 "parent": {"type": "folder", "id": "456", "etag": "0", "name": "Archive"},
             })))
             .expect(1)
@@ -1955,46 +2266,78 @@ mod test_copy_folder {
         let client = create_client(&server, short_retry(0)?).await?;
 
         let folder = client
-            .copy_folder(&FolderId::new("123"), &FolderId::new("456"), &options)
+            .move_folder(
+                &FolderId::new("123"),
+                &MoveDestination::Folder(FolderId::new("456")),
+                &options,
+            )
             .await?;
 
-        assert_eq!(folder.id, FolderId::new("789"));
-        assert_eq!(folder.name, copied_name);
         assert_eq!(folder.parent.map(|p| p.id), Some(FolderId::new("456")));
+        assert_eq!(
+            move_requests(&server).await,
+            vec![expected_if_match.map(str::to_owned)]
+        );
 
         Ok(())
     }
 
-    /// ルートフォルダ、またはBOXが拒否する名前を指定した場合は、リクエストを送信せずにエラーを返すことを確認
-    ///
-    /// 使用できない文字の詳細な検証は、`validate_item_name`のテストで確認する。
-    /// ここでは、名前を指定した場合に長さと`validate_item_name`の検証を適用していることを確認する。
-    #[rstest]
-    #[case::root(FolderId::root(), None, "InvalidArgument")]
-    #[case::empty_name(FolderId::new("123"), Some(""), "InvalidRequestBody")]
-    #[case::too_long_name(FolderId::new("123"), Some(&*"あ".repeat(256)), "InvalidRequestBody")]
-    #[case::invalid_char(FolderId::new("123"), Some("a/b"), "InvalidRequestBody")]
+    /// ユーザーを指定した場合は、ルートフォルダのIDとユーザーIDを送信することを確認
     #[tokio::test]
-    async fn test_copy_folder_rejects_without_request(
+    async fn test_move_folder_to_user_root() -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        Mock::given(method("PUT"))
+            .and(path(FOLDER_PATH))
+            .and(body_json(json!({"parent": {"id": "0", "user_id": "789"}})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "type": "folder",
+                "id": "123",
+                "etag": "2",
+                "name": "Contracts",
+                "parent": {"type": "folder", "id": "0", "etag": null, "name": "All Files"},
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = create_client(&server, short_retry(0)?).await?;
+
+        let folder = client
+            .move_folder(
+                &FolderId::new("123"),
+                &MoveDestination::User(UserId::new("789")),
+                &UpdateFolderOptions::default(),
+            )
+            .await?;
+
+        assert_eq!(folder.parent.map(|p| p.id), Some(FolderId::root()));
+
+        Ok(())
+    }
+
+    /// ルートフォルダを移動しようとした場合、またはユーザーIDが空文字列の場合は、
+    /// リクエストを送信せずにエラーを返すことを確認
+    #[rstest]
+    #[case::root_folder(FolderId::root(), MoveDestination::Folder(FolderId::new("456")))]
+    #[case::empty_user_id(FolderId::new("123"), MoveDestination::User(UserId::new("")))]
+    #[tokio::test]
+    async fn test_move_folder_rejects_without_request(
         #[case] folder_id: FolderId,
-        #[case] name: Option<&str>,
-        #[case] expected: &str,
+        #[case] destination: MoveDestination,
     ) -> anyhow::Result<()> {
         let server = MockServer::start().await;
         mount_token(&server).await;
         let client = create_client(&server, short_retry(0)?).await?;
         let requests_before = request_count(&server).await;
-        let options = CopyFolderOptions { name };
 
         let result = client
-            .copy_folder(&folder_id, &FolderId::new("456"), &options)
+            .move_folder(&folder_id, &destination, &UpdateFolderOptions::default())
             .await;
 
-        let matched = match expected {
-            "InvalidArgument" => matches!(result, Err(BoxClientError::InvalidArgument(_))),
-            _ => matches!(result, Err(BoxClientError::InvalidRequestBody(_))),
-        };
-        assert!(matched, "result: {result:?}");
+        assert!(
+            matches!(result, Err(BoxClientError::InvalidArgument(_))),
+            "result: {result:?}"
+        );
         assert_eq!(request_count(&server).await, requests_before);
 
         Ok(())
@@ -2002,27 +2345,28 @@ mod test_copy_folder {
 
     /// BOXのエラーレスポンスを、再試行せずにそのまま返すことを確認
     ///
-    /// コピーは冪等でないため、5xxの後に再送すると、フォルダを重複してコピーするおそれがある。
+    /// 503は移動処理が継続していることを示すため、再試行の上限に余裕があっても再送しない。
     #[rstest]
     #[case::name_in_use(409)]
+    #[case::etag_mismatch(412)]
     #[case::internal_server_error(500)]
-    #[case::service_unavailable(503)]
+    #[case::still_moving(503)]
     #[tokio::test]
-    async fn test_copy_folder_error_is_not_retried(#[case] status: u16) -> anyhow::Result<()> {
+    async fn test_move_folder_error_is_not_retried(#[case] status: u16) -> anyhow::Result<()> {
         let server = MockServer::start().await;
         mount_token(&server).await;
-        Mock::given(method("POST"))
-            .and(path(COPY_PATH))
+        Mock::given(method("PUT"))
+            .and(path(FOLDER_PATH))
             .respond_with(ResponseTemplate::new(status))
             .mount(&server)
             .await;
         let client = create_client(&server, short_retry(2)?).await?;
 
         let result = client
-            .copy_folder(
+            .move_folder(
                 &FolderId::new("123"),
-                &FolderId::new("456"),
-                &CopyFolderOptions::default(),
+                &MoveDestination::Folder(FolderId::new("456")),
+                &UpdateFolderOptions::default(),
             )
             .await;
 
@@ -2030,517 +2374,173 @@ mod test_copy_folder {
             matches!(&result, Err(BoxClientError::Api(e)) if e.status == status),
             "result: {result:?}"
         );
-        assert_eq!(copy_request_count(&server).await, 1);
+        assert_eq!(move_requests(&server).await.len(), 1);
 
         Ok(())
     }
 }
 
 #[cfg(test)]
-mod test_create_folder_body {
+mod test_delete_folder {
     use rstest::rstest;
-
-    use super::*;
-
-    /// BOXが受け付けるフォルダ名で、ボディを作成できることを確認
-    #[rstest]
-    #[case::ascii("folder")]
-    #[case::max_ascii(&"a".repeat(255))]
-    #[case::max_japanese(&"あ".repeat(255))]
-    fn test_valid_name(#[case] name: &str) -> anyhow::Result<()> {
-        let body = CreateFolderBody::new(name, &FolderId::new("0"))?;
-
-        assert_eq!(body.name, name);
-
-        Ok(())
-    }
-
-    /// BOXが拒否するフォルダ名を、検証エラーとして返すことを確認
-    ///
-    /// 使用できない文字の詳細な検証は、`validate_item_name`のテストで確認する。
-    /// ここでは、長さの検証と、`validate_item_name`をフィールドに適用していることを確認する。
-    #[rstest]
-    #[case::empty("")]
-    #[case::too_long(&"a".repeat(256))]
-    #[case::too_long_japanese(&"あ".repeat(256))]
-    #[case::invalid_char("a/b")]
-    fn test_invalid_name(#[case] name: &str) {
-        let result = CreateFolderBody::new(name, &FolderId::new("0"));
-
-        assert!(
-            matches!(result, Err(BoxClientError::InvalidRequestBody(_))),
-            "result: {result:?}"
-        );
-    }
-
-    /// 検証エラーのメッセージに、検証に失敗したフィールドを含むことを確認
-    #[test]
-    fn test_error_message_contains_field() -> anyhow::Result<()> {
-        let Err(BoxClientError::InvalidRequestBody(error)) =
-            CreateFolderBody::new("a/b", &FolderId::new("0"))
-        else {
-            anyhow::bail!("validation must fail");
-        };
-
-        let message = error.to_string();
-        assert!(message.contains("name"), "message: {message}");
-
-        Ok(())
-    }
-
-    /// BOXが求める形式のJSONにシリアライズすることを確認
-    #[test]
-    fn test_serialize() -> anyhow::Result<()> {
-        let body = CreateFolderBody::new("folder", &FolderId::new("123"))?;
-
-        assert_eq!(
-            serde_json::to_value(&body)?,
-            serde_json::json!({"name": "folder", "parent": {"id": "123"}})
-        );
-
-        Ok(())
-    }
-}
-
-#[cfg(test)]
-mod test_validate_limit {
-    use rstest::rstest;
-
-    use super::*;
-
-    /// 1以上1000以下の項目数の上限だけを受け付けることを確認
-    #[rstest]
-    #[case::zero(0, false)]
-    #[case::min(1, true)]
-    #[case::max(1000, true)]
-    #[case::over_max(1001, false)]
-    fn test_validate_limit(#[case] limit: u32, #[case] valid: bool) {
-        let result = validate_limit(limit);
-
-        if valid {
-            assert!(matches!(result, Ok(l) if l == limit), "result: {result:?}");
-        } else {
-            assert!(
-                matches!(result, Err(BoxClientError::InvalidArgument(_))),
-                "result: {result:?}"
-            );
-        }
-    }
-}
-
-#[cfg(test)]
-mod test_items_page {
-    use serde_json::json;
-
-    use crate::{
-        FileItem, FolderItem, WebLinkItem,
-        api::types::{FileId, FolderId, WebLinkId},
-    };
-
-    use super::*;
-
-    /// type属性に従って項目をデシリアライズし、知らない種類の項目を受け入れることを確認
-    #[test]
-    fn test_deserialize() -> anyhow::Result<()> {
-        let page: ItemsPage = serde_json::from_value(json!({
-            "entries": [
-                {"type": "file", "id": "1", "name": "a.txt", "etag": "0"},
-                {"type": "folder", "id": "2", "name": "docs", "etag": null},
-                {"type": "web_link", "id": "3", "name": "link", "etag": "1"},
-                {"type": "hubs", "id": "4", "name": "hub"},
-            ],
-            "limit": 100,
-            "next_marker": "m1",
-        }))?;
-
-        assert_eq!(
-            page,
-            ItemsPage {
-                entries: vec![
-                    BoxItem::File(FileItem {
-                        id: FileId::new("1"),
-                        name: "a.txt".to_owned(),
-                        etag: Some("0".to_owned()),
-                    }),
-                    BoxItem::Folder(FolderItem {
-                        id: FolderId::new("2"),
-                        name: "docs".to_owned(),
-                        etag: None,
-                    }),
-                    BoxItem::WebLink(WebLinkItem {
-                        id: WebLinkId::new("3"),
-                        name: "link".to_owned(),
-                        etag: Some("1".to_owned()),
-                    }),
-                    BoxItem::Unknown,
-                ],
-                limit: 100,
-                next_marker: Some("m1".to_owned()),
-            }
-        );
-
-        Ok(())
-    }
-
-    /// `next_marker`がnullの場合と省略された場合に、後続がないと判定することを確認
-    #[test]
-    fn test_deserialize_without_next_marker() -> anyhow::Result<()> {
-        let null_marker: ItemsPage =
-            serde_json::from_value(json!({"entries": [], "limit": 100, "next_marker": null}))?;
-        let missing_marker: ItemsPage =
-            serde_json::from_value(json!({"entries": [], "limit": 100}))?;
-
-        assert_eq!(null_marker.next_marker, None);
-        assert_eq!(missing_marker.next_marker, None);
-
-        Ok(())
-    }
-}
-
-#[cfg(test)]
-mod test_list_items_in_folder {
-    use rstest::rstest;
-    use serde_json::json;
     use wiremock::{
         Mock, MockServer, ResponseTemplate,
         matchers::{method, path},
     };
 
     use super::*;
-    use crate::test_support::{create_client, mount_token, short_retry};
+    use crate::test_support::{create_client, mount_token, request_count, short_retry};
 
-    /// 項目のAPIのパス
-    const ITEMS_PATH: &str = "/2.0/folders/123/items";
+    /// フォルダのAPIのパス
+    const FOLDER_PATH: &str = "/2.0/folders/123";
 
-    /// 項目のAPIへのリクエストのクエリ文字列を返す。
-    async fn items_queries(server: &MockServer) -> Vec<String> {
+    /// フォルダのAPIへのリクエストのクエリ文字列とIf-Matchヘッダーを返す。
+    async fn delete_requests(server: &MockServer) -> Vec<(String, Option<String>)> {
         server
             .received_requests()
             .await
             .unwrap_or_default()
             .into_iter()
-            .filter(|r| r.url.path() == ITEMS_PATH)
-            .map(|r| r.url.query().unwrap_or_default().to_owned())
-            .collect()
-    }
-
-    /// マーカーとオプションをクエリパラメーターに変換し、ページを返すことを確認
-    #[rstest]
-    #[case::default(None, ListItemsOptions::default(), "usemarker=true")]
-    #[case::all(
-        Some("m1"),
-        ListItemsOptions {
-            limit: Some(1000),
-            sort: Some(ItemSort::Name),
-            direction: Some(SortDirection::Desc),
-        },
-        "usemarker=true&limit=1000&marker=m1&sort=name&direction=DESC"
-    )]
-    #[tokio::test]
-    async fn test_list_items_in_folder(
-        #[case] marker: Option<&str>,
-        #[case] options: ListItemsOptions,
-        #[case] expected_query: &str,
-    ) -> anyhow::Result<()> {
-        let server = MockServer::start().await;
-        mount_token(&server).await;
-        Mock::given(method("GET"))
-            .and(path(ITEMS_PATH))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "entries": [{"type": "file", "id": "1", "name": "a.txt", "etag": "0"}],
-                "limit": 100,
-                "next_marker": "m2",
-            })))
-            .mount(&server)
-            .await;
-        let client = create_client(&server, short_retry(0)?).await?;
-
-        let page = client
-            .list_items_in_folder(&FolderId::new("123"), marker, &options)
-            .await?;
-
-        assert_eq!(page.entries.len(), 1);
-        assert_eq!(page.next_marker.as_deref(), Some("m2"));
-        assert_eq!(items_queries(&server).await, vec![expected_query]);
-
-        Ok(())
-    }
-
-    /// 項目数の上限が範囲外の場合は、リクエストを送信せずにエラーを返すことを確認
-    #[rstest]
-    #[case::zero(0)]
-    #[case::over_max(1001)]
-    #[tokio::test]
-    async fn test_list_items_in_folder_invalid_limit(#[case] limit: u32) -> anyhow::Result<()> {
-        let server = MockServer::start().await;
-        mount_token(&server).await;
-        let client = create_client(&server, short_retry(0)?).await?;
-        let options = ListItemsOptions {
-            limit: Some(limit),
-            ..ListItemsOptions::default()
-        };
-
-        let result = client
-            .list_items_in_folder(&FolderId::new("123"), None, &options)
-            .await;
-
-        assert!(
-            matches!(result, Err(BoxClientError::InvalidArgument(_))),
-            "result: {result:?}"
-        );
-        assert_eq!(items_queries(&server).await, Vec::<String>::new());
-
-        Ok(())
-    }
-
-    /// ルートフォルダの項目のAPIのパス
-    const ROOT_ITEMS_PATH: &str = "/2.0/folders/0/items";
-
-    /// ルートフォルダの項目のAPIへのリクエストのクエリ文字列を返す。
-    async fn root_items_queries(server: &MockServer) -> Vec<String> {
-        server
-            .received_requests()
-            .await
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|r| r.url.path() == ROOT_ITEMS_PATH)
-            .map(|r| r.url.query().unwrap_or_default().to_owned())
-            .collect()
-    }
-
-    /// ルートフォルダで並び替えに使用する属性を指定した場合は、リクエストを送信せずにエラーを返すことを確認
-    #[tokio::test]
-    async fn test_list_items_in_folder_root_with_sort() -> anyhow::Result<()> {
-        let server = MockServer::start().await;
-        mount_token(&server).await;
-        let client = create_client(&server, short_retry(0)?).await?;
-        let options = ListItemsOptions {
-            sort: Some(ItemSort::Name),
-            ..ListItemsOptions::default()
-        };
-
-        let result = client
-            .list_items_in_folder(&FolderId::root(), None, &options)
-            .await;
-
-        assert!(
-            matches!(result, Err(BoxClientError::InvalidArgument(_))),
-            "result: {result:?}"
-        );
-        assert_eq!(root_items_queries(&server).await, Vec::<String>::new());
-
-        Ok(())
-    }
-
-    /// ルートフォルダでも、並び替えに使用する属性を指定しなければ、並び替えの方向とともにリストできることを確認
-    #[tokio::test]
-    async fn test_list_items_in_folder_root_without_sort() -> anyhow::Result<()> {
-        let server = MockServer::start().await;
-        mount_token(&server).await;
-        Mock::given(method("GET"))
-            .and(path(ROOT_ITEMS_PATH))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "entries": [],
-                "limit": 100,
-                "next_marker": null,
-            })))
-            .mount(&server)
-            .await;
-        let client = create_client(&server, short_retry(0)?).await?;
-        let options = ListItemsOptions {
-            direction: Some(SortDirection::Desc),
-            ..ListItemsOptions::default()
-        };
-
-        let page = client
-            .list_items_in_folder(&FolderId::root(), None, &options)
-            .await?;
-
-        assert_eq!(page.entries, Vec::<BoxItem>::new());
-        assert_eq!(
-            root_items_queries(&server).await,
-            vec!["usemarker=true&direction=DESC"]
-        );
-
-        Ok(())
-    }
-}
-
-#[cfg(test)]
-mod test_list_all_items_in_folder {
-    use rstest::rstest;
-    use serde_json::{Value, json};
-    use wiremock::{
-        Mock, MockServer, ResponseTemplate,
-        matchers::{method, path, query_param, query_param_is_missing},
-    };
-
-    use super::*;
-    use crate::test_support::{create_client, mount_token, short_retry};
-
-    /// 項目のAPIのパス
-    const ITEMS_PATH: &str = "/2.0/folders/123/items";
-
-    /// 指定した名前のファイルだけを含むページのレスポンスを返す。
-    fn page_response(name: &str, next_marker: &Value) -> ResponseTemplate {
-        ResponseTemplate::new(200).set_body_json(json!({
-            "entries": [{"type": "file", "id": name, "name": name, "etag": "0"}],
-            "limit": 1000,
-            "next_marker": next_marker,
-        }))
-    }
-
-    /// 項目の名前を返す。
-    fn item_name(item: &BoxItem) -> Option<&str> {
-        match item {
-            BoxItem::File(file) => Some(&file.name),
-            BoxItem::Folder(folder) => Some(&folder.name),
-            BoxItem::WebLink(link) => Some(&link.name),
-            BoxItem::Unknown => None,
-        }
-    }
-
-    /// `next_marker`がnullまたは空文字列になるまでページを送り、すべての項目を返すことを確認
-    #[rstest]
-    #[case::null(Value::Null)]
-    #[case::empty(json!(""))]
-    #[tokio::test]
-    async fn test_list_all_items_in_folder(#[case] last_marker: Value) -> anyhow::Result<()> {
-        let server = MockServer::start().await;
-        mount_token(&server).await;
-        // 項目数の上限を省略した場合は、上限の1000件ずつ取得する。
-        Mock::given(method("GET"))
-            .and(path(ITEMS_PATH))
-            .and(query_param("limit", "1000"))
-            .and(query_param_is_missing("marker"))
-            .respond_with(page_response("first", &json!("m1")))
-            .expect(1)
-            .mount(&server)
-            .await;
-        Mock::given(method("GET"))
-            .and(path(ITEMS_PATH))
-            .and(query_param("limit", "1000"))
-            .and(query_param("marker", "m1"))
-            .respond_with(page_response("second", &last_marker))
-            .expect(1)
-            .mount(&server)
-            .await;
-        let client = create_client(&server, short_retry(0)?).await?;
-
-        let items = client
-            .list_all_items_in_folder(&FolderId::new("123"), &ListItemsOptions::default())
-            .await?;
-
-        let names: Vec<_> = items.iter().filter_map(item_name).collect();
-        assert_eq!(names, vec!["first", "second"]);
-
-        Ok(())
-    }
-
-    /// BOXが同じマーカーを続けて返す場合は、無限ループせずにエラーを返すことを確認
-    #[tokio::test]
-    async fn test_list_all_items_in_folder_marker_not_advanced() -> anyhow::Result<()> {
-        let server = MockServer::start().await;
-        mount_token(&server).await;
-        Mock::given(method("GET"))
-            .and(path(ITEMS_PATH))
-            .respond_with(page_response("same", &json!("m1")))
-            .expect(2)
-            .mount(&server)
-            .await;
-        let client = create_client(&server, short_retry(0)?).await?;
-
-        let result = client
-            .list_all_items_in_folder(&FolderId::new("123"), &ListItemsOptions::default())
-            .await;
-
-        assert!(
-            matches!(result, Err(BoxClientError::UnexpectedResponse(_))),
-            "result: {result:?}"
-        );
-
-        Ok(())
-    }
-}
-
-#[cfg(test)]
-mod test_collect_all_pages {
-    use rstest::rstest;
-
-    use super::*;
-
-    /// `next_markers`の順に`next_marker`を返すページを取得し、`fetch_page`に渡されたマーカーを記録する。
-    ///
-    /// 用意したページを使い切った後に呼び出された場合は、無限ループでテストが終わらなくなるのを防ぐため、エラーを返す。
-    async fn collect(
-        next_markers: &[Option<&str>],
-    ) -> (BoxClientResult<(Vec<BoxItem>, u32)>, Vec<Option<String>>) {
-        let mut received_markers = Vec::new();
-        let mut remaining = next_markers.iter();
-        let result = collect_all_pages(async |marker: Option<&str>| {
-            received_markers.push(marker.map(str::to_owned));
-            let Some(next_marker) = remaining.next() else {
-                return Err(BoxClientError::InvalidArgument("no more pages"));
-            };
-            Ok(ItemsPage {
-                entries: vec![BoxItem::Unknown],
-                limit: 1,
-                next_marker: next_marker.map(str::to_owned),
+            .filter(|r| r.method.as_str() == "DELETE" && r.url.path() == FOLDER_PATH)
+            .map(|r| {
+                let query = r.url.query().unwrap_or_default().to_owned();
+                let if_match = r
+                    .headers
+                    .get("if-match")
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_owned);
+                (query, if_match)
             })
-        })
-        .await;
-
-        (result, received_markers)
+            .collect()
     }
 
-    /// 終端までマーカーが重複しない場合は、すべてのページの項目とページ数を返し、前のページのマーカーを渡すことを確認
+    /// オプションに応じて、recursiveクエリパラメーターとIf-Matchヘッダーを送信することを確認
     #[rstest]
-    #[case::single_page(vec![None], vec![None])]
-    #[case::empty_marker_terminates(vec![Some("")], vec![None])]
-    #[case::three_pages(
-        vec![Some("m1"), Some("m2"), None],
-        vec![None, Some("m1"), Some("m2")]
+    #[case::default(DeleteFolderOptions::default(), "", None)]
+    #[case::recursive(
+        DeleteFolderOptions { recursive: true, etag: None },
+        "recursive=true",
+        None
+    )]
+    #[case::etag(
+        DeleteFolderOptions { recursive: false, etag: Some("1") },
+        "",
+        Some("1")
+    )]
+    #[case::recursive_and_etag(
+        DeleteFolderOptions { recursive: true, etag: Some("1") },
+        "recursive=true",
+        Some("1")
     )]
     #[tokio::test]
-    async fn test_collect_all_pages(
-        #[case] next_markers: Vec<Option<&str>>,
-        #[case] expected_markers: Vec<Option<&str>>,
+    async fn test_delete_folder(
+        #[case] options: DeleteFolderOptions<'static>,
+        #[case] expected_query: &str,
+        #[case] expected_if_match: Option<&str>,
     ) -> anyhow::Result<()> {
-        let (result, received_markers) = collect(&next_markers).await;
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        Mock::given(method("DELETE"))
+            .and(path(FOLDER_PATH))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+        let client = create_client(&server, short_retry(0)?).await?;
 
-        let (items, pages) = result?;
-        assert_eq!(items.len(), next_markers.len());
-        assert_eq!(pages as usize, next_markers.len());
+        client
+            .delete_folder(&FolderId::new("123"), &options)
+            .await?;
+
         assert_eq!(
-            received_markers,
-            expected_markers
-                .into_iter()
-                .map(|m| m.map(str::to_owned))
-                .collect::<Vec<_>>()
+            delete_requests(&server).await,
+            vec![(
+                expected_query.to_owned(),
+                expected_if_match.map(str::to_owned)
+            )]
         );
 
         Ok(())
     }
 
-    /// BOXが以前に返したマーカーを再び返した場合は、そのマーカーでページを取得せずにエラーを返すことを確認
-    #[rstest]
-    // 直前のマーカーと同じマーカーを返す
-    #[case::same_as_previous(vec![Some("m1"), Some("m1")], 2)]
-    // 2つ前のマーカーに戻る
-    #[case::two_page_cycle(vec![Some("m1"), Some("m2"), Some("m1")], 3)]
-    // 最初のマーカーに戻る
-    #[case::back_to_first(vec![Some("m1"), Some("m2"), Some("m3"), Some("m1")], 4)]
+    /// ルートフォルダを指定した場合は、リクエストを送信せずにエラーを返すことを確認
     #[tokio::test]
-    async fn test_collect_all_pages_detects_repeated_marker(
-        #[case] next_markers: Vec<Option<&str>>,
-        #[case] expected_fetches: usize,
-    ) {
-        let (result, received_markers) = collect(&next_markers).await;
+    async fn test_delete_folder_rejects_root() -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        let client = create_client(&server, short_retry(0)?).await?;
+        let requests_before = request_count(&server).await;
+
+        let result = client
+            .delete_folder(&FolderId::root(), &DeleteFolderOptions::default())
+            .await;
 
         assert!(
-            matches!(result, Err(BoxClientError::UnexpectedResponse(_))),
+            matches!(result, Err(BoxClientError::InvalidArgument(_))),
             "result: {result:?}"
         );
-        assert_eq!(received_markers.len(), expected_fetches);
+        assert_eq!(request_count(&server).await, requests_before);
+
+        Ok(())
+    }
+
+    /// BOXのエラーレスポンスを、再試行せずにそのまま返すことを確認
+    ///
+    /// 503は削除処理が継続していることを示すため、再試行の上限に余裕があっても再送しない。
+    #[rstest]
+    #[case::not_empty(400)]
+    #[case::not_found(404)]
+    #[case::locked(409)]
+    #[case::etag_mismatch(412)]
+    #[case::internal_server_error(500)]
+    #[case::still_deleting(503)]
+    #[tokio::test]
+    async fn test_delete_folder_error_is_not_retried(#[case] status: u16) -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        Mock::given(method("DELETE"))
+            .and(path(FOLDER_PATH))
+            .respond_with(ResponseTemplate::new(status))
+            .mount(&server)
+            .await;
+        let client = create_client(&server, short_retry(2)?).await?;
+
+        let result = client
+            .delete_folder(&FolderId::new("123"), &DeleteFolderOptions::default())
+            .await;
+
+        assert!(
+            matches!(&result, Err(BoxClientError::Api(e)) if e.status == status),
+            "result: {result:?}"
+        );
+        assert_eq!(delete_requests(&server).await.len(), 1);
+
+        Ok(())
+    }
+
+    /// 429の場合は、冪等でないリクエストとして送信しても再試行することを確認
+    #[tokio::test]
+    async fn test_delete_folder_retries_too_many_requests() -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        Mock::given(method("DELETE"))
+            .and(path(FOLDER_PATH))
+            .respond_with(ResponseTemplate::new(429))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path(FOLDER_PATH))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+        let client = create_client(&server, short_retry(1)?).await?;
+
+        client
+            .delete_folder(&FolderId::new("123"), &DeleteFolderOptions::default())
+            .await?;
+
+        assert_eq!(delete_requests(&server).await.len(), 2);
+
+        Ok(())
     }
 }

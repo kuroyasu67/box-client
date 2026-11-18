@@ -92,35 +92,6 @@ pub struct File {
     pub item_status: Option<ItemStatus>,
 }
 
-/// ファイルの情報を更新するAPI（`PUT /files/{file_id}`）のオプション
-///
-/// # Examples
-///
-/// ```
-/// use box_client::UpdateFileOptions;
-///
-/// let options = UpdateFileOptions::default().with_etag("1");
-/// assert_eq!(options.etag, Some("1"));
-/// ```
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct UpdateFileOptions<'a> {
-    /// 最後に取得したファイルの`ETag`
-    ///
-    /// 指定した場合は、`If-Match`ヘッダーで送信する。ファイルが`ETag`の取得後に変更されていると、
-    /// BOXはファイルを更新せずに412を返す。
-    pub etag: Option<&'a str>,
-}
-
-impl<'a> UpdateFileOptions<'a> {
-    /// 最後に取得したファイルの`ETag`を設定する。
-    #[must_use]
-    pub fn with_etag(mut self, etag: &'a str) -> Self {
-        self.etag = Some(etag);
-        self
-    }
-}
-
 /// ファイルのコピーのオプション
 ///
 /// # Examples
@@ -207,6 +178,35 @@ impl<'a> CopyFileBody<'a> {
     }
 }
 
+/// ファイルの情報を更新するAPI（`PUT /files/{file_id}`）のオプション
+///
+/// # Examples
+///
+/// ```
+/// use box_client::UpdateFileOptions;
+///
+/// let options = UpdateFileOptions::default().with_etag("1");
+/// assert_eq!(options.etag, Some("1"));
+/// ```
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct UpdateFileOptions<'a> {
+    /// 最後に取得したファイルの`ETag`
+    ///
+    /// 指定した場合は、`If-Match`ヘッダーで送信する。ファイルが`ETag`の取得後に変更されていると、
+    /// BOXはファイルを更新せずに412を返す。
+    pub etag: Option<&'a str>,
+}
+
+impl<'a> UpdateFileOptions<'a> {
+    /// 最後に取得したファイルの`ETag`を設定する。
+    #[must_use]
+    pub fn with_etag(mut self, etag: &'a str) -> Self {
+        self.etag = Some(etag);
+        self
+    }
+}
+
 /// ファイル名変更リクエストのボディ
 #[derive(Debug, Clone, Serialize, Validate)]
 struct RenameFileBody<'a> {
@@ -246,6 +246,57 @@ impl BoxClient {
     pub async fn file_information(&self, file_id: &FileId) -> BoxClientResult<File> {
         self.send_json(ApiRequest::get(["files", file_id.as_ref()]))
             .await
+    }
+
+    /// ファイルを別のフォルダへコピーする。
+    ///
+    /// HTTPメソッドがPOSTであるため、冪等でないリクエストとして送信する。
+    /// 5xxまたはタイムアウトの後に再送すると、BOXがコピーを完了していた場合は409を受け取り、
+    /// 名前が異なる場合はファイルを重複してコピーするおそれがあるためである。
+    /// したがって、429、エラーコードが`operation_blocked_temporary`の409および接続エラーの後にのみ再試行する。
+    ///
+    /// # Arguments
+    ///
+    /// - `file_id`: コピーするファイルのID
+    /// - `parent_id`: コピー先の親フォルダのID。ルートフォルダへコピーする場合は[`FolderId::root`]を指定する。
+    /// - `options`: コピーしたファイルの名前、およびコピーするバージョンのオプション
+    ///
+    /// # Errors
+    ///
+    /// `options.name`をBOXが拒否する場合は、リクエストを送信せずに[`BoxClientError::InvalidRequestBody`]を返す。
+    /// BOXは使用できない文字を取り除いて受け付けるが、意図しない名前でコピーしないように、クライアントで拒否する。
+    /// BOXがエラーレスポンスを返した場合は、[`BoxClientError::Api`]を返す。主なステータスは次のとおり。
+    ///
+    /// - 400: パラメーターが不足している、または不正である。
+    /// - 403: ファイルをコピーする権限がない、または情報バリアがコピーを禁止している。
+    /// - 404: コピー元のファイルまたはコピー先の親フォルダが存在しない、またはアクセスする権限がない。
+    /// - 409: 同じ名前の項目がコピー先の親フォルダに存在する（`item_name_in_use`）。
+    ///   または、移動、コピーなど、他の操作がコピー元またはコピー先のフォルダをロックしている（`operation_blocked_temporary`）。
+    ///   後者の場合、クライアントは再試行設定に従って再試行し、再試行回数の上限に達してもロックが解除されない場合に
+    ///   このエラーを返す。
+    ///
+    /// 再試行できないエラーが発生した場合、または再試行回数の上限に達した場合はエラーを返す。
+    /// 5xxまたはタイムアウトでエラーを返した場合は、BOXがファイルをコピーした可能性がある。
+    /// したがって、[`BoxClient::list_items_in_folder`]でコピー先の親フォルダを確認する。
+    pub async fn copy_file(
+        &self,
+        file_id: &FileId,
+        parent_id: &FolderId,
+        options: &CopyFileOptions<'_>,
+    ) -> BoxClientResult<File> {
+        let body = CopyFileBody::new(parent_id, options)?;
+        let request = ApiRequest::post(["files", file_id.as_ref(), "copy"]).json(&body)?;
+
+        let file: File = self.send_json(request).await?;
+
+        tracing::debug!(
+            file_id = file_id.as_ref(),
+            parent_id = parent_id.as_ref(),
+            copied_file_id = file.id.as_ref(),
+            "copied file"
+        );
+
+        Ok(file)
     }
 
     /// ファイル名を変更する。
@@ -302,108 +353,6 @@ impl BoxClient {
         Ok(file)
     }
 
-    /// ファイルを別のフォルダへ移動する。
-    ///
-    /// クライアントは、5xxを受け取った場合、またはタイムアウトした場合に、同じリクエストを再送して再試行する。
-    /// しかし、これらの場合は、BOXがファイルの移動を完了している可能性がある。
-    /// `options.etag`を指定した場合は、移動によって`ETag`が変わるため、再送すると412を受け取る。
-    /// その結果、移動に成功したにもかかわらず、移動に失敗したと誤って判断するおそれがある。
-    /// したがって、[`BoxClient::move_folder`]と同様に、HTTPメソッドがPUTであっても冪等でないリクエストとして送信し、
-    /// 429、エラーコードが`operation_blocked_temporary`の409および接続エラーの後にのみ再試行する。
-    ///
-    /// # Arguments
-    ///
-    /// - `file_id`: 移動するファイルのID
-    /// - `destination`: 移動先。フォルダID、またはルートフォルダへ移動するユーザーのIDで指定する。
-    /// - `options`: `ETag`のオプション
-    ///
-    /// # Errors
-    ///
-    /// `destination`のユーザーIDが空文字列の場合は、リクエストを送信せずに[`BoxClientError::InvalidArgument`]を返す。
-    /// `options.etag`に使用できない文字が含まれる場合は、リクエストを送信せずに
-    /// [`BoxClientError::InvalidHeaderValue`]を返す。
-    /// BOXがエラーレスポンスを返した場合は、[`BoxClientError::Api`]を返す。主なステータスは次のとおり。
-    ///
-    /// - 403: 移動先のフォルダにアクセスする権限がない（`access_denied_insufficient_permissions`）。
-    /// - 404: ファイルが存在しない、またはファイルにアクセスする権限がない。
-    /// - 409: 同じ名前の項目が移動先のフォルダに存在する。
-    /// - 412: `options.etag`がファイルの現在の`ETag`と一致しない。
-    ///
-    /// 再試行できないエラーが発生した場合、または再試行回数の上限に達した場合はエラーを返す。
-    /// 5xxまたはタイムアウトでエラーを返した場合は、BOXがファイルを移動した可能性がある。
-    /// したがって、[`BoxClient::file_information`]でファイルの親フォルダを確認する。
-    pub async fn move_file(
-        &self,
-        file_id: &FileId,
-        destination: &MoveDestination,
-        options: &UpdateFileOptions<'_>,
-    ) -> BoxClientResult<File> {
-        let body = MoveBody::new(destination)?;
-        let mut request = ApiRequest::put(["files", file_id.as_ref()])
-            .idempotency(Idempotency::NonIdempotent)
-            .json(&body)?;
-        if let Some(etag) = options.etag {
-            request = request.header(IF_MATCH, etag)?;
-        }
-
-        let file = self.send_json(request).await?;
-
-        tracing::debug!(file_id = file_id.as_ref(), ?destination, "moved file");
-
-        Ok(file)
-    }
-
-    /// ファイルを別のフォルダへコピーする。
-    ///
-    /// HTTPメソッドがPOSTであるため、冪等でないリクエストとして送信する。
-    /// 5xxまたはタイムアウトの後に再送すると、BOXがコピーを完了していた場合は409を受け取り、
-    /// 名前が異なる場合はファイルを重複してコピーするおそれがあるためである。
-    /// したがって、429、エラーコードが`operation_blocked_temporary`の409および接続エラーの後にのみ再試行する。
-    ///
-    /// # Arguments
-    ///
-    /// - `file_id`: コピーするファイルのID
-    /// - `parent_id`: コピー先の親フォルダのID。ルートフォルダへコピーする場合は[`FolderId::root`]を指定する。
-    /// - `options`: コピーしたファイルの名前、およびコピーするバージョンのオプション
-    ///
-    /// # Errors
-    ///
-    /// `options.name`をBOXが拒否する場合は、リクエストを送信せずに[`BoxClientError::InvalidRequestBody`]を返す。
-    /// BOXは使用できない文字を取り除いて受け付けるが、意図しない名前でコピーしないように、クライアントで拒否する。
-    /// BOXがエラーレスポンスを返した場合は、[`BoxClientError::Api`]を返す。主なステータスは次のとおり。
-    ///
-    /// - 400: パラメーターが不足している、または不正である。
-    /// - 403: ファイルをコピーする権限がない、または情報バリアがコピーを禁止している。
-    /// - 404: コピー元のファイルまたはコピー先の親フォルダが存在しない、またはアクセスする権限がない。
-    /// - 409: 同じ名前の項目がコピー先の親フォルダに存在する（`item_name_in_use`）。
-    ///   または、移動、コピーなど、他の操作がコピー元またはコピー先のフォルダをロックしている（`operation_blocked_temporary`）。
-    ///   後者の場合、クライアントは再試行設定に従って再試行し、再試行回数の上限に達してもロックが解除されない場合に
-    ///   このエラーを返す。
-    ///
-    /// 再試行できないエラーが発生した場合、または再試行回数の上限に達した場合はエラーを返す。
-    /// 5xxまたはタイムアウトでエラーを返した場合は、BOXがファイルをコピーした可能性がある。
-    /// したがって、[`BoxClient::list_items_in_folder`]でコピー先の親フォルダを確認する。
-    pub async fn copy_file(
-        &self,
-        file_id: &FileId,
-        parent_id: &FolderId,
-        options: &CopyFileOptions<'_>,
-    ) -> BoxClientResult<File> {
-        let body = CopyFileBody::new(parent_id, options)?;
-        let request = ApiRequest::post(["files", file_id.as_ref(), "copy"]).json(&body)?;
-
-        let file: File = self.send_json(request).await?;
-
-        tracing::debug!(
-            file_id = file_id.as_ref(),
-            parent_id = parent_id.as_ref(),
-            copied_file_id = file.id.as_ref(),
-            "copied file"
-        );
-
-        Ok(file)
-    }
-
     /// ファイルの説明を設定する。
     ///
     /// 説明を削除する場合は、`description`に空文字列を指定する。
@@ -454,6 +403,57 @@ impl BoxClient {
         let file = self.send_json(request).await?;
 
         tracing::debug!(file_id = file_id.as_ref(), "set file description");
+
+        Ok(file)
+    }
+
+    /// ファイルを別のフォルダへ移動する。
+    ///
+    /// クライアントは、5xxを受け取った場合、またはタイムアウトした場合に、同じリクエストを再送して再試行する。
+    /// しかし、これらの場合は、BOXがファイルの移動を完了している可能性がある。
+    /// `options.etag`を指定した場合は、移動によって`ETag`が変わるため、再送すると412を受け取る。
+    /// その結果、移動に成功したにもかかわらず、移動に失敗したと誤って判断するおそれがある。
+    /// したがって、[`BoxClient::move_folder`]と同様に、HTTPメソッドがPUTであっても冪等でないリクエストとして送信し、
+    /// 429、エラーコードが`operation_blocked_temporary`の409および接続エラーの後にのみ再試行する。
+    ///
+    /// # Arguments
+    ///
+    /// - `file_id`: 移動するファイルのID
+    /// - `destination`: 移動先。フォルダID、またはルートフォルダへ移動するユーザーのIDで指定する。
+    /// - `options`: `ETag`のオプション
+    ///
+    /// # Errors
+    ///
+    /// `destination`のユーザーIDが空文字列の場合は、リクエストを送信せずに[`BoxClientError::InvalidArgument`]を返す。
+    /// `options.etag`に使用できない文字が含まれる場合は、リクエストを送信せずに
+    /// [`BoxClientError::InvalidHeaderValue`]を返す。
+    /// BOXがエラーレスポンスを返した場合は、[`BoxClientError::Api`]を返す。主なステータスは次のとおり。
+    ///
+    /// - 403: 移動先のフォルダにアクセスする権限がない（`access_denied_insufficient_permissions`）。
+    /// - 404: ファイルが存在しない、またはファイルにアクセスする権限がない。
+    /// - 409: 同じ名前の項目が移動先のフォルダに存在する。
+    /// - 412: `options.etag`がファイルの現在の`ETag`と一致しない。
+    ///
+    /// 再試行できないエラーが発生した場合、または再試行回数の上限に達した場合はエラーを返す。
+    /// 5xxまたはタイムアウトでエラーを返した場合は、BOXがファイルを移動した可能性がある。
+    /// したがって、[`BoxClient::file_information`]でファイルの親フォルダを確認する。
+    pub async fn move_file(
+        &self,
+        file_id: &FileId,
+        destination: &MoveDestination,
+        options: &UpdateFileOptions<'_>,
+    ) -> BoxClientResult<File> {
+        let body = MoveBody::new(destination)?;
+        let mut request = ApiRequest::put(["files", file_id.as_ref()])
+            .idempotency(Idempotency::NonIdempotent)
+            .json(&body)?;
+        if let Some(etag) = options.etag {
+            request = request.header(IF_MATCH, etag)?;
+        }
+
+        let file = self.send_json(request).await?;
+
+        tracing::debug!(file_id = file_id.as_ref(), ?destination, "moved file");
 
         Ok(file)
     }
@@ -719,78 +719,98 @@ mod test_file_information {
 }
 
 #[cfg(test)]
-mod test_delete_file {
+mod test_copy_file {
     use rstest::rstest;
+    use serde_json::json;
     use wiremock::{
         Mock, MockServer, ResponseTemplate,
-        matchers::{method, path},
+        matchers::{body_json, method, path},
     };
 
     use super::*;
-    use crate::{
-        BoxClientError,
-        test_support::{create_client, mount_token, request_count, short_retry},
-    };
+    use crate::test_support::{create_client, mount_token, request_count, short_retry};
 
-    /// ファイルのAPIのパス
-    const FILE_PATH: &str = "/2.0/files/123";
+    /// ファイルのコピーのAPIのパス
+    const COPY_PATH: &str = "/2.0/files/12345/copy";
 
-    /// ファイルのAPIへのDELETEリクエストのIf-Matchヘッダーを返す。
-    async fn delete_requests(server: &MockServer) -> Vec<Option<String>> {
-        server
-            .received_requests()
-            .await
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|r| r.method.as_str() == "DELETE" && r.url.path() == FILE_PATH)
-            .map(|r| {
-                r.headers
-                    .get("if-match")
-                    .and_then(|v| v.to_str().ok())
-                    .map(str::to_owned)
-            })
-            .collect()
-    }
+    /// コピーするバージョンのID
+    const VERSION_ID: &str = "67890";
 
-    /// `ETag`を指定した場合だけ、If-Matchヘッダーを送信することを確認
+    /// コピー先の親フォルダと、指定した場合だけ名前とバージョンを送信し、コピーしたファイルを返すことを確認
     #[rstest]
-    #[case::without_etag(None)]
-    #[case::with_etag(Some("1"))]
+    #[case::default(None, None, json!({"parent": {"id": "456"}}))]
+    #[case::with_name(
+        Some("Contract (copy).pdf"),
+        None,
+        json!({"parent": {"id": "456"}, "name": "Contract (copy).pdf"})
+    )]
+    #[case::with_version(
+        None,
+        Some(VERSION_ID),
+        json!({"parent": {"id": "456"}, "version": VERSION_ID})
+    )]
     #[tokio::test]
-    async fn test_delete_file(#[case] etag: Option<&str>) -> anyhow::Result<()> {
+    async fn test_copy_file(
+        #[case] name: Option<&'static str>,
+        #[case] version: Option<&'static str>,
+        #[case] expected_body: serde_json::Value,
+    ) -> anyhow::Result<()> {
         let server = MockServer::start().await;
         mount_token(&server).await;
-        Mock::given(method("DELETE"))
-            .and(path(FILE_PATH))
-            .respond_with(ResponseTemplate::new(204))
+        Mock::given(method("POST"))
+            .and(path(COPY_PATH))
+            .and(body_json(expected_body))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+                "type": "file",
+                "id": "99999",
+                "etag": "0",
+                "name": name.unwrap_or("Contract.pdf"),
+                "parent": {"type": "folder", "id": "456", "etag": "0", "name": "Archive"},
+            })))
+            .expect(1)
             .mount(&server)
             .await;
         let client = create_client(&server, short_retry(0)?).await?;
+        let version = version.map(FileVersionId::new);
+        let options = CopyFileOptions {
+            name,
+            version: version.as_ref(),
+        };
 
-        client.delete_file(&FileId::new("123"), etag).await?;
+        let file = client
+            .copy_file(&FileId::new("12345"), &FolderId::new("456"), &options)
+            .await?;
 
-        assert_eq!(
-            delete_requests(&server).await,
-            vec![etag.map(str::to_owned)]
-        );
+        assert_eq!(file.id, FileId::new("99999"));
+        assert_eq!(file.parent.map(|p| p.id), Some(FolderId::new("456")));
 
         Ok(())
     }
 
-    /// `ETag`に使用できない文字が含まれる場合は、リクエストを送信せずにエラーを返すことを確認
+    /// BOXが拒否する名前を指定した場合は、リクエストを送信せずにエラーを返すことを確認
+    ///
+    /// 使用できない文字の詳細な検証は、`validate_item_name`のテストで確認する。
+    #[rstest]
+    #[case::empty("")]
+    #[case::too_long(&"あ".repeat(256))]
+    #[case::invalid_char("a/b")]
     #[tokio::test]
-    async fn test_delete_file_invalid_etag() -> anyhow::Result<()> {
+    async fn test_copy_file_rejects_invalid_name(#[case] name: &str) -> anyhow::Result<()> {
         let server = MockServer::start().await;
         mount_token(&server).await;
         let client = create_client(&server, short_retry(0)?).await?;
         let requests_before = request_count(&server).await;
 
         let result = client
-            .delete_file(&FileId::new("123"), Some("1\r\nX-Injected: 1"))
+            .copy_file(
+                &FileId::new("12345"),
+                &FolderId::new("456"),
+                &CopyFileOptions::default().with_name(name),
+            )
             .await;
 
         assert!(
-            matches!(result, Err(BoxClientError::InvalidHeaderValue(_))),
+            matches!(result, Err(BoxClientError::InvalidRequestBody(_))),
             "result: {result:?}"
         );
         assert_eq!(request_count(&server).await, requests_before);
@@ -800,56 +820,35 @@ mod test_delete_file {
 
     /// BOXのエラーレスポンスを、再試行せずにそのまま返すことを確認
     ///
-    /// 5xxの後に再送すると、削除済みのファイルに対して404を受け取るおそれがあるため、
-    /// 再試行の上限に余裕があっても再送しない。
+    /// コピーは冪等でないため、5xxの後に再送すると、ファイルを重複してコピーするおそれがある。
     #[rstest]
-    #[case::not_found(404)]
-    #[case::etag_mismatch(412)]
+    #[case::name_in_use(409)]
     #[case::internal_server_error(500)]
     #[case::service_unavailable(503)]
     #[tokio::test]
-    async fn test_delete_file_error_is_not_retried(#[case] status: u16) -> anyhow::Result<()> {
+    async fn test_copy_file_error_is_not_retried(#[case] status: u16) -> anyhow::Result<()> {
         let server = MockServer::start().await;
         mount_token(&server).await;
-        Mock::given(method("DELETE"))
-            .and(path(FILE_PATH))
+        Mock::given(method("POST"))
+            .and(path(COPY_PATH))
             .respond_with(ResponseTemplate::new(status))
+            .expect(1)
             .mount(&server)
             .await;
         let client = create_client(&server, short_retry(2)?).await?;
 
-        let result = client.delete_file(&FileId::new("123"), None).await;
+        let result = client
+            .copy_file(
+                &FileId::new("12345"),
+                &FolderId::new("456"),
+                &CopyFileOptions::default(),
+            )
+            .await;
 
         assert!(
             matches!(&result, Err(BoxClientError::Api(e)) if e.status == status),
             "result: {result:?}"
         );
-        assert_eq!(delete_requests(&server).await.len(), 1);
-
-        Ok(())
-    }
-
-    /// 429の場合は、冪等でないリクエストとして送信しても再試行することを確認
-    #[tokio::test]
-    async fn test_delete_file_retries_too_many_requests() -> anyhow::Result<()> {
-        let server = MockServer::start().await;
-        mount_token(&server).await;
-        Mock::given(method("DELETE"))
-            .and(path(FILE_PATH))
-            .respond_with(ResponseTemplate::new(429))
-            .up_to_n_times(1)
-            .mount(&server)
-            .await;
-        Mock::given(method("DELETE"))
-            .and(path(FILE_PATH))
-            .respond_with(ResponseTemplate::new(204))
-            .mount(&server)
-            .await;
-        let client = create_client(&server, short_retry(1)?).await?;
-
-        client.delete_file(&FileId::new("123"), None).await?;
-
-        assert_eq!(delete_requests(&server).await.len(), 2);
 
         Ok(())
     }
@@ -1285,98 +1284,78 @@ mod test_move_file {
 }
 
 #[cfg(test)]
-mod test_copy_file {
+mod test_delete_file {
     use rstest::rstest;
-    use serde_json::json;
     use wiremock::{
         Mock, MockServer, ResponseTemplate,
-        matchers::{body_json, method, path},
+        matchers::{method, path},
     };
 
     use super::*;
-    use crate::test_support::{create_client, mount_token, request_count, short_retry};
+    use crate::{
+        BoxClientError,
+        test_support::{create_client, mount_token, request_count, short_retry},
+    };
 
-    /// ファイルのコピーのAPIのパス
-    const COPY_PATH: &str = "/2.0/files/12345/copy";
+    /// ファイルのAPIのパス
+    const FILE_PATH: &str = "/2.0/files/123";
 
-    /// コピーするバージョンのID
-    const VERSION_ID: &str = "67890";
+    /// ファイルのAPIへのDELETEリクエストのIf-Matchヘッダーを返す。
+    async fn delete_requests(server: &MockServer) -> Vec<Option<String>> {
+        server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|r| r.method.as_str() == "DELETE" && r.url.path() == FILE_PATH)
+            .map(|r| {
+                r.headers
+                    .get("if-match")
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_owned)
+            })
+            .collect()
+    }
 
-    /// コピー先の親フォルダと、指定した場合だけ名前とバージョンを送信し、コピーしたファイルを返すことを確認
+    /// `ETag`を指定した場合だけ、If-Matchヘッダーを送信することを確認
     #[rstest]
-    #[case::default(None, None, json!({"parent": {"id": "456"}}))]
-    #[case::with_name(
-        Some("Contract (copy).pdf"),
-        None,
-        json!({"parent": {"id": "456"}, "name": "Contract (copy).pdf"})
-    )]
-    #[case::with_version(
-        None,
-        Some(VERSION_ID),
-        json!({"parent": {"id": "456"}, "version": VERSION_ID})
-    )]
+    #[case::without_etag(None)]
+    #[case::with_etag(Some("1"))]
     #[tokio::test]
-    async fn test_copy_file(
-        #[case] name: Option<&'static str>,
-        #[case] version: Option<&'static str>,
-        #[case] expected_body: serde_json::Value,
-    ) -> anyhow::Result<()> {
+    async fn test_delete_file(#[case] etag: Option<&str>) -> anyhow::Result<()> {
         let server = MockServer::start().await;
         mount_token(&server).await;
-        Mock::given(method("POST"))
-            .and(path(COPY_PATH))
-            .and(body_json(expected_body))
-            .respond_with(ResponseTemplate::new(201).set_body_json(json!({
-                "type": "file",
-                "id": "99999",
-                "etag": "0",
-                "name": name.unwrap_or("Contract.pdf"),
-                "parent": {"type": "folder", "id": "456", "etag": "0", "name": "Archive"},
-            })))
-            .expect(1)
+        Mock::given(method("DELETE"))
+            .and(path(FILE_PATH))
+            .respond_with(ResponseTemplate::new(204))
             .mount(&server)
             .await;
         let client = create_client(&server, short_retry(0)?).await?;
-        let version = version.map(FileVersionId::new);
-        let options = CopyFileOptions {
-            name,
-            version: version.as_ref(),
-        };
 
-        let file = client
-            .copy_file(&FileId::new("12345"), &FolderId::new("456"), &options)
-            .await?;
+        client.delete_file(&FileId::new("123"), etag).await?;
 
-        assert_eq!(file.id, FileId::new("99999"));
-        assert_eq!(file.parent.map(|p| p.id), Some(FolderId::new("456")));
+        assert_eq!(
+            delete_requests(&server).await,
+            vec![etag.map(str::to_owned)]
+        );
 
         Ok(())
     }
 
-    /// BOXが拒否する名前を指定した場合は、リクエストを送信せずにエラーを返すことを確認
-    ///
-    /// 使用できない文字の詳細な検証は、`validate_item_name`のテストで確認する。
-    #[rstest]
-    #[case::empty("")]
-    #[case::too_long(&"あ".repeat(256))]
-    #[case::invalid_char("a/b")]
+    /// `ETag`に使用できない文字が含まれる場合は、リクエストを送信せずにエラーを返すことを確認
     #[tokio::test]
-    async fn test_copy_file_rejects_invalid_name(#[case] name: &str) -> anyhow::Result<()> {
+    async fn test_delete_file_invalid_etag() -> anyhow::Result<()> {
         let server = MockServer::start().await;
         mount_token(&server).await;
         let client = create_client(&server, short_retry(0)?).await?;
         let requests_before = request_count(&server).await;
 
         let result = client
-            .copy_file(
-                &FileId::new("12345"),
-                &FolderId::new("456"),
-                &CopyFileOptions::default().with_name(name),
-            )
+            .delete_file(&FileId::new("123"), Some("1\r\nX-Injected: 1"))
             .await;
 
         assert!(
-            matches!(result, Err(BoxClientError::InvalidRequestBody(_))),
+            matches!(result, Err(BoxClientError::InvalidHeaderValue(_))),
             "result: {result:?}"
         );
         assert_eq!(request_count(&server).await, requests_before);
@@ -1386,35 +1365,56 @@ mod test_copy_file {
 
     /// BOXのエラーレスポンスを、再試行せずにそのまま返すことを確認
     ///
-    /// コピーは冪等でないため、5xxの後に再送すると、ファイルを重複してコピーするおそれがある。
+    /// 5xxの後に再送すると、削除済みのファイルに対して404を受け取るおそれがあるため、
+    /// 再試行の上限に余裕があっても再送しない。
     #[rstest]
-    #[case::name_in_use(409)]
+    #[case::not_found(404)]
+    #[case::etag_mismatch(412)]
     #[case::internal_server_error(500)]
     #[case::service_unavailable(503)]
     #[tokio::test]
-    async fn test_copy_file_error_is_not_retried(#[case] status: u16) -> anyhow::Result<()> {
+    async fn test_delete_file_error_is_not_retried(#[case] status: u16) -> anyhow::Result<()> {
         let server = MockServer::start().await;
         mount_token(&server).await;
-        Mock::given(method("POST"))
-            .and(path(COPY_PATH))
+        Mock::given(method("DELETE"))
+            .and(path(FILE_PATH))
             .respond_with(ResponseTemplate::new(status))
-            .expect(1)
             .mount(&server)
             .await;
         let client = create_client(&server, short_retry(2)?).await?;
 
-        let result = client
-            .copy_file(
-                &FileId::new("12345"),
-                &FolderId::new("456"),
-                &CopyFileOptions::default(),
-            )
-            .await;
+        let result = client.delete_file(&FileId::new("123"), None).await;
 
         assert!(
             matches!(&result, Err(BoxClientError::Api(e)) if e.status == status),
             "result: {result:?}"
         );
+        assert_eq!(delete_requests(&server).await.len(), 1);
+
+        Ok(())
+    }
+
+    /// 429の場合は、冪等でないリクエストとして送信しても再試行することを確認
+    #[tokio::test]
+    async fn test_delete_file_retries_too_many_requests() -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        Mock::given(method("DELETE"))
+            .and(path(FILE_PATH))
+            .respond_with(ResponseTemplate::new(429))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path(FILE_PATH))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+        let client = create_client(&server, short_retry(1)?).await?;
+
+        client.delete_file(&FileId::new("123"), None).await?;
+
+        assert_eq!(delete_requests(&server).await.len(), 2);
 
         Ok(())
     }
