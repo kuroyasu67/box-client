@@ -29,9 +29,7 @@ mod retry;
 #[cfg(test)]
 mod test_support;
 
-pub use api::files::{
-    File, FileVersion, FileVersionsPage, ListFileVersionsOptions, MAX_FILE_VERSIONS_OFFSET,
-};
+pub use api::files::File;
 pub use api::folders::{
     CopyFolderOptions, DeleteFolderOptions, Folder, ItemSort, ItemsPage, ListItemsOptions,
     MAX_FOLDER_DESCRIPTION_CHARS, MAX_ITEMS_LIMIT, MoveFolderDestination, SortDirection,
@@ -46,6 +44,9 @@ pub use api::uploads::{
     CHUNKED_UPLOAD_THRESHOLD, UpdateFileContentOptions, UploadFileOptions, UploadUrl,
 };
 pub use api::users::{User, UserMini};
+pub use api::versions::{
+    FileVersion, FileVersionsPage, ListFileVersionsOptions, MAX_FILE_VERSIONS_OFFSET,
+};
 pub use api::web_links::WebLink;
 pub use client::{
     BoxClient, BoxClientBuilder, BoxClientTimeout, DEFAULT_UPLOAD_CONCURRENCY,

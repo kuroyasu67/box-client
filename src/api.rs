@@ -8,4 +8,5 @@ pub mod trash;
 pub mod types;
 pub mod uploads;
 pub mod users;
+pub mod versions;
 pub mod web_links;
