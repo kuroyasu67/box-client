@@ -1,4 +1,7 @@
+use garde::Validate;
 use serde::{Deserialize, Serialize};
+
+use crate::{BoxClientError, BoxClientResult, ValidationError};
 
 /// BOXの項目のIDを表す型を定義する。
 ///
@@ -186,6 +189,39 @@ pub(crate) fn validate_item_name(name: &str, _context: &()) -> garde::Result {
         return Err(garde::Error::new("must not end with a space"));
     }
     Ok(())
+}
+
+/// ファイルまたはフォルダの説明の最大文字数
+///
+/// BOXは、ファイルとフォルダのどちらの説明も、256文字以下に制限する。
+pub const MAX_DESCRIPTION_CHARS: usize = 256;
+
+/// ファイルまたはフォルダの説明設定リクエストのボディ
+///
+/// BOXは、ファイルとフォルダの説明を同じ形式で受け付けるため、
+/// [`BoxClient::set_file_description`](crate::BoxClient::set_file_description)および
+/// [`BoxClient::set_folder_description`](crate::BoxClient::set_folder_description)で共有する。
+#[derive(Debug, Clone, Serialize, Validate)]
+pub(crate) struct SetDescriptionBody<'a> {
+    /// 説明
+    ///
+    /// BOXは説明にnullを受け付けないため、説明を削除する場合は空文字列を送信する。
+    #[garde(length(chars, max = MAX_DESCRIPTION_CHARS))]
+    description: &'a str,
+}
+
+impl<'a> SetDescriptionBody<'a> {
+    /// ボディを作成して検証する。
+    ///
+    /// # Errors
+    ///
+    /// 説明が[`MAX_DESCRIPTION_CHARS`]文字より長い場合は、[`BoxClientError::InvalidRequestBody`]を返す。
+    pub(crate) fn new(description: &'a str) -> BoxClientResult<Self> {
+        let body = Self { description };
+        body.validate()
+            .map_err(|report| BoxClientError::InvalidRequestBody(ValidationError::new(report)))?;
+        Ok(body)
+    }
 }
 
 #[cfg(test)]

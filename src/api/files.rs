@@ -8,7 +8,8 @@ use reqwest::header::IF_MATCH;
 
 use crate::{
     BoxClient, BoxClientError, BoxClientResult, FileId, FileVersion, FolderItem, Idempotency,
-    ItemStatus, PathCollection, UserMini, ValidationError, api::types::validate_item_name,
+    ItemStatus, PathCollection, UserMini, ValidationError,
+    api::types::{SetDescriptionBody, validate_item_name},
     request::ApiRequest,
 };
 
@@ -210,6 +211,60 @@ impl BoxClient {
         let file: File = self.send_json(request).await?;
 
         tracing::debug!(file_id = file_id.as_ref(), name = file.name, "renamed file");
+
+        Ok(file)
+    }
+
+    /// ファイルの説明を設定する。
+    ///
+    /// 説明を削除する場合は、`description`に空文字列を指定する。
+    ///
+    /// クライアントは、5xxを受け取った場合、またはタイムアウトした場合に、同じリクエストを再送して再試行する。
+    /// しかし、これらの場合は、BOXが説明の設定を完了している可能性がある。
+    /// `options.etag`を指定した場合は、説明の設定によって`ETag`が変わるため、再送すると412を受け取る。
+    /// その結果、設定に成功したにもかかわらず、設定に失敗したと誤って判断するおそれがある。
+    /// したがって、[`BoxClient::set_folder_description`]と同様に、HTTPメソッドがPUTであっても
+    /// 冪等でないリクエストとして送信し、
+    /// 429、エラーコードが`operation_blocked_temporary`の409および接続エラーの後にのみ再試行する。
+    ///
+    /// # Arguments
+    ///
+    /// - `file_id`: 説明を設定するファイルのID
+    /// - `description`: ファイルの説明。[`MAX_DESCRIPTION_CHARS`](crate::MAX_DESCRIPTION_CHARS)文字以下で指定する。
+    /// - `options`: `ETag`のオプション
+    ///
+    /// # Errors
+    ///
+    /// 説明が[`MAX_DESCRIPTION_CHARS`](crate::MAX_DESCRIPTION_CHARS)文字より長い場合は、リクエストを送信せずに
+    /// [`BoxClientError::InvalidRequestBody`]を返す。
+    /// `options.etag`に使用できない文字が含まれる場合は、リクエストを送信せずに
+    /// [`BoxClientError::InvalidHeaderValue`]を返す。
+    /// BOXがエラーレスポンスを返した場合は、[`BoxClientError::Api`]を返す。主なステータスは次のとおり。
+    ///
+    /// - 403: ファイルを操作する権限がない。
+    /// - 404: ファイルが存在しない、またはファイルにアクセスする権限がない。
+    /// - 412: `options.etag`がファイルの現在の`ETag`と一致しない。
+    ///
+    /// 再試行できないエラーが発生した場合、または再試行回数の上限に達した場合はエラーを返す。
+    /// 5xxまたはタイムアウトでエラーを返した場合は、BOXが説明を設定した可能性がある。
+    /// したがって、[`BoxClient::file_information`]でファイルの説明を確認する。
+    pub async fn set_file_description(
+        &self,
+        file_id: &FileId,
+        description: &str,
+        options: &UpdateFileOptions<'_>,
+    ) -> BoxClientResult<File> {
+        let body = SetDescriptionBody::new(description)?;
+        let mut request = ApiRequest::put(["files", file_id.as_ref()])
+            .idempotency(Idempotency::NonIdempotent)
+            .json(&body)?;
+        if let Some(etag) = options.etag {
+            request = request.header(IF_MATCH, etag)?;
+        }
+
+        let file = self.send_json(request).await?;
+
+        tracing::debug!(file_id = file_id.as_ref(), "set file description");
 
         Ok(file)
     }
@@ -738,6 +793,151 @@ mod test_rename_file {
             "result: {result:?}"
         );
         assert_eq!(rename_requests(&server).await.len(), 1);
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod test_set_file_description {
+    use rstest::rstest;
+    use serde_json::json;
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{body_json, method, path},
+    };
+
+    use super::*;
+    use crate::test_support::{create_client, mount_token, request_count, short_retry};
+
+    /// ファイルのAPIのパス
+    const FILE_PATH: &str = "/2.0/files/12345";
+
+    /// ファイルのAPIへのPUTリクエストのIf-Matchヘッダーを返す。
+    async fn update_requests(server: &MockServer) -> Vec<Option<String>> {
+        server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|r| r.method.as_str() == "PUT" && r.url.path() == FILE_PATH)
+            .map(|r| {
+                r.headers
+                    .get("if-match")
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_owned)
+            })
+            .collect()
+    }
+
+    /// 説明だけをボディで送信し、オプションに応じてIf-Matchヘッダーを送信することを確認
+    ///
+    /// 説明を削除する空文字列と、上限の文字数の説明も送信できることを確認する。
+    #[rstest]
+    #[case::default("Contract for the project", UpdateFileOptions::default(), None)]
+    #[case::etag(
+        "Contract for the project",
+        UpdateFileOptions { etag: Some("1") },
+        Some("1")
+    )]
+    #[case::empty("", UpdateFileOptions::default(), None)]
+    #[case::max_japanese(
+        &"あ".repeat(crate::MAX_DESCRIPTION_CHARS),
+        UpdateFileOptions::default(),
+        None
+    )]
+    #[tokio::test]
+    async fn test_set_file_description(
+        #[case] description: &str,
+        #[case] options: UpdateFileOptions<'static>,
+        #[case] expected_if_match: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        Mock::given(method("PUT"))
+            .and(path(FILE_PATH))
+            .and(body_json(json!({"description": description})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "type": "file",
+                "id": "12345",
+                "etag": "2",
+                "name": "Contract.pdf",
+                "description": description,
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = create_client(&server, short_retry(0)?).await?;
+
+        let file = client
+            .set_file_description(&FileId::new("12345"), description, &options)
+            .await?;
+
+        assert_eq!(file.description.as_deref(), Some(description));
+        assert_eq!(
+            update_requests(&server).await,
+            vec![expected_if_match.map(str::to_owned)]
+        );
+
+        Ok(())
+    }
+
+    /// 説明が上限の文字数より長い場合は、リクエストを送信せずにエラーを返すことを確認
+    #[tokio::test]
+    async fn test_set_file_description_rejects_too_long() -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        let client = create_client(&server, short_retry(0)?).await?;
+        let requests_before = request_count(&server).await;
+
+        let result = client
+            .set_file_description(
+                &FileId::new("12345"),
+                &"あ".repeat(crate::MAX_DESCRIPTION_CHARS + 1),
+                &UpdateFileOptions::default(),
+            )
+            .await;
+
+        assert!(
+            matches!(result, Err(BoxClientError::InvalidRequestBody(_))),
+            "result: {result:?}"
+        );
+        assert_eq!(request_count(&server).await, requests_before);
+
+        Ok(())
+    }
+
+    /// BOXのエラーレスポンスを、再試行せずにそのまま返すことを確認
+    #[rstest]
+    #[case::etag_mismatch(412)]
+    #[case::internal_server_error(500)]
+    #[case::service_unavailable(503)]
+    #[tokio::test]
+    async fn test_set_file_description_error_is_not_retried(
+        #[case] status: u16,
+    ) -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        Mock::given(method("PUT"))
+            .and(path(FILE_PATH))
+            .respond_with(ResponseTemplate::new(status))
+            .mount(&server)
+            .await;
+        let client = create_client(&server, short_retry(2)?).await?;
+
+        let result = client
+            .set_file_description(
+                &FileId::new("12345"),
+                "Contract for the project",
+                &UpdateFileOptions::default(),
+            )
+            .await;
+
+        assert!(
+            matches!(&result, Err(BoxClientError::Api(e)) if e.status == status),
+            "result: {result:?}"
+        );
+        assert_eq!(update_requests(&server).await.len(), 1);
 
         Ok(())
     }

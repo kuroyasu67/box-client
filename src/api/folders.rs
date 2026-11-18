@@ -9,7 +9,7 @@ use time::OffsetDateTime;
 use crate::{
     BoxClient, BoxClientError, BoxClientResult, BoxItem, FolderId, FolderItem, Idempotency,
     ItemStatus, ParentFolder, UserId, UserMini, ValidationError,
-    api::types::{PathCollection, validate_item_name},
+    api::types::{PathCollection, SetDescriptionBody, validate_item_name},
     request::ApiRequest,
 };
 use reqwest::header::IF_MATCH;
@@ -506,33 +506,6 @@ impl<'a> RenameFolderBody<'a> {
     }
 }
 
-/// フォルダの説明の最大文字数
-pub const MAX_FOLDER_DESCRIPTION_CHARS: usize = 256;
-
-/// フォルダの説明設定リクエストのボディ
-#[derive(Debug, Clone, Serialize, Validate)]
-struct SetFolderDescriptionBody<'a> {
-    /// フォルダの説明
-    ///
-    /// BOXは説明にnullを受け付けないため、説明を削除する場合は空文字列を送信する。
-    #[garde(length(chars, max = MAX_FOLDER_DESCRIPTION_CHARS))]
-    description: &'a str,
-}
-
-impl<'a> SetFolderDescriptionBody<'a> {
-    /// ボディを作成して検証する。
-    ///
-    /// # Errors
-    ///
-    /// 説明が[`MAX_FOLDER_DESCRIPTION_CHARS`]文字より長い場合は、[`BoxClientError::InvalidRequestBody`]を返す。
-    fn new(description: &'a str) -> BoxClientResult<Self> {
-        let body = Self { description };
-        body.validate()
-            .map_err(|report| BoxClientError::InvalidRequestBody(ValidationError::new(report)))?;
-        Ok(body)
-    }
-}
-
 /// フォルダコピーリクエストのボディ
 #[derive(Debug, Clone, Serialize, Validate)]
 struct CopyFolderBody<'a> {
@@ -772,13 +745,13 @@ impl BoxClient {
     /// # Arguments
     ///
     /// - `folder_id`: 説明を設定するフォルダのID
-    /// - `description`: フォルダの説明。[`MAX_FOLDER_DESCRIPTION_CHARS`]文字以下で指定する。
+    /// - `description`: フォルダの説明。[`MAX_DESCRIPTION_CHARS`](crate::MAX_DESCRIPTION_CHARS)文字以下で指定する。
     /// - `options`: `ETag`のオプション
     ///
     /// # Errors
     ///
     /// `folder_id`にルートフォルダを指定した場合は、リクエストを送信せずに[`BoxClientError::InvalidArgument`]を返す。
-    /// 説明が[`MAX_FOLDER_DESCRIPTION_CHARS`]文字より長い場合は、リクエストを送信せずに
+    /// 説明が[`MAX_DESCRIPTION_CHARS`](crate::MAX_DESCRIPTION_CHARS)文字より長い場合は、リクエストを送信せずに
     /// [`BoxClientError::InvalidRequestBody`]を返す。
     /// `options.etag`に使用できない文字が含まれる場合は、リクエストを送信せずに
     /// [`BoxClientError::InvalidHeaderValue`]を返す。
@@ -806,7 +779,7 @@ impl BoxClient {
             ));
         }
 
-        let body = SetFolderDescriptionBody::new(description)?;
+        let body = SetDescriptionBody::new(description)?;
         let mut request = ApiRequest::put(["folders", folder_id.as_ref()])
             .idempotency(Idempotency::NonIdempotent)
             .json(&body)?;
@@ -1882,7 +1855,7 @@ mod test_set_folder_description {
     )]
     #[case::empty("", UpdateFolderOptions::default(), None)]
     #[case::max_japanese(
-        &"あ".repeat(MAX_FOLDER_DESCRIPTION_CHARS),
+        &"あ".repeat(crate::MAX_DESCRIPTION_CHARS),
         UpdateFolderOptions::default(),
         None
     )]
@@ -1958,7 +1931,7 @@ mod test_set_folder_description {
         let result = client
             .set_folder_description(
                 &FolderId::new("123"),
-                &"あ".repeat(MAX_FOLDER_DESCRIPTION_CHARS + 1),
+                &"あ".repeat(crate::MAX_DESCRIPTION_CHARS + 1),
                 &UpdateFolderOptions::default(),
             )
             .await;
