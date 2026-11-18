@@ -33,9 +33,6 @@ use crate::{
 /// また、分割アップロードのAPIは20MB未満のファイルを拒否するため、この値は20MB以上である必要がある。
 pub const CHUNKED_UPLOAD_THRESHOLD: u64 = 50 * 1024 * 1024;
 
-/// 分割アップロードのコミットで、BOXが処理中を示す202を返した場合に、コミットを再送する回数の上限
-const MAX_COMMIT_POLLS: u32 = 30;
-
 /// 内容のハッシュを送信するヘッダー
 ///
 /// BOXは、ヘッダー名に反して、MD5ではなくSHA-1のハッシュを16進数で受け取る。
@@ -1001,8 +998,8 @@ impl BoxClient {
     /// アップロードセッションをコミットする。
     ///
     /// BOXが部分の処理を終えていないことを示す202を返した場合は、`Retry-After`ヘッダーが示す時間だけ待機してから、
-    /// コミットを再送する。`Retry-After`ヘッダーがない場合、または待機時間の上限を超える場合は、
-    /// 再試行設定に従って待機時間を決める。
+    /// コミットを再送する。再送する回数の上限は、[`BoxClient::max_commit_polls`]が返す値とする。
+    /// `Retry-After`ヘッダーがない場合、または待機時間の上限を超える場合は、再試行設定に従って待機時間を決める。
     ///
     /// `etag`を指定した場合は、`If-Match`ヘッダーで送信する。
     async fn commit_upload_session(
@@ -1027,7 +1024,7 @@ impl BoxClient {
                 CommitOutcome::Processing { retry_after } => retry_after,
             };
 
-            if MAX_COMMIT_POLLS <= polls {
+            if self.max_commit_polls() <= polls {
                 return Err(BoxClientError::UnexpectedResponse(
                     "upload session was not committed before reaching max commit polls",
                 ));
@@ -1080,8 +1077,8 @@ mod test_upload_file {
 
     use super::*;
     use crate::test_support::{
-        UPLOAD_BASE_PATH, create_client, create_client_with_upload_concurrency, mount_token,
-        request_count, short_retry,
+        UPLOAD_BASE_PATH, client_builder, create_client, create_client_with_upload_concurrency,
+        mount_token, request_count, short_retry,
     };
 
     /// 分割アップロードに切り替えるファイルサイズ
@@ -1410,6 +1407,58 @@ mod test_upload_file {
 
         assert_eq!(file.name, "big.bin");
         assert_eq!(requests(&server, "POST", &commit_path).await.len(), 2);
+
+        Ok(())
+    }
+
+    /// コミットでBOXが202を返し続けた場合は、指定した再送回数の上限に達した後にエラーを返すことを確認
+    #[rstest]
+    #[case::no_poll(0)]
+    #[case::two_polls(2)]
+    #[tokio::test]
+    async fn test_upload_file_in_chunks_gives_up_when_never_committed(
+        #[case] max_commit_polls: u32,
+    ) -> anyhow::Result<()> {
+        let (_dir, file_path) = create_file("big.bin", CHUNKED_CONTENT)?;
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        mount_session_and_parts(&server).await;
+        Mock::given(method("DELETE"))
+            .and(path(upload_path(&format!(
+                "/files/upload_sessions/{SESSION_ID}"
+            ))))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+        let commit_path = upload_path(&format!("/files/upload_sessions/{SESSION_ID}/commit"));
+        Mock::given(method("POST"))
+            .and(path(commit_path.as_str()))
+            .respond_with(ResponseTemplate::new(202).insert_header("retry-after", "0"))
+            .mount(&server)
+            .await;
+        let client = client_builder(&server, short_retry(0)?)?
+            .max_commit_polls(max_commit_polls)?
+            .build()
+            .await?;
+
+        let result = client
+            .upload_file_with_threshold(
+                &file_path,
+                &FolderId::root(),
+                &UploadFileOptions::default(),
+                THRESHOLD,
+            )
+            .await;
+
+        assert!(
+            matches!(result, Err(BoxClientError::UnexpectedResponse(_))),
+            "result: {result:?}"
+        );
+        // 最初のコミットと、上限までの再送を送信する。
+        assert_eq!(
+            requests(&server, "POST", &commit_path).await.len(),
+            max_commit_polls as usize + 1
+        );
 
         Ok(())
     }

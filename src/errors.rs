@@ -81,6 +81,19 @@ pub enum BoxClientError {
         max: usize,
     },
 
+    /// 202を受け取った場合に再送する回数の上限が、指定できる最大値を超えているエラー
+    #[error("{name} {max_polls} exceeds limit {limit}")]
+    InvalidMaxPolls {
+        /// 設定の名前（`max_commit_polls`または`max_download_polls`）
+        name: &'static str,
+
+        /// 指定された値
+        max_polls: u32,
+
+        /// 指定できる最大値
+        limit: u32,
+    },
+
     /// APIメソッドの引数の不正エラー
     #[error("Invalid argument: {0}")]
     InvalidArgument(&'static str),

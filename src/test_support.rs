@@ -8,7 +8,7 @@ use serde_json::json;
 use wiremock::{Mock, MockServer, ResponseTemplate, matchers::path};
 
 use crate::{
-    client::{BoxClient, BoxClientTimeout},
+    client::{BoxClient, BoxClientBuilder, BoxClientTimeout},
     config::{BoxAppAuth, BoxAppSettings, BoxConfig},
     errors::{BoxClientError, BoxClientResult},
     retry::RetryPolicy,
@@ -84,24 +84,38 @@ pub(crate) async fn create_client(
     create_client_with_timeout(server, retry, Duration::from_secs(2)).await
 }
 
+/// モックサーバーに接続し、テストが長時間待機しないタイムアウトを設定したBOXクライアントのビルダーを返す。
+///
+/// 呼び出し側は、テストする設定をビルダーに追加してからBOXクライアントを作成する。
+pub(crate) fn client_builder(
+    server: &MockServer,
+    retry: RetryPolicy,
+) -> BoxClientResult<BoxClientBuilder> {
+    let api_base_url = Url::parse(&format!("{}/2.0", server.uri()))
+        .map_err(|e| BoxClientError::InvalidBaseUrl(e.to_string()))?;
+    let upload_base_url = Url::parse(&format!("{}{UPLOAD_BASE_PATH}", server.uri()))
+        .map_err(|e| BoxClientError::InvalidBaseUrl(e.to_string()))?;
+    Ok(BoxClient::builder(test_config())
+        .timeout(BoxClientTimeout {
+            request_timeout: Duration::from_secs(2),
+            connect_timeout: Duration::from_secs(1),
+        })
+        .retry(retry)
+        .endpoints(api_base_url, format!("{}{TOKEN_PATH}", server.uri()))
+        .upload_base_url(upload_base_url))
+}
+
 /// タイムアウトを指定して、モックサーバーに接続するBOXクライアントを作成する。
 pub(crate) async fn create_client_with_timeout(
     server: &MockServer,
     retry: RetryPolicy,
     timeout: Duration,
 ) -> BoxClientResult<BoxClient> {
-    let api_base_url = Url::parse(&format!("{}/2.0", server.uri()))
-        .map_err(|e| BoxClientError::InvalidBaseUrl(e.to_string()))?;
-    let upload_base_url = Url::parse(&format!("{}{UPLOAD_BASE_PATH}", server.uri()))
-        .map_err(|e| BoxClientError::InvalidBaseUrl(e.to_string()))?;
-    BoxClient::builder(test_config())
+    client_builder(server, retry)?
         .timeout(BoxClientTimeout {
             request_timeout: timeout,
             connect_timeout: Duration::from_secs(1),
         })
-        .retry(retry)
-        .endpoints(api_base_url, format!("{}{TOKEN_PATH}", server.uri()))
-        .upload_base_url(upload_base_url)
         .build()
         .await
 }
@@ -112,15 +126,8 @@ pub(crate) async fn create_client_with_upload_concurrency(
     retry: RetryPolicy,
     upload_concurrency: usize,
 ) -> BoxClientResult<BoxClient> {
-    let api_base_url = Url::parse(&format!("{}/2.0", server.uri()))
-        .map_err(|e| BoxClientError::InvalidBaseUrl(e.to_string()))?;
-    let upload_base_url = Url::parse(&format!("{}{UPLOAD_BASE_PATH}", server.uri()))
-        .map_err(|e| BoxClientError::InvalidBaseUrl(e.to_string()))?;
-    BoxClient::builder(test_config())
-        .retry(retry)
+    client_builder(server, retry)?
         .upload_concurrency(upload_concurrency)?
-        .endpoints(api_base_url, format!("{}{TOKEN_PATH}", server.uri()))
-        .upload_base_url(upload_base_url)
         .build()
         .await
 }

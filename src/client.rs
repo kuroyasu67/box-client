@@ -64,6 +64,30 @@ pub const MIN_UPLOAD_CONCURRENCY: usize = 1;
 /// 並列にアップロードする部分はそれぞれメモリに読み込むため、上限を設けてメモリの使用量も抑える。
 pub const MAX_UPLOAD_CONCURRENCY: usize = 5;
 
+/// 分割アップロードのコミットで、BOXが処理中を示す202を返した場合に、コミットを再送する回数の上限の既定値
+///
+/// BOXは、部分の処理を終えるまで202を返し続ける。大きいファイルでは処理に時間がかかるため、
+/// 再試行設定の既定値で待機した場合に数分間はコミットを再送し続けられるように、30回とする。
+pub const DEFAULT_MAX_COMMIT_POLLS: u32 = 30;
+
+/// 分割アップロードのコミットで、コミットを再送する回数の上限に指定できる最大値
+///
+/// 1回の再送の前に、最大で`RetryPolicy::max_delay`とジッターの合計だけ待機する。
+/// 再送回数が大きすぎると、BOXが処理を終えない場合に、呼び出し元が非常に長い時間待たされるため、最大値を設ける。
+pub const MAX_COMMIT_POLLS_LIMIT: u32 = 100;
+
+/// ファイルのダウンロードで、BOXがダウンロードの準備ができていないことを示す202を返した場合に、
+/// リクエストを再送する回数の上限の既定値
+///
+/// BOXのドキュメントによると、202はアップロードの直後にダウンロードした場合などに返され、
+/// 通常は短時間で準備が終わるため、10回とする。
+pub const DEFAULT_MAX_DOWNLOAD_POLLS: u32 = 10;
+
+/// ファイルのダウンロードで、リクエストを再送する回数の上限に指定できる最大値
+///
+/// [`MAX_COMMIT_POLLS_LIMIT`]と同じ理由で、最大値を設ける。
+pub const MAX_DOWNLOAD_POLLS_LIMIT: u32 = 100;
+
 /// BOXクライアント
 ///
 /// BOXのAPIを呼び出すそれぞれのメソッドは、再試行設定に従って待機と再試行を行い、アクセストークンの
@@ -87,6 +111,12 @@ pub struct BoxClient {
     /// 分割アップロードで、並列にアップロードする部分の数
     upload_concurrency: usize,
 
+    /// 分割アップロードのコミットで、BOXが202を返した場合にコミットを再送する回数の上限
+    max_commit_polls: u32,
+
+    /// ファイルのダウンロードで、BOXが202を返した場合にリクエストを再送する回数の上限
+    max_download_polls: u32,
+
     /// トークン管理者
     ///
     /// アクセストークンをバックグラウンドで取得し直すタスクと共有するため、`Arc`で保持する。
@@ -101,6 +131,8 @@ impl std::fmt::Debug for BoxClient {
             .field("upload_base_url", &self.upload_base_url.as_str())
             .field("retry", &self.retry)
             .field("upload_concurrency", &self.upload_concurrency)
+            .field("max_commit_polls", &self.max_commit_polls)
+            .field("max_download_polls", &self.max_download_polls)
             .finish_non_exhaustive()
     }
 }
@@ -119,6 +151,8 @@ impl BoxClient {
             retry: RetryPolicy::default(),
             refresh_before_expiry: DEFAULT_REFRESH_BEFORE_EXPIRY,
             upload_concurrency: DEFAULT_UPLOAD_CONCURRENCY,
+            max_commit_polls: DEFAULT_MAX_COMMIT_POLLS,
+            max_download_polls: DEFAULT_MAX_DOWNLOAD_POLLS,
             api_base_url: None,
             upload_base_url: None,
             token_url: None,
@@ -136,6 +170,18 @@ impl BoxClient {
     #[must_use]
     pub fn upload_concurrency(&self) -> usize {
         self.upload_concurrency
+    }
+
+    /// 分割アップロードのコミットで、BOXが202を返した場合にコミットを再送する回数の上限を返す。
+    #[must_use]
+    pub fn max_commit_polls(&self) -> u32 {
+        self.max_commit_polls
+    }
+
+    /// ファイルのダウンロードで、BOXが202を返した場合にリクエストを再送する回数の上限を返す。
+    #[must_use]
+    pub fn max_download_polls(&self) -> u32 {
+        self.max_download_polls
     }
 
     /// リクエストを送信し、成功レスポンスのJSONボディをデシリアライズして返す。
@@ -277,6 +323,12 @@ pub struct BoxClientBuilder {
     /// 分割アップロードで、並列にアップロードする部分の数
     upload_concurrency: usize,
 
+    /// 分割アップロードのコミットで、BOXが202を返した場合にコミットを再送する回数の上限
+    max_commit_polls: u32,
+
+    /// ファイルのダウンロードで、BOXが202を返した場合にリクエストを再送する回数の上限
+    max_download_polls: u32,
+
     /// REST APIのベースURL。`None`の場合はBOXのURLを使用する。
     api_base_url: Option<Url>,
 
@@ -338,6 +390,39 @@ impl BoxClientBuilder {
             });
         }
         self.upload_concurrency = upload_concurrency;
+        Ok(self)
+    }
+
+    /// 分割アップロードのコミットで、BOXが処理中を示す202を返した場合に、コミットを再送する回数の上限を指定する。
+    /// 既定値は[`DEFAULT_MAX_COMMIT_POLLS`]とする。
+    ///
+    /// `0`を指定すると、BOXが202を返した時点で再送せずにエラーを返す。
+    /// 202の後の再送は、再試行設定の最大再試行回数に含めない。
+    ///
+    /// # Errors
+    ///
+    /// `max_commit_polls`が[`MAX_COMMIT_POLLS_LIMIT`]を超える場合は、[`BoxClientError::InvalidMaxPolls`]を返す。
+    pub fn max_commit_polls(mut self, max_commit_polls: u32) -> BoxClientResult<Self> {
+        self.max_commit_polls =
+            validate_max_polls("max_commit_polls", max_commit_polls, MAX_COMMIT_POLLS_LIMIT)?;
+        Ok(self)
+    }
+
+    /// ファイルのダウンロードで、BOXがダウンロードの準備ができていないことを示す202を返した場合に、
+    /// リクエストを再送する回数の上限を指定する。既定値は[`DEFAULT_MAX_DOWNLOAD_POLLS`]とする。
+    ///
+    /// `0`を指定すると、BOXが202を返した時点で再送せずにエラーを返す。
+    /// 202の後の再送は、再試行設定の最大再試行回数に含めない。
+    ///
+    /// # Errors
+    ///
+    /// `max_download_polls`が[`MAX_DOWNLOAD_POLLS_LIMIT`]を超える場合は、[`BoxClientError::InvalidMaxPolls`]を返す。
+    pub fn max_download_polls(mut self, max_download_polls: u32) -> BoxClientResult<Self> {
+        self.max_download_polls = validate_max_polls(
+            "max_download_polls",
+            max_download_polls,
+            MAX_DOWNLOAD_POLLS_LIMIT,
+        )?;
         Ok(self)
     }
 
@@ -405,9 +490,27 @@ impl BoxClientBuilder {
             upload_base_url,
             retry: self.retry,
             upload_concurrency: self.upload_concurrency,
+            max_commit_polls: self.max_commit_polls,
+            max_download_polls: self.max_download_polls,
             token_manager,
         })
     }
+}
+
+/// 202を受け取った場合に再送する回数の上限が、指定できる最大値以下であることを検証する。
+///
+/// # Errors
+///
+/// `max_polls`が`limit`を超える場合は、[`BoxClientError::InvalidMaxPolls`]を返す。
+fn validate_max_polls(name: &'static str, max_polls: u32, limit: u32) -> BoxClientResult<u32> {
+    if limit < max_polls {
+        return Err(BoxClientError::InvalidMaxPolls {
+            name,
+            max_polls,
+            limit,
+        });
+    }
+    Ok(max_polls)
 }
 
 /// BOXクライアントのタイムアウト設定
@@ -478,8 +581,8 @@ mod test_box_client {
 
     use super::*;
     use crate::test_support::{
-        TOKEN_PATH, create_client, create_client_with_timeout, mount_token, short_retry,
-        test_config,
+        TOKEN_PATH, client_builder, create_client, create_client_with_timeout, mount_token,
+        short_retry, test_config,
     };
 
     /// APIのパス
@@ -577,6 +680,74 @@ mod test_box_client {
                 "result: {result:?}"
             );
         }
+    }
+
+    /// 202を受け取った場合に再送する回数の上限が、指定できる最大値以下の場合のみ、ビルダーに設定することを確認
+    #[rstest]
+    #[case::zero(0, true)]
+    #[case::default_commit(DEFAULT_MAX_COMMIT_POLLS, true)]
+    #[case::default_download(DEFAULT_MAX_DOWNLOAD_POLLS, true)]
+    #[case::limit(MAX_COMMIT_POLLS_LIMIT, true)]
+    #[case::above_limit(MAX_COMMIT_POLLS_LIMIT + 1, false)]
+    fn test_builder_validates_max_polls(#[case] max_polls: u32, #[case] valid: bool) {
+        // 2つの上限は同じ最大値を持つため、同じ値で両方を検証する。
+        assert_eq!(MAX_COMMIT_POLLS_LIMIT, MAX_DOWNLOAD_POLLS_LIMIT);
+        let commit = BoxClient::builder(test_config()).max_commit_polls(max_polls);
+        let download = BoxClient::builder(test_config()).max_download_polls(max_polls);
+
+        if valid {
+            assert!(
+                matches!(&commit, Ok(builder) if builder.max_commit_polls == max_polls),
+                "commit: {commit:?}"
+            );
+            assert!(
+                matches!(&download, Ok(builder) if builder.max_download_polls == max_polls),
+                "download: {download:?}"
+            );
+        } else {
+            for (result, expected_name) in [
+                (commit.map(|_| ()), "max_commit_polls"),
+                (download.map(|_| ()), "max_download_polls"),
+            ] {
+                assert!(
+                    matches!(
+                        &result,
+                        Err(BoxClientError::InvalidMaxPolls { name, max_polls: m, limit })
+                            if *name == expected_name
+                                && *m == max_polls
+                                && *limit == MAX_COMMIT_POLLS_LIMIT
+                    ),
+                    "result: {result:?}"
+                );
+            }
+        }
+    }
+
+    /// 202を受け取った場合に再送する回数の上限を指定しない場合は既定値を、指定した場合はその値をBOXクライアントが返すことを確認
+    #[rstest]
+    #[case::default(None, DEFAULT_MAX_COMMIT_POLLS, DEFAULT_MAX_DOWNLOAD_POLLS)]
+    #[case::specified(Some((3, 4)), 3, 4)]
+    #[tokio::test]
+    async fn test_build_sets_max_polls(
+        #[case] specified: Option<(u32, u32)>,
+        #[case] expected_commit: u32,
+        #[case] expected_download: u32,
+    ) -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        let mut builder = client_builder(&server, short_retry(0)?)?;
+        if let Some((commit, download)) = specified {
+            builder = builder
+                .max_commit_polls(commit)?
+                .max_download_polls(download)?;
+        }
+
+        let client = builder.build().await?;
+
+        assert_eq!(client.max_commit_polls(), expected_commit);
+        assert_eq!(client.max_download_polls(), expected_download);
+
+        Ok(())
     }
 
     /// `refresh_before_expiry`が上限以下の場合のみ、BOXクライアントを作成することを確認

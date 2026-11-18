@@ -50,8 +50,10 @@ pub use api::versions::{
 };
 pub use api::web_links::{CreateWebLinkOptions, WebLink};
 pub use client::{
-    BoxClient, BoxClientBuilder, BoxClientTimeout, DEFAULT_UPLOAD_CONCURRENCY,
-    MAX_REFRESH_BEFORE_EXPIRY, MAX_UPLOAD_CONCURRENCY, MIN_UPLOAD_CONCURRENCY,
+    BoxClient, BoxClientBuilder, BoxClientTimeout, DEFAULT_MAX_COMMIT_POLLS,
+    DEFAULT_MAX_DOWNLOAD_POLLS, DEFAULT_UPLOAD_CONCURRENCY, MAX_COMMIT_POLLS_LIMIT,
+    MAX_DOWNLOAD_POLLS_LIMIT, MAX_REFRESH_BEFORE_EXPIRY, MAX_UPLOAD_CONCURRENCY,
+    MIN_UPLOAD_CONCURRENCY,
 };
 pub use config::{BoxAppAuth, BoxAppSettings, BoxConfig};
 pub use errors::{ApiError, BoxClientError, BoxClientResult, CryptoError, ValidationError};

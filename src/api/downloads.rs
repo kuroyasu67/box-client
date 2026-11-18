@@ -19,10 +19,6 @@ use crate::{
     retry::{AttemptError, Idempotency, classify_body_error, parse_retry_after},
 };
 
-/// ファイルのダウンロードで、BOXがダウンロードの準備ができていないことを示す202を返した場合に、
-/// リクエストを再送する回数の上限
-const MAX_DOWNLOAD_POLLS: u32 = 10;
-
 /// ファイルのダウンロードのオプション
 ///
 /// # Examples
@@ -182,7 +178,8 @@ impl BoxClient {
     /// 保存先にファイルが存在する場合は、ダウンロードしたファイルで置き換える。
     ///
     /// BOXがダウンロードの準備ができていないことを示す202を返した場合は、`Retry-After`ヘッダーが示す時間だけ
-    /// 待機してから、リクエストを再送する。`Retry-After`ヘッダーがない場合、または待機時間の上限を超える場合は、
+    /// 待機してから、リクエストを再送する。再送する回数の上限は、[`BoxClient::max_download_polls`]が返す値とする。
+    /// `Retry-After`ヘッダーがない場合、または待機時間の上限を超える場合は、
     /// 再試行設定に従って待機時間を決める。
     ///
     /// [`BoxClientTimeout::request_timeout`](crate::BoxClientTimeout::request_timeout)は、内容の受信の完了までに適用される。
@@ -204,7 +201,8 @@ impl BoxClient {
     /// 一時ファイルの作成、書き込み、または保存先への移動に失敗した場合は、[`BoxClientError::WriteFile`]を返す。
     /// ファイルまたはバージョンが存在しない場合、またはファイルにアクセスする権限がない場合は、
     /// [`BoxClientError::Api`]を返す。
-    /// 202を返された回数が上限に達した場合は、[`BoxClientError::UnexpectedResponse`]を返す。
+    /// 202を受け取ってリクエストを再送した回数が、[`BoxClientBuilder::max_download_polls`](crate::BoxClientBuilder::max_download_polls)で指定した上限に達した場合は、
+    /// [`BoxClientError::UnexpectedResponse`]を返す。
     /// 再試行できないエラーが発生した場合、または再試行回数の上限に達した場合はエラーを返す。
     pub async fn download_file(
         &self,
@@ -231,7 +229,7 @@ impl BoxClient {
                 DownloadOutcome::NotReady { retry_after } => retry_after,
             };
 
-            if MAX_DOWNLOAD_POLLS <= polls {
+            if self.max_download_polls() <= polls {
                 return Err(BoxClientError::UnexpectedResponse(
                     "file was not ready to download before reaching max download polls",
                 ));
@@ -283,7 +281,9 @@ mod test_download_file {
     };
 
     use super::*;
-    use crate::test_support::{TOKEN_PATH, create_client, mount_token, short_retry, test_config};
+    use crate::test_support::{
+        TOKEN_PATH, client_builder, create_client, mount_token, short_retry, test_config,
+    };
 
     /// ダウンロードするファイルのID
     const FILE_ID: &str = "11";
@@ -462,19 +462,28 @@ mod test_download_file {
         Ok(())
     }
 
-    /// BOXが202を返し続けた場合は、再送回数の上限に達した後にエラーを返すことを確認
+    /// BOXが202を返し続けた場合は、指定した再送回数の上限に達した後にエラーを返すことを確認
+    #[rstest]
+    #[case::no_poll(0)]
+    #[case::two_polls(2)]
     #[tokio::test]
-    async fn test_download_file_gives_up_when_never_ready() -> anyhow::Result<()> {
+    async fn test_download_file_gives_up_when_never_ready(
+        #[case] max_download_polls: u32,
+    ) -> anyhow::Result<()> {
         let (dir, file_path) = destination()?;
         let server = MockServer::start().await;
         mount_token(&server).await;
         Mock::given(method("GET"))
             .and(path(CONTENT_PATH))
             .respond_with(ResponseTemplate::new(202).insert_header("retry-after", "0"))
-            .expect(u64::from(MAX_DOWNLOAD_POLLS) + 1)
+            // 最初のリクエストと、上限までの再送を受け付ける。
+            .expect(u64::from(max_download_polls) + 1)
             .mount(&server)
             .await;
-        let client = create_client(&server, short_retry(0)?).await?;
+        let client = client_builder(&server, short_retry(0)?)?
+            .max_download_polls(max_download_polls)?
+            .build()
+            .await?;
 
         let result = client
             .download_file(
