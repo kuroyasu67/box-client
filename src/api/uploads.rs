@@ -472,6 +472,21 @@ fn sha1_digest_header(digest: &[u8]) -> String {
     format!("sha={}", BASE64.encode(digest))
 }
 
+/// ダイジェストを小文字の16進数文字列に変換する。
+///
+/// sha1 0.11のダイジェスト型は`LowerHex`を実装しないため、この関数がバイト列を個別に変換する。
+fn sha1_hex(digest: &[u8]) -> String {
+    use std::fmt::Write as _;
+
+    digest
+        .iter()
+        .fold(String::with_capacity(digest.len() * 2), |mut hex, byte| {
+            // `String`への書き込みは失敗しない。
+            let _ = write!(hex, "{byte:02x}");
+            hex
+        })
+}
+
 impl BoxClient {
     /// ファイルをアップロードする。
     ///
@@ -856,7 +871,7 @@ impl BoxClient {
         file.read_to_end(&mut body)
             .await
             .map_err(read_file_error(path))?;
-        let content_sha1 = format!("{:x}", Sha1::digest(&body[content_start..]));
+        let content_sha1 = sha1_hex(&Sha1::digest(&body[content_start..]));
         body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
 
         let content_type =
@@ -1294,7 +1309,7 @@ mod test_upload_file {
                 "part_id": format!("P{i}"),
                 "offset": offset,
                 "size": chunk.len(),
-                "sha1": format!("{:x}", Sha1::digest(chunk)),
+                "sha1": sha1_hex(&Sha1::digest(chunk)),
             });
             let body = if i == last {
                 part
