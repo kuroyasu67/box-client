@@ -350,7 +350,7 @@ impl BoxClient {
     /// [`BoxClient::download_file`]と同じく、内容をメモリに読み込まずに保存先と同じディレクトリの一時ファイルへ書き込み、
     /// すべての内容を受信した後に保存先に移動する。ダウンロードに失敗した場合は、保存先に存在したファイルを変更しない。
     /// タイムアウトも、[`BoxClient::download_file`]と同じく
-    /// [`BoxClientTimeout::download_read_timeout`](crate::BoxClientTimeout::download_read_timeout)を適用する。
+    /// [`TimeoutConfig::download_read_timeout`](crate::TimeoutConfig::download_read_timeout)を適用する。
     ///
     /// ダウンロード用のURLは一度しか使用できず、BOXは2回目以降のリクエストに404を返す。
     /// したがって、HTTPメソッドがGETであっても冪等でないリクエストとして送信し、BOXがダウンロードを始めていないことが明らかな

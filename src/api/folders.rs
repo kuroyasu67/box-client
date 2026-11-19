@@ -994,7 +994,7 @@ impl BoxClient {
     /// BOXは移動先の親フォルダと他の属性を同時に指定すると拒否するため、ボディでは移動先の親フォルダだけを送信する。
     ///
     /// 項目の多いフォルダの移動には時間がかかる。BOXは移動に600秒以上かかると503を返すが、移動処理はその後も継続する。
-    /// ただし、[`BoxClientTimeout::request_timeout`](crate::BoxClientTimeout::request_timeout)の既定値は30秒であるため、
+    /// ただし、[`TimeoutConfig::request_timeout`](crate::TimeoutConfig::request_timeout)の既定値は30秒であるため、
     /// 通常はBOXが503を返す前にクライアントがタイムアウトする。タイムアウトした場合も、BOXは移動処理を継続している可能性がある。
     ///
     /// 503を受け取った後、またはタイムアウトの後に再送すると、継続中の移動処理がフォルダをロックしているため409を受け取る。
@@ -1056,7 +1056,7 @@ impl BoxClient {
     /// BOXでは、ゴミ箱は既定で有効である。
     ///
     /// 項目の多いフォルダの削除には時間がかかる。BOXは削除に600秒以上かかると503を返すが、削除処理はその後も継続する。
-    /// ただし、[`BoxClientTimeout::request_timeout`](crate::BoxClientTimeout::request_timeout)の既定値は30秒であるため、
+    /// ただし、[`TimeoutConfig::request_timeout`](crate::TimeoutConfig::request_timeout)の既定値は30秒であるため、
     /// 通常はBOXが503を返す前にクライアントがタイムアウトする。タイムアウトした場合も、BOXは削除処理を継続している可能性がある。
     /// 503を受け取るまで待つ場合は、[`BoxClientBuilder::timeout`](crate::BoxClientBuilder::timeout)で
     /// `request_timeout`を600秒より長くする。

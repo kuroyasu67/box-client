@@ -4,8 +4,8 @@ use std::{
 };
 
 use box_client::{
-    BoxClient, BoxClientTimeout, BoxConfig, BoxItem, ListTrashedItemsOptions,
-    MIN_CHUNKED_UPLOAD_THRESHOLD, RetryPolicy, UpdateItemOptions,
+    BoxClient, BoxConfig, BoxItem, ListTrashedItemsOptions, MIN_CHUNKED_UPLOAD_THRESHOLD,
+    RetryPolicy, TimeoutConfig, UpdateItemOptions,
 };
 
 /// BOX設定ファイルのパスを指定する環境変数の名前
@@ -31,7 +31,7 @@ pub async fn setup() -> anyhow::Result<BoxClient> {
     // 通信帯域を分け合う部分のデータは最大で32MiB程度になる。
     // 上りの通信速度が毎秒2メガビット程度でも、どちらの送信も終えられるように、リクエストのタイムアウトを5分とする。
     // ダウンロードにはリクエストのタイムアウトを適用しないため、データを30秒受信しない場合にタイムアウトさせる。
-    let timeout = BoxClientTimeout::default()
+    let timeout = TimeoutConfig::default()
         .with_request_timeout(Duration::from_secs(300))
         .with_connect_timeout(Duration::from_secs(5))
         .with_download_read_timeout(Duration::from_secs(30));

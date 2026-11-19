@@ -431,7 +431,7 @@ Webリンクの削除で5xxを受け取った場合、またはタイムアウ�
 ```rust
 use std::time::Duration;
 
-use box_client::{BoxClient, BoxClientTimeout, RetryPolicy};
+use box_client::{BoxClient, TimeoutConfig, RetryPolicy};
 
 let client = BoxClient::builder(config)
     .retry(RetryPolicy::new(
@@ -441,7 +441,7 @@ let client = BoxClient::builder(config)
         Duration::from_millis(500),
     )?)
     .timeout(
-        BoxClientTimeout::default()
+        TimeoutConfig::default()
             .with_request_timeout(Duration::from_secs(30))
             .with_connect_timeout(Duration::from_secs(10))
             .with_download_read_timeout(Duration::from_secs(30)),

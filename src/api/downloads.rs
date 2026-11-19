@@ -176,9 +176,9 @@ impl BoxClient {
     /// 受信の途中で失敗して再試行した場合は、一時ファイルを作成し直し、内容を先頭から書き込む。
     ///
     /// ダウンロードの時間はファイルサイズによって大きく変わるため、
-    /// [`BoxClientTimeout::request_timeout`](crate::BoxClientTimeout::request_timeout)を適用しない。
+    /// [`TimeoutConfig::request_timeout`](crate::TimeoutConfig::request_timeout)を適用しない。
     /// 代わりに、データを受信しない状態が
-    /// [`BoxClientTimeout::download_read_timeout`](crate::BoxClientTimeout::download_read_timeout)だけ続いた場合にタイムアウトさせる。
+    /// [`TimeoutConfig::download_read_timeout`](crate::TimeoutConfig::download_read_timeout)だけ続いた場合にタイムアウトさせる。
     /// ダウンロード全体の時間を制限する場合は、呼び出し元が`tokio::time::timeout`などで制限する。
     /// futureを破棄した場合も、一時ファイルを削除する。
     ///
@@ -268,7 +268,7 @@ mod test_download_file {
 
     use super::*;
     use crate::{
-        BoxClientTimeout,
+        TimeoutConfig,
         test_support::{
             client_builder, create_client, mount_token, not_found_response,
             raw_server_client_builder, request_count, short_retry, start_raw_server,
@@ -622,7 +622,7 @@ mod test_download_file {
         Ok(
             raw_server_client_builder(&api_base_url, token_server, short_retry(0)?)?
                 .timeout(
-                    BoxClientTimeout::default()
+                    TimeoutConfig::default()
                         .with_request_timeout(request_timeout)
                         .with_download_read_timeout(download_read_timeout),
                 )

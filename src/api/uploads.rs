@@ -519,7 +519,7 @@ impl BoxClient {
     /// BOXは、中止しなかったアップロードセッションを7日後に破棄する。
     ///
     /// 1回のリクエストで送信するデータが大きいため、
-    /// [`BoxClientTimeout::request_timeout`](crate::BoxClientTimeout::request_timeout)は、
+    /// [`TimeoutConfig::request_timeout`](crate::TimeoutConfig::request_timeout)は、
     /// 通信速度に応じて、[`BoxClient::chunked_upload_threshold`]のデータ、または並列数と部分のサイズの積のデータを
     /// 送信できる長さにする。並列にアップロードする部分は通信帯域を分け合うため、部分のサイズだけを基準にすると、
     /// すべての部分がタイムアウトするおそれがある。

@@ -75,10 +75,10 @@ pub(crate) struct RequestBody {
 /// HTTPクライアントによって、適用するタイムアウトが異なる。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum HttpClientKind {
-    /// リクエスト全体に[`BoxClientTimeout::request_timeout`](crate::BoxClientTimeout::request_timeout)を適用するHTTPクライアント
+    /// リクエスト全体に[`TimeoutConfig::request_timeout`](crate::TimeoutConfig::request_timeout)を適用するHTTPクライアント
     Default,
 
-    /// 無通信の時間に[`BoxClientTimeout::download_read_timeout`](crate::BoxClientTimeout::download_read_timeout)を適用する、
+    /// 無通信の時間に[`TimeoutConfig::download_read_timeout`](crate::TimeoutConfig::download_read_timeout)を適用する、
     /// ファイルのダウンロード用のHTTPクライアント
     Download,
 }

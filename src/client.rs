@@ -126,13 +126,13 @@ pub const MAX_DOWNLOAD_POLLS_LIMIT: u32 = 100;
 pub struct BoxClient {
     /// HTTPクライアント
     ///
-    /// リクエスト全体に[`BoxClientTimeout::request_timeout`]を適用する。
+    /// リクエスト全体に[`TimeoutConfig::request_timeout`]を適用する。
     http_client: reqwest::Client,
 
     /// ファイルのダウンロードに使用するHTTPクライアント
     ///
     /// ダウンロードはファイルサイズによって時間が大きく変わるため、リクエスト全体のタイムアウトを適用せずに、
-    /// 無通信の時間に[`BoxClientTimeout::download_read_timeout`]を適用する。
+    /// 無通信の時間に[`TimeoutConfig::download_read_timeout`]を適用する。
     download_client: reqwest::Client,
 
     /// REST APIのベースURL
@@ -188,7 +188,7 @@ impl BoxClient {
     pub fn builder(config: BoxConfig) -> BoxClientBuilder {
         BoxClientBuilder {
             config,
-            timeout: BoxClientTimeout::default(),
+            timeout: TimeoutConfig::default(),
             retry: RetryPolicy::default(),
             refresh_before_expiry: DEFAULT_REFRESH_BEFORE_EXPIRY,
             upload_concurrency: DEFAULT_UPLOAD_CONCURRENCY,
@@ -433,7 +433,7 @@ pub struct BoxClientBuilder {
     config: BoxConfig,
 
     /// タイムアウト設定
-    timeout: BoxClientTimeout,
+    timeout: TimeoutConfig,
 
     /// 再試行設定
     retry: RetryPolicy,
@@ -508,7 +508,7 @@ impl ProxySetting {
 impl BoxClientBuilder {
     /// タイムアウト設定を指定する。
     #[must_use]
-    pub fn timeout(mut self, timeout: BoxClientTimeout) -> Self {
+    pub fn timeout(mut self, timeout: TimeoutConfig) -> Self {
         self.timeout = timeout;
         self
     }
@@ -933,16 +933,16 @@ fn validate_max_polls(name: &'static str, max_polls: u32, limit: u32) -> BoxClie
 /// ```
 /// use std::time::Duration;
 ///
-/// use box_client::BoxClientTimeout;
+/// use box_client::TimeoutConfig;
 ///
-/// let timeout = BoxClientTimeout::default()
+/// let timeout = TimeoutConfig::default()
 ///     .with_request_timeout(Duration::from_secs(60))
 ///     .with_connect_timeout(Duration::from_secs(5));
 /// assert_eq!(timeout.request_timeout, Duration::from_secs(60));
 /// ```
 #[derive(Debug, Clone)]
 #[non_exhaustive]
-pub struct BoxClientTimeout {
+pub struct TimeoutConfig {
     /// 接続の開始からレスポンスボディの受信完了までのタイムアウト
     ///
     /// ファイルのダウンロード以外のリクエストに適用する。
@@ -959,12 +959,12 @@ pub struct BoxClientTimeout {
     /// BOXクライアントは、このタイムアウトを、リクエストを送信してからレスポンスヘッダーを受信するまでの時間と、
     /// レスポンスボディのデータを受信する間隔に適用し、データを受信するたびに計測をやり直す。
     /// ダウンロードの時間はファイルサイズによって大きく変わるため、ダウンロードには
-    /// [`BoxClientTimeout::request_timeout`]を適用せず、このタイムアウトで通信が止まったことを検出する。
+    /// [`TimeoutConfig::request_timeout`]を適用せず、このタイムアウトで通信が止まったことを検出する。
     /// ダウンロード全体の時間を制限する場合は、呼び出し元が`tokio::time::timeout`などで制限する。
     pub download_read_timeout: Duration,
 }
 
-impl Default for BoxClientTimeout {
+impl Default for TimeoutConfig {
     /// レスポンスボディの受信完了までを30秒、接続の確立までを10秒、
     /// ダウンロードでデータを受信しない状態が30秒続いた場合にタイムアウトさせる設定を返す。
     fn default() -> Self {
@@ -976,7 +976,7 @@ impl Default for BoxClientTimeout {
     }
 }
 
-impl BoxClientTimeout {
+impl TimeoutConfig {
     /// 接続の開始からレスポンスボディの受信完了までのタイムアウトを設定する。
     #[must_use]
     pub fn with_request_timeout(mut self, request_timeout: Duration) -> Self {

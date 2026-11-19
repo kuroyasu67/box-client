@@ -21,7 +21,7 @@ use wiremock::{
 };
 
 use crate::{
-    client::{BoxClient, BoxClientBuilder, BoxClientTimeout},
+    client::{BoxClient, BoxClientBuilder, TimeoutConfig},
     config::{BoxAppAuth, BoxAppSettings, BoxConfig},
     errors::{ApiError, BoxClientError, BoxClientResult},
     retry::RetryPolicy,
@@ -253,7 +253,7 @@ pub(crate) fn client_builder(
     retry: RetryPolicy,
 ) -> BoxClientResult<BoxClientBuilder> {
     BoxClient::builder(test_config())
-        .timeout(BoxClientTimeout {
+        .timeout(TimeoutConfig {
             request_timeout: Duration::from_secs(2),
             connect_timeout: Duration::from_secs(1),
             download_read_timeout: Duration::from_secs(2),
@@ -290,7 +290,7 @@ pub(crate) async fn create_client_with_timeout(
     timeout: Duration,
 ) -> BoxClientResult<BoxClient> {
     client_builder(server, retry)?
-        .timeout(BoxClientTimeout {
+        .timeout(TimeoutConfig {
             request_timeout: timeout,
             connect_timeout: Duration::from_secs(1),
             download_read_timeout: Duration::from_secs(2),
