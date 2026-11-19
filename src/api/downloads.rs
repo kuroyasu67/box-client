@@ -321,7 +321,7 @@ mod test_download_file {
             .expect(1)
             .mount(&server)
             .await;
-        let client = create_client(&server, short_retry(0)?).await?;
+        let client = create_client(&server, short_retry(0)).await?;
         let version = version.map(FileVersionId::new);
         let options = DownloadFileOptions {
             version: version.as_ref(),
@@ -351,7 +351,7 @@ mod test_download_file {
             .respond_with(ResponseTemplate::new(200).set_body_bytes(CONTENT))
             .mount(&server)
             .await;
-        let client = create_client(&server, short_retry(0)?).await?;
+        let client = create_client(&server, short_retry(0)).await?;
 
         client
             .download_file(
@@ -389,7 +389,7 @@ mod test_download_file {
             .expect(1)
             .mount(&server)
             .await;
-        let client = create_client(&server, short_retry(0)?).await?;
+        let client = create_client(&server, short_retry(0)).await?;
 
         let size = client
             .download_file(
@@ -437,7 +437,7 @@ mod test_download_file {
             .mount(&server)
             .await;
         // 202の後の再送が再試行回数に含まれないことも確かめるため、再試行回数を0にする。
-        let client = create_client(&server, short_retry(0)?).await?;
+        let client = create_client(&server, short_retry(0)).await?;
 
         client
             .download_file(
@@ -470,7 +470,7 @@ mod test_download_file {
             .expect(u64::from(max_download_polls) + 1)
             .mount(&server)
             .await;
-        let client = client_builder(&server, short_retry(0)?)?
+        let client = client_builder(&server, short_retry(0))?
             .max_download_polls(max_download_polls)?
             .build()
             .await?;
@@ -506,7 +506,7 @@ mod test_download_file {
             .expect(1)
             .mount(&server)
             .await;
-        let client = create_client(&server, short_retry(0)?).await?;
+        let client = create_client(&server, short_retry(0)).await?;
 
         let result = client
             .download_file(
@@ -541,7 +541,7 @@ mod test_download_file {
             .respond_with(not_found_response())
             .mount(&server)
             .await;
-        let client = create_client(&server, short_retry(2)?).await?;
+        let client = create_client(&server, short_retry(2)).await?;
 
         let result = client
             .download_file(
@@ -620,7 +620,7 @@ mod test_download_file {
         download_read_timeout: Duration,
     ) -> anyhow::Result<BoxClient> {
         Ok(
-            raw_server_client_builder(&api_base_url, token_server, short_retry(0)?)?
+            raw_server_client_builder(&api_base_url, token_server, short_retry(0))?
                 .timeout(
                     TimeoutConfig::default()
                         .with_request_timeout(request_timeout)
@@ -708,7 +708,7 @@ mod test_download_file {
         let token_server = MockServer::start().await;
         mount_token(&token_server).await;
         let (api_base_url, connections) = start_truncating_once_server().await?;
-        let client = raw_server_client_builder(&api_base_url, &token_server, short_retry(1)?)?
+        let client = raw_server_client_builder(&api_base_url, &token_server, short_retry(1))?
             .build()
             .await?;
 
@@ -734,7 +734,7 @@ mod test_download_file {
     async fn test_download_file_rejects_path_without_file_name() -> anyhow::Result<()> {
         let server = MockServer::start().await;
         mount_token(&server).await;
-        let client = create_client(&server, short_retry(0)?).await?;
+        let client = create_client(&server, short_retry(0)).await?;
 
         let result = client
             .download_file(
@@ -766,7 +766,7 @@ mod test_download_file {
             .respond_with(ResponseTemplate::new(200).set_body_bytes(CONTENT))
             .mount(&server)
             .await;
-        let client = create_client(&server, short_retry(0)?).await?;
+        let client = create_client(&server, short_retry(0)).await?;
 
         let result = client
             .download_file(

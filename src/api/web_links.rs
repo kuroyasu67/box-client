@@ -793,7 +793,7 @@ mod test_web_link_information {
             .expect(1)
             .mount(&server)
             .await;
-        let client = create_client(&server, short_retry(0)?).await?;
+        let client = create_client(&server, short_retry(0)).await?;
 
         let web_link = client
             .web_link_information(&WebLinkId::new("12345"))
@@ -817,7 +817,7 @@ mod test_web_link_information {
             .respond_with(not_found_response())
             .mount(&server)
             .await;
-        let client = create_client(&server, short_retry(0)?).await?;
+        let client = create_client(&server, short_retry(0)).await?;
 
         let result = client.web_link_information(&WebLinkId::new("999")).await;
 
@@ -881,7 +881,7 @@ mod test_create_web_link {
             .expect(1)
             .mount(&server)
             .await;
-        let client = create_client(&server, short_retry(0)?).await?;
+        let client = create_client(&server, short_retry(0)).await?;
 
         let web_link = client
             .create_web_link("https://example.com", &FolderId::new("456"), &options)
@@ -915,7 +915,7 @@ mod test_create_web_link {
     ) -> anyhow::Result<()> {
         let server = MockServer::start().await;
         mount_token(&server).await;
-        let client = create_client(&server, short_retry(0)?).await?;
+        let client = create_client(&server, short_retry(0)).await?;
         let requests_before = request_count(&server).await;
         let options = CreateWebLinkOptions { name, description };
 
@@ -1052,7 +1052,7 @@ mod test_update_web_link {
             .expect(1)
             .mount(&server)
             .await;
-        let client = create_client(&server, short_retry(0)?).await?;
+        let client = create_client(&server, short_retry(0)).await?;
         let options = UpdateItemOptions { etag };
 
         let web_link = update.call(&client, &options).await?;
@@ -1080,7 +1080,7 @@ mod test_update_web_link {
     ) -> anyhow::Result<()> {
         let server = MockServer::start().await;
         mount_token(&server).await;
-        let client = create_client(&server, short_retry(0)?).await?;
+        let client = create_client(&server, short_retry(0)).await?;
         let requests_before = request_count(&server).await;
 
         let result = update.call(&client, &UpdateItemOptions::default()).await;
@@ -1140,7 +1140,7 @@ mod test_delete_web_link {
             .expect(1)
             .mount(&server)
             .await;
-        let client = create_client(&server, short_retry(0)?).await?;
+        let client = create_client(&server, short_retry(0)).await?;
 
         client.delete_web_link(&WebLinkId::new("123")).await?;
 
@@ -1236,7 +1236,7 @@ mod test_update_web_link_attributes {
             .expect(1)
             .mount(&server)
             .await;
-        let client = create_client(&server, short_retry(0)?).await?;
+        let client = create_client(&server, short_retry(0)).await?;
         let destination = MoveDestination::Folder(FolderId::new("456"));
         let update = WebLinkUpdate::default()
             .with_url("https://example.com/new")
@@ -1268,7 +1268,7 @@ mod test_update_web_link_attributes {
     async fn test_rejects_invalid_update() -> anyhow::Result<()> {
         let server = MockServer::start().await;
         mount_token(&server).await;
-        let client = create_client(&server, short_retry(0)?).await?;
+        let client = create_client(&server, short_retry(0)).await?;
         let requests_before = request_count(&server).await;
         let web_link_id = WebLinkId::new("123");
         let options = UpdateItemOptions::default();

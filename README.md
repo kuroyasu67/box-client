@@ -419,27 +419,32 @@ Webリンクの削除で5xxを受け取った場合、またはタイムアウ�
 
 既定値を使用した場合、ジッターを加算する前の待機時間は、0.5秒、1秒、2秒、4秒、8秒と倍増する。
 
-`RetryPolicy::new()`は、次の条件を満たさない設定値に対して`BoxClientError::InvalidRetryPolicy`を返す。
+再試行設定とタイムアウト設定は、`BoxClientBuilder`で指定する。
+利用者は、どちらも`Default`で作成し、`with_*`メソッドで値を設定する。
+
+`BoxClientBuilder::build()`は、次の条件を満たさない再試行設定に対して`BoxClientError::InvalidRetryPolicy`を返す。
 
 - `initial_delay`が`0`より大きい。
   `0`の場合は、待機せずに再試行し続けるためである。
 - `initial_delay`が`max_delay`以下である。
 - `max_jitter`が`max_delay`以下である。
 
-再試行設定とタイムアウトは、`BoxClientBuilder`で指定する。
+また、`BoxClientBuilder::build()`は、`request_timeout`、`connect_timeout`および`download_read_timeout`のいずれかが`0`のタイムアウト設定に対して`BoxClientError::InvalidTimeoutConfig`を返す。
+`0`の場合は、すべてのリクエストが直ちにタイムアウトするためである。
 
 ```rust
 use std::time::Duration;
 
-use box_client::{BoxClient, TimeoutConfig, RetryPolicy};
+use box_client::{BoxClient, RetryPolicy, TimeoutConfig};
 
 let client = BoxClient::builder(config)
-    .retry(RetryPolicy::new(
-        3,
-        Duration::from_secs(1),
-        Duration::from_secs(10),
-        Duration::from_millis(500),
-    )?)
+    .retry(
+        RetryPolicy::default()
+            .with_max_retries(3)
+            .with_initial_delay(Duration::from_secs(1))
+            .with_max_delay(Duration::from_secs(10))
+            .with_max_jitter(Duration::from_millis(500)),
+    )
     .timeout(
         TimeoutConfig::default()
             .with_request_timeout(Duration::from_secs(30))

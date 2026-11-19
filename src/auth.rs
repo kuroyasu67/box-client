@@ -779,8 +779,8 @@ mod test_token_manager {
     use crate::{
         errors::BoxClientError,
         test_support::{
-            TOKEN_PATH, mount_always, mount_first_n, request_count, short_retry, test_config,
-            token_response,
+            TOKEN_PATH, mount_always, mount_first_n, request_count, retry_policy, short_retry,
+            test_config, token_response,
         },
     };
 
@@ -857,7 +857,7 @@ mod test_token_manager {
         let manager = create_manager(
             &server,
             Duration::from_secs(2),
-            short_retry(0)?,
+            short_retry(0),
             REFRESH_BEFORE_EXPIRY,
         )?;
 
@@ -901,7 +901,7 @@ mod test_token_manager {
         let manager = create_manager(
             &server,
             Duration::from_secs(2),
-            short_retry(0)?,
+            short_retry(0),
             Duration::from_secs(3600),
         )?;
         let old = manager.access_token().await?;
@@ -938,7 +938,7 @@ mod test_token_manager {
         let manager = create_manager(
             &server,
             Duration::from_secs(2),
-            short_retry(0)?,
+            short_retry(0),
             Duration::from_secs(3600),
         )?;
         let old = manager.access_token().await?;
@@ -974,7 +974,7 @@ mod test_token_manager {
         let manager = create_manager(
             &server,
             Duration::from_secs(2),
-            short_retry(0)?,
+            short_retry(0),
             Duration::from_secs(3600),
         )?;
         let old = manager.access_token().await?;
@@ -1012,7 +1012,7 @@ mod test_token_manager {
                 http_client,
                 &test_config(),
                 format!("{}{TOKEN_PATH}", server.uri()),
-                short_retry(0)?,
+                short_retry(0),
                 Duration::from_secs(3600),
             )?
             .with_refresh_interval_after_failure(INTERVAL),
@@ -1060,7 +1060,7 @@ mod test_token_manager {
         let manager = create_manager(
             &server,
             Duration::from_secs(2),
-            short_retry(0)?,
+            short_retry(0),
             REFRESH_BEFORE_EXPIRY,
         )?;
         manager.access_token().await?;
@@ -1081,7 +1081,7 @@ mod test_token_manager {
         let manager = create_manager(
             &server,
             Duration::from_secs(2),
-            short_retry(0)?,
+            short_retry(0),
             REFRESH_BEFORE_EXPIRY,
         )?;
         // バックグラウンドでの取得に失敗した状態を再現する。
@@ -1109,7 +1109,7 @@ mod test_token_manager {
         let manager = create_manager(
             &server,
             Duration::from_secs(2),
-            short_retry(0)?,
+            short_retry(0),
             REFRESH_BEFORE_EXPIRY,
         )?;
         manager.access_token().await?;
@@ -1139,7 +1139,7 @@ mod test_token_manager {
         let manager = create_manager(
             &server,
             Duration::from_secs(2),
-            short_retry(0)?,
+            short_retry(0),
             REFRESH_BEFORE_EXPIRY,
         )?;
 
@@ -1171,7 +1171,7 @@ mod test_token_manager {
         let manager = create_manager(
             &server,
             Duration::from_secs(2),
-            short_retry(0)?,
+            short_retry(0),
             REFRESH_BEFORE_EXPIRY,
         )?;
         let current = manager.access_token().await?;
@@ -1205,7 +1205,7 @@ mod test_token_manager {
         let manager = create_manager(
             &server,
             Duration::from_secs(2),
-            short_retry(1)?,
+            short_retry(1),
             REFRESH_BEFORE_EXPIRY,
         )?;
 
@@ -1230,12 +1230,12 @@ mod test_token_manager {
         .await;
         mount_always(&server, method("POST"), token_response()).await;
         // 指数バックオフで待機すると10秒かかる設定にする。
-        let retry = RetryPolicy::new(
+        let retry = retry_policy(
             1,
             Duration::from_secs(10),
             Duration::from_secs(10),
             Duration::ZERO,
-        )?;
+        );
         let manager = create_manager(
             &server,
             Duration::from_secs(2),
@@ -1264,7 +1264,7 @@ mod test_token_manager {
         let manager = create_manager(
             &server,
             Duration::from_secs(2),
-            short_retry(max_retries)?,
+            short_retry(max_retries),
             REFRESH_BEFORE_EXPIRY,
         )?;
 
@@ -1298,7 +1298,7 @@ mod test_token_manager {
         let manager = create_manager(
             &server,
             Duration::from_secs(2),
-            short_retry(2)?,
+            short_retry(2),
             REFRESH_BEFORE_EXPIRY,
         )?;
 
@@ -1329,7 +1329,7 @@ mod test_token_manager {
         let manager = create_manager(
             &server,
             Duration::from_millis(100),
-            short_retry(1)?,
+            short_retry(1),
             REFRESH_BEFORE_EXPIRY,
         )?;
 
@@ -1372,7 +1372,7 @@ mod test_token_manager {
         let manager = create_manager(
             &server,
             Duration::from_secs(2),
-            short_retry(0)?,
+            short_retry(0),
             REFRESH_BEFORE_EXPIRY,
         )?;
 
@@ -1416,7 +1416,7 @@ mod test_token_manager {
         let manager = create_manager(
             &server,
             Duration::from_secs(2),
-            short_retry(0)?,
+            short_retry(0),
             REFRESH_BEFORE_EXPIRY,
         )?;
 
@@ -1452,7 +1452,7 @@ mod test_token_manager {
         let manager = create_manager(
             &server,
             Duration::from_secs(2),
-            short_retry(0)?,
+            short_retry(0),
             REFRESH_BEFORE_EXPIRY,
         )?;
 
@@ -1484,7 +1484,7 @@ mod test_token_manager {
         let manager = create_manager(
             &server,
             Duration::from_secs(2),
-            short_retry(2)?,
+            short_retry(2),
             REFRESH_BEFORE_EXPIRY,
         )?;
 
@@ -1514,7 +1514,7 @@ mod test_token_manager {
         let manager = create_manager(
             &server,
             Duration::from_secs(2),
-            short_retry(2)?,
+            short_retry(2),
             REFRESH_BEFORE_EXPIRY,
         )?;
 

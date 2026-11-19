@@ -1287,7 +1287,7 @@ mod test_folder_information {
             .expect(1)
             .mount(&server)
             .await;
-        let client = create_client(&server, short_retry(0)?).await?;
+        let client = create_client(&server, short_retry(0)).await?;
 
         let folder = client.folder_information(&FolderId::new("12345")).await?;
 
@@ -1308,7 +1308,7 @@ mod test_folder_information {
             .respond_with(not_found_response())
             .mount(&server)
             .await;
-        let client = create_client(&server, short_retry(0)?).await?;
+        let client = create_client(&server, short_retry(0)).await?;
 
         let result = client.folder_information(&FolderId::new("999")).await;
 
@@ -1365,7 +1365,7 @@ mod test_list_items_in_folder {
             })))
             .mount(&server)
             .await;
-        let client = create_client(&server, short_retry(0)?).await?;
+        let client = create_client(&server, short_retry(0)).await?;
 
         let page = client
             .list_items_in_folder(&FolderId::new("123"), marker, &options)
@@ -1389,7 +1389,7 @@ mod test_list_items_in_folder {
     async fn test_list_items_in_folder_invalid_limit(#[case] limit: u32) -> anyhow::Result<()> {
         let server = MockServer::start().await;
         mount_token(&server).await;
-        let client = create_client(&server, short_retry(0)?).await?;
+        let client = create_client(&server, short_retry(0)).await?;
         let options = ListItemsOptions {
             limit: Some(limit),
             ..ListItemsOptions::default()
@@ -1419,7 +1419,7 @@ mod test_list_items_in_folder {
     async fn test_list_items_in_folder_root_with_sort() -> anyhow::Result<()> {
         let server = MockServer::start().await;
         mount_token(&server).await;
-        let client = create_client(&server, short_retry(0)?).await?;
+        let client = create_client(&server, short_retry(0)).await?;
         let options = ListItemsOptions {
             sort: Some(ItemSort::Name),
             ..ListItemsOptions::default()
@@ -1455,7 +1455,7 @@ mod test_list_items_in_folder {
             })))
             .mount(&server)
             .await;
-        let client = create_client(&server, short_retry(0)?).await?;
+        let client = create_client(&server, short_retry(0)).await?;
         let options = ListItemsOptions {
             direction: Some(SortDirection::Desc),
             ..ListItemsOptions::default()
@@ -1534,7 +1534,7 @@ mod test_list_all_items_in_folder {
             .expect(1)
             .mount(&server)
             .await;
-        let client = create_client(&server, short_retry(0)?).await?;
+        let client = create_client(&server, short_retry(0)).await?;
 
         let items = client
             .list_all_items_in_folder(&FolderId::new("123"), &ListItemsOptions::default())
@@ -1557,7 +1557,7 @@ mod test_list_all_items_in_folder {
             .expect(2)
             .mount(&server)
             .await;
-        let client = create_client(&server, short_retry(0)?).await?;
+        let client = create_client(&server, short_retry(0)).await?;
 
         let result = client
             .list_all_items_in_folder(&FolderId::new("123"), &ListItemsOptions::default())
@@ -1679,7 +1679,7 @@ mod test_create_folder {
             .expect(1)
             .mount(&server)
             .await;
-        let client = create_client(&server, short_retry(0)?).await?;
+        let client = create_client(&server, short_retry(0)).await?;
 
         let folder = client.create_folder("Contracts", &FolderId::root()).await?;
 
@@ -1695,7 +1695,7 @@ mod test_create_folder {
     async fn test_create_folder_rejects_invalid_name() -> anyhow::Result<()> {
         let server = MockServer::start().await;
         mount_token(&server).await;
-        let client = create_client(&server, short_retry(0)?).await?;
+        let client = create_client(&server, short_retry(0)).await?;
         let requests_before = request_count(&server).await;
 
         let result = client.create_folder("a/b", &FolderId::root()).await;
@@ -1775,7 +1775,7 @@ mod test_copy_folder {
             .expect(1)
             .mount(&server)
             .await;
-        let client = create_client(&server, short_retry(0)?).await?;
+        let client = create_client(&server, short_retry(0)).await?;
 
         let folder = client
             .copy_folder(&FolderId::new("123"), &FolderId::new("456"), &options)
@@ -1805,7 +1805,7 @@ mod test_copy_folder {
     ) -> anyhow::Result<()> {
         let server = MockServer::start().await;
         mount_token(&server).await;
-        let client = create_client(&server, short_retry(0)?).await?;
+        let client = create_client(&server, short_retry(0)).await?;
         let requests_before = request_count(&server).await;
         let options = CopyFolderOptions { name };
 
@@ -2002,7 +2002,7 @@ mod test_update_folder {
             .expect(1)
             .mount(&server)
             .await;
-        let client = create_client(&server, short_retry(0)?).await?;
+        let client = create_client(&server, short_retry(0)).await?;
         let options = UpdateItemOptions { etag };
 
         let folder = update
@@ -2072,7 +2072,7 @@ mod test_update_folder {
     ) -> anyhow::Result<()> {
         let server = MockServer::start().await;
         mount_token(&server).await;
-        let client = create_client(&server, short_retry(0)?).await?;
+        let client = create_client(&server, short_retry(0)).await?;
         let requests_before = request_count(&server).await;
 
         let result = update
@@ -2183,7 +2183,7 @@ mod test_delete_folder {
             .respond_with(ResponseTemplate::new(204))
             .mount(&server)
             .await;
-        let client = create_client(&server, short_retry(0)?).await?;
+        let client = create_client(&server, short_retry(0)).await?;
 
         client
             .delete_folder(&FolderId::new("123"), &options)
@@ -2205,7 +2205,7 @@ mod test_delete_folder {
     async fn test_delete_folder_rejects_root() -> anyhow::Result<()> {
         let server = MockServer::start().await;
         mount_token(&server).await;
-        let client = create_client(&server, short_retry(0)?).await?;
+        let client = create_client(&server, short_retry(0)).await?;
         let requests_before = request_count(&server).await;
 
         let result = client
@@ -2328,7 +2328,7 @@ mod test_update_folder_attributes {
             .expect(1)
             .mount(&server)
             .await;
-        let client = create_client(&server, short_retry(0)?).await?;
+        let client = create_client(&server, short_retry(0)).await?;
         let tags = ["contract", "2026"];
         let collections = ["999"];
         let update = FolderUpdate::default()
@@ -2375,7 +2375,7 @@ mod test_update_folder_attributes {
             .expect(1)
             .mount(&server)
             .await;
-        let client = create_client(&server, short_retry(0)?).await?;
+        let client = create_client(&server, short_retry(0)).await?;
         let update = FolderUpdate::default()
             .with_shared_link_removed()
             .with_folder_upload_email_disabled();
@@ -2403,7 +2403,7 @@ mod test_update_folder_attributes {
             .expect(1)
             .mount(&server)
             .await;
-        let client = create_client(&server, short_retry(0)?).await?;
+        let client = create_client(&server, short_retry(0)).await?;
         let destination = MoveDestination::User(UserId::new("789"));
 
         client
@@ -2422,7 +2422,7 @@ mod test_update_folder_attributes {
     async fn test_rejects_invalid_update() -> anyhow::Result<()> {
         let server = MockServer::start().await;
         mount_token(&server).await;
-        let client = create_client(&server, short_retry(0)?).await?;
+        let client = create_client(&server, short_retry(0)).await?;
         let requests_before = request_count(&server).await;
         let folder_id = FolderId::new("123");
         let options = UpdateItemOptions::default();

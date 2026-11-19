@@ -489,7 +489,7 @@ mod test_file_version {
             .expect(1)
             .mount(&server)
             .await;
-        let client = create_client(&server, short_retry(0)?).await?;
+        let client = create_client(&server, short_retry(0)).await?;
 
         let version = client
             .file_version(&FileId::new("12345"), &FileVersionId::new("67890"))
@@ -533,7 +533,7 @@ mod test_file_version {
             .respond_with(not_found_response())
             .mount(&server)
             .await;
-        let client = create_client(&server, short_retry(0)?).await?;
+        let client = create_client(&server, short_retry(0)).await?;
 
         let result = client
             .file_version(&FileId::new("12345"), &FileVersionId::new("999"))
@@ -605,7 +605,7 @@ mod test_list_file_versions {
             .expect(1)
             .mount(&server)
             .await;
-        let client = create_client(&server, short_retry(0)?).await?;
+        let client = create_client(&server, short_retry(0)).await?;
 
         let page = client
             .list_file_versions(
@@ -636,7 +636,7 @@ mod test_list_file_versions {
     ) -> anyhow::Result<()> {
         let server = MockServer::start().await;
         mount_token(&server).await;
-        let client = create_client(&server, short_retry(0)?).await?;
+        let client = create_client(&server, short_retry(0)).await?;
         let requests_before = request_count(&server).await;
 
         let result = client
@@ -676,7 +676,7 @@ mod test_list_file_versions {
             .respond_with(move |request: &Request| page_response(request, total))
             .mount(&server)
             .await;
-        let client = create_client(&server, short_retry(0)?).await?;
+        let client = create_client(&server, short_retry(0)).await?;
 
         let versions = client
             .list_all_file_versions(
@@ -710,7 +710,7 @@ mod test_list_file_versions {
             })))
             .mount(&server)
             .await;
-        let client = create_client(&server, short_retry(0)?).await?;
+        let client = create_client(&server, short_retry(0)).await?;
 
         let versions = client
             .list_all_file_versions(
@@ -734,7 +734,7 @@ mod test_list_file_versions {
             .respond_with(|request: &Request| page_response(request, 20_000))
             .mount(&server)
             .await;
-        let client = create_client(&server, short_retry(0)?).await?;
+        let client = create_client(&server, short_retry(0)).await?;
 
         let result = client
             .list_all_file_versions(&FileId::new("12345"), &ListFileVersionsOptions::default())
@@ -782,7 +782,7 @@ mod test_promote_file_version {
             .expect(1)
             .mount(&server)
             .await;
-        let client = create_client(&server, short_retry(0)?).await?;
+        let client = create_client(&server, short_retry(0)).await?;
 
         let version = client
             .promote_file_version(&FileId::new("12345"), &FileVersionId::new("67890"))
@@ -852,7 +852,7 @@ mod test_restore_file_version {
             .expect(1)
             .mount(&server)
             .await;
-        let client = create_client(&server, short_retry(0)?).await?;
+        let client = create_client(&server, short_retry(0)).await?;
 
         let version = client
             .restore_file_version(&FileId::new("12345"), &FileVersionId::new("67890"))
@@ -882,7 +882,7 @@ mod test_restore_file_version {
             .expect(expected_requests)
             .mount(&server)
             .await;
-        let client = create_client(&server, short_retry(2)?).await?;
+        let client = create_client(&server, short_retry(2)).await?;
 
         let result = client
             .restore_file_version(&FileId::new("12345"), &FileVersionId::new("67890"))
@@ -926,7 +926,7 @@ mod test_delete_file_version {
             .respond_with(ResponseTemplate::new(204))
             .mount(&server)
             .await;
-        let client = create_client(&server, short_retry(0)?).await?;
+        let client = create_client(&server, short_retry(0)).await?;
 
         client
             .delete_file_version(

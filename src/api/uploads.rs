@@ -1181,7 +1181,7 @@ mod test_upload_file {
             .expect(1)
             .mount(&server)
             .await;
-        let client = create_client(&server, short_retry(0)?).await?;
+        let client = create_client(&server, short_retry(0)).await?;
         let options = UploadFileOptions { name: option_name };
 
         let file = client
@@ -1230,7 +1230,7 @@ mod test_upload_file {
         let file_path = dir.path().join("..");
         let server = MockServer::start().await;
         mount_token(&server).await;
-        let client = create_client(&server, short_retry(0)?).await?;
+        let client = create_client(&server, short_retry(0)).await?;
         let requests_before = request_count(&server).await;
         let options = UploadFileOptions { name: option_name };
 
@@ -1254,7 +1254,7 @@ mod test_upload_file {
         let dir = tempfile::tempdir()?;
         let server = MockServer::start().await;
         mount_token(&server).await;
-        let client = create_client(&server, short_retry(0)?).await?;
+        let client = create_client(&server, short_retry(0)).await?;
         let requests_before = request_count(&server).await;
 
         let result = client
@@ -1377,7 +1377,7 @@ mod test_upload_file {
             .expect(1)
             .mount(&server)
             .await;
-        let client = create_client(&server, short_retry(0)?).await?;
+        let client = create_client(&server, short_retry(0)).await?;
 
         let file = client
             .upload_file_with_threshold(
@@ -1421,7 +1421,7 @@ mod test_upload_file {
             .respond_with(ResponseTemplate::new(201).set_body_json(file_json("big.bin")))
             .mount(&server)
             .await;
-        let client = create_client(&server, short_retry(0)?).await?;
+        let client = create_client(&server, short_retry(0)).await?;
 
         let file = client
             .upload_file_with_threshold(
@@ -1463,7 +1463,7 @@ mod test_upload_file {
             .respond_with(ResponseTemplate::new(202).insert_header("retry-after", "0"))
             .mount(&server)
             .await;
-        let client = client_builder(&server, short_retry(0)?)?
+        let client = client_builder(&server, short_retry(0))?
             .max_commit_polls(max_commit_polls)?
             .build()
             .await?;
@@ -1527,7 +1527,7 @@ mod test_upload_file {
             .mount(&server)
             .await;
         let client =
-            create_client_with_upload_concurrency(&server, short_retry(0)?, concurrency).await?;
+            create_client_with_upload_concurrency(&server, short_retry(0), concurrency).await?;
 
         let started_at = std::time::Instant::now();
         client
@@ -1576,7 +1576,7 @@ mod test_upload_file {
             .expect(1)
             .mount(&server)
             .await;
-        let client = create_client(&server, short_retry(0)?).await?;
+        let client = create_client(&server, short_retry(0)).await?;
 
         let result = client
             .upload_file_with_threshold(
@@ -1622,7 +1622,7 @@ mod test_upload_file {
             .respond_with(ResponseTemplate::new(204))
             .mount(&server)
             .await;
-        let client = create_client(&server, short_retry(0)?).await?;
+        let client = create_client(&server, short_retry(0)).await?;
 
         let result = client
             .upload_file_with_threshold(
@@ -1665,7 +1665,7 @@ mod test_upload_file {
             .respond_with(ResponseTemplate::new(204))
             .mount(&server)
             .await;
-        let client = create_client(&server, short_retry(0)?).await?;
+        let client = create_client(&server, short_retry(0)).await?;
 
         let result = client
             .upload_file_with_threshold(
@@ -1702,7 +1702,7 @@ mod test_upload_file {
             })))
             .mount(&server)
             .await;
-        let client = create_client(&server, short_retry(0)?).await?;
+        let client = create_client(&server, short_retry(0)).await?;
         let session = UploadSession {
             id: SESSION_ID.to_owned(),
             part_size: PART_SIZE as u64,
@@ -1748,7 +1748,7 @@ mod test_upload_file {
                 .mount(&server)
                 .await;
         }
-        let mut builder = client_builder(&server, short_retry(0)?)?;
+        let mut builder = client_builder(&server, short_retry(0))?;
         if let Some(threshold) = threshold {
             builder = builder.chunked_upload_threshold(threshold)?;
         }
@@ -1845,7 +1845,7 @@ mod test_update_file_content {
             .expect(1)
             .mount(&server)
             .await;
-        let client = create_client(&server, short_retry(0)?).await?;
+        let client = create_client(&server, short_retry(0)).await?;
 
         let file = client
             .update_file_content_with_threshold(
@@ -1889,7 +1889,7 @@ mod test_update_file_content {
         let (_dir, file_path) = create_file(CHUNKED_CONTENT)?;
         let server = MockServer::start().await;
         mount_token(&server).await;
-        let client = create_client(&server, short_retry(0)?).await?;
+        let client = create_client(&server, short_retry(0)).await?;
         let requests_before = request_count(&server).await;
 
         let result = client
@@ -1980,7 +1980,7 @@ mod test_update_file_content {
             .expect(1)
             .mount(&server)
             .await;
-        let client = create_client(&server, short_retry(0)?).await?;
+        let client = create_client(&server, short_retry(0)).await?;
         let options = UpdateFileContentOptions::default()
             .with_name("report-v2.txt")
             .with_etag("1");
@@ -2061,7 +2061,7 @@ mod test_preflight_upload_file {
             .expect(1)
             .mount(&server)
             .await;
-        let client = create_client(&server, short_retry(0)?).await?;
+        let client = create_client(&server, short_retry(0)).await?;
         let options = UploadFileOptions { name: option_name };
 
         let upload_url = client
@@ -2103,7 +2103,7 @@ mod test_preflight_upload_file {
             .respond_with(ResponseTemplate::new(200).set_body_string(body))
             .mount(&server)
             .await;
-        let client = create_client(&server, short_retry(0)?).await?;
+        let client = create_client(&server, short_retry(0)).await?;
 
         let upload_url = client
             .preflight_upload_file(
@@ -2151,7 +2151,7 @@ mod test_preflight_upload_file {
             .expect(1)
             .mount(&server)
             .await;
-        let client = create_client(&server, short_retry(2)?).await?;
+        let client = create_client(&server, short_retry(2)).await?;
 
         let result = client
             .preflight_upload_file(
@@ -2183,7 +2183,7 @@ mod test_preflight_upload_file {
         let (dir, _) = create_file()?;
         let server = MockServer::start().await;
         mount_token(&server).await;
-        let client = create_client(&server, short_retry(0)?).await?;
+        let client = create_client(&server, short_retry(0)).await?;
         let requests_before = request_count(&server).await;
         let options = UploadFileOptions { name: option_name };
 
@@ -2247,7 +2247,7 @@ mod test_preflight_update_file_content {
             .expect(1)
             .mount(&server)
             .await;
-        let client = create_client(&server, short_retry(0)?).await?;
+        let client = create_client(&server, short_retry(0)).await?;
 
         let upload_url = client
             .preflight_update_file_content(&FileId::new("123"), &file_path, &options)
@@ -2282,7 +2282,7 @@ mod test_preflight_update_file_content {
         std::fs::write(dir.path().join("report.txt"), b"hello")?;
         let server = MockServer::start().await;
         mount_token(&server).await;
-        let client = create_client(&server, short_retry(0)?).await?;
+        let client = create_client(&server, short_retry(0)).await?;
         let requests_before = request_count(&server).await;
         let options = UpdateFileContentOptions {
             name: option_name,

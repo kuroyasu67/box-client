@@ -36,6 +36,10 @@ pub enum BoxClientError {
     #[error("Invalid retry policy: {0}")]
     InvalidRetryPolicy(&'static str),
 
+    /// タイムアウト設定の不正エラー
+    #[error("Invalid timeout config: {0}")]
+    InvalidTimeoutConfig(&'static str),
+
     /// アクセストークンを有効期限のどれだけ前に取得し直すかの設定が上限を超えたエラー
     #[error("refresh_before_expiry {refresh_before_expiry:?} exceeds max {max:?}")]
     InvalidRefreshBeforeExpiry {

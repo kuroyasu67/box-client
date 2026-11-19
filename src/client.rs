@@ -768,11 +768,17 @@ impl BoxClientBuilder {
     ///
     /// # Errors
     ///
-    /// `refresh_before_expiry`が[`MAX_REFRESH_BEFORE_EXPIRY`]を超える場合は、トークンエンドポイントへリクエストせずに
-    /// [`BoxClientError::InvalidRefreshBeforeExpiry`]を返す。
+    /// 次の場合は、トークンエンドポイントへリクエストせずにエラーを返す。
+    ///
+    /// - タイムアウト設定が[`TimeoutConfig`]に記載した条件を満たさない場合は、[`BoxClientError::InvalidTimeoutConfig`]を返す。
+    /// - 再試行設定が[`RetryPolicy`]に記載した条件を満たさない場合は、[`BoxClientError::InvalidRetryPolicy`]を返す。
+    /// - `refresh_before_expiry`が[`MAX_REFRESH_BEFORE_EXPIRY`]を超える場合は、[`BoxClientError::InvalidRefreshBeforeExpiry`]を返す。
+    ///
     /// HTTPクライアントを作成できない場合、秘密鍵を復号できない場合、
-    /// またはアクセストークンを取得できない場合はエラーを返す。
+    /// またはアクセストークンを取得できない場合もエラーを返す。
     pub async fn build(self) -> BoxClientResult<BoxClient> {
+        self.timeout.validate()?;
+        self.retry.validate()?;
         if MAX_REFRESH_BEFORE_EXPIRY < self.refresh_before_expiry {
             return Err(BoxClientError::InvalidRefreshBeforeExpiry {
                 refresh_before_expiry: self.refresh_before_expiry,
@@ -930,6 +936,9 @@ fn validate_max_polls(name: &'static str, max_polls: u32, limit: u32) -> BoxClie
 /// 将来フィールドを追加しても利用者のコードが壊れないように、`#[non_exhaustive]`を付けている。
 /// そのため、クレートの外では構造体リテラルで作成できない。[`Default`]で作成し、`with_*`メソッドで値を設定する。
 ///
+/// [`RetryPolicy`]と同じく、`with_*`メソッドでは検証せず、[`BoxClientBuilder::build`]で検証する。
+/// すべてのタイムアウトは`0`より大きくする。
+///
 /// ```
 /// use std::time::Duration;
 ///
@@ -997,6 +1006,32 @@ impl TimeoutConfig {
         self.download_read_timeout = download_read_timeout;
         self
     }
+
+    /// すべてのタイムアウトが`0`より大きいか検証する。
+    ///
+    /// タイムアウトが`0`の場合は、すべてのリクエストが直ちにタイムアウトするためである。
+    ///
+    /// # Errors
+    ///
+    /// いずれかのタイムアウトが`0`の場合は、[`BoxClientError::InvalidTimeoutConfig`]を返す。
+    pub(crate) fn validate(&self) -> BoxClientResult<()> {
+        if self.request_timeout.is_zero() {
+            return Err(BoxClientError::InvalidTimeoutConfig(
+                "request_timeout must be greater than zero",
+            ));
+        }
+        if self.connect_timeout.is_zero() {
+            return Err(BoxClientError::InvalidTimeoutConfig(
+                "connect_timeout must be greater than zero",
+            ));
+        }
+        if self.download_read_timeout.is_zero() {
+            return Err(BoxClientError::InvalidTimeoutConfig(
+                "download_read_timeout must be greater than zero",
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -1015,7 +1050,8 @@ mod test_box_client {
     use crate::test_support::{
         TOKEN_PATH, client_builder, count_requests_to_path, create_client,
         create_client_with_timeout, mount_always, mount_first_n, mount_token,
-        raw_server_client_builder, request_count, short_retry, start_raw_server, test_config,
+        raw_server_client_builder, request_count, retry_policy, short_retry, start_raw_server,
+        test_config,
     };
 
     /// APIのパス
@@ -1037,7 +1073,7 @@ mod test_box_client {
         let server = MockServer::start().await;
         mount_token(&server).await;
 
-        create_client(&server, short_retry(0)?).await?;
+        create_client(&server, short_retry(0)).await?;
 
         assert_eq!(count_requests_to_path(&server, TOKEN_PATH).await, 1);
 
@@ -1121,7 +1157,7 @@ mod test_box_client {
     ) -> anyhow::Result<()> {
         let server = MockServer::start().await;
         mount_token(&server).await;
-        let mut builder = client_builder(&server, short_retry(0)?)?;
+        let mut builder = client_builder(&server, short_retry(0))?;
         if let Some(threshold) = specified {
             builder = builder.chunked_upload_threshold(threshold)?;
         }
@@ -1186,7 +1222,7 @@ mod test_box_client {
     ) -> anyhow::Result<()> {
         let server = MockServer::start().await;
         mount_token(&server).await;
-        let mut builder = client_builder(&server, short_retry(0)?)?;
+        let mut builder = client_builder(&server, short_retry(0))?;
         if let Some((commit, download)) = specified {
             builder = builder
                 .max_commit_polls(commit)?
@@ -1218,7 +1254,7 @@ mod test_box_client {
         mount_token(&server).await;
 
         let result = BoxClient::builder(test_config())
-            .retry(short_retry(0)?)
+            .retry(short_retry(0))
             .refresh_before_expiry(refresh_before_expiry)
             .api_base_url(&format!("{}/2.0", server.uri()))?
             .token_url(&format!("{}{TOKEN_PATH}", server.uri()))?
@@ -1245,6 +1281,64 @@ mod test_box_client {
         Ok(())
     }
 
+    /// タイムアウトが0の場合は、トークンエンドポイントへリクエストせずにタイムアウト設定の不正エラーを返すことを確認
+    #[rstest]
+    #[case::request_timeout(TimeoutConfig::default().with_request_timeout(Duration::ZERO))]
+    #[case::connect_timeout(TimeoutConfig::default().with_connect_timeout(Duration::ZERO))]
+    #[case::download_read_timeout(
+        TimeoutConfig::default().with_download_read_timeout(Duration::ZERO)
+    )]
+    #[tokio::test]
+    async fn test_build_rejects_zero_timeout(#[case] timeout: TimeoutConfig) -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+
+        let result = BoxClient::builder(test_config())
+            .timeout(timeout)
+            .token_url(&format!("{}{TOKEN_PATH}", server.uri()))?
+            .build()
+            .await;
+
+        assert!(
+            matches!(&result, Err(BoxClientError::InvalidTimeoutConfig(_))),
+            "result: {:?}",
+            result.err()
+        );
+        assert_eq!(count_requests_to_path(&server, TOKEN_PATH).await, 0);
+
+        Ok(())
+    }
+
+    /// 再試行設定が条件を満たさない場合は、トークンエンドポイントへリクエストせずに再試行設定の不正エラーを返すことを確認
+    #[tokio::test]
+    async fn test_build_rejects_invalid_retry_policy() -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+
+        let result = BoxClient::builder(test_config())
+            .retry(RetryPolicy::default().with_initial_delay(Duration::ZERO))
+            .token_url(&format!("{}{TOKEN_PATH}", server.uri()))?
+            .build()
+            .await;
+
+        assert!(
+            matches!(&result, Err(BoxClientError::InvalidRetryPolicy(_))),
+            "result: {:?}",
+            result.err()
+        );
+        assert_eq!(count_requests_to_path(&server, TOKEN_PATH).await, 0);
+
+        Ok(())
+    }
+
+    /// 既定のタイムアウト設定が、検証を通る値であることを確認
+    #[test]
+    fn test_default_timeout_config_is_valid() -> anyhow::Result<()> {
+        TimeoutConfig::default().validate()?;
+
+        Ok(())
+    }
+
     /// アクセストークンを取得できない場合は、BOXクライアントの作成に失敗することを確認
     #[tokio::test]
     async fn test_build_fails_without_access_token() -> anyhow::Result<()> {
@@ -1254,7 +1348,7 @@ mod test_box_client {
             .mount(&server)
             .await;
 
-        let result = create_client(&server, short_retry(0)?).await;
+        let result = create_client(&server, short_retry(0)).await;
 
         assert!(
             matches!(&result, Err(BoxClientError::Api(e)) if e.status == 400),
@@ -1276,7 +1370,7 @@ mod test_box_client {
             .respond_with(ok_response())
             .mount(&server)
             .await;
-        let client = create_client(&server, short_retry(0)?).await?;
+        let client = create_client(&server, short_retry(0)).await?;
 
         let value: serde_json::Value = client.send_json(request("GET")?).await?;
 
@@ -1297,7 +1391,7 @@ mod test_box_client {
             .expect(1)
             .mount(&server)
             .await;
-        let client = create_client(&server, short_retry(0)?).await?;
+        let client = create_client(&server, short_retry(0)).await?;
 
         client
             .send_empty(request("DELETE")?.header(reqwest::header::IF_MATCH, "1")?)
@@ -1318,7 +1412,7 @@ mod test_box_client {
             .respond_with(ok_response())
             .mount(&server)
             .await;
-        let client = create_client(&server, short_retry(0)?).await?;
+        let client = create_client(&server, short_retry(0)).await?;
 
         let value: serde_json::Value = client
             .send_json(request("POST")?.json(&json!({"name": "new"}))?)
@@ -1335,7 +1429,7 @@ mod test_box_client {
         let server = MockServer::start().await;
         mount_token(&server).await;
         mount_always(&server, path(API_PATH), ResponseTemplate::new(204)).await;
-        let client = create_client(&server, short_retry(0)?).await?;
+        let client = create_client(&server, short_retry(0)).await?;
 
         client.send_empty(request("DELETE")?).await?;
 
@@ -1363,7 +1457,7 @@ mod test_box_client {
         mount_token(&server).await;
         mount_first_n(&server, path(API_PATH), ResponseTemplate::new(status), 1).await;
         mount_always(&server, path(API_PATH), ok_response()).await;
-        let client = create_client(&server, short_retry(1)?).await?;
+        let client = create_client(&server, short_retry(1)).await?;
 
         let result: BoxClientResult<serde_json::Value> = client.send_json(request(method)?).await;
 
@@ -1383,7 +1477,7 @@ mod test_box_client {
         mount_token(&server).await;
         mount_first_n(&server, path(API_PATH), ResponseTemplate::new(500), 1).await;
         mount_always(&server, path(API_PATH), ok_response()).await;
-        let client = create_client(&server, short_retry(1)?).await?;
+        let client = create_client(&server, short_retry(1)).await?;
 
         let _: serde_json::Value = client
             .send_json(request("POST")?.idempotency(Idempotency::Idempotent))
@@ -1412,8 +1506,7 @@ mod test_box_client {
         )
         .await;
         let client =
-            create_client_with_timeout(&server, short_retry(1)?, Duration::from_millis(200))
-                .await?;
+            create_client_with_timeout(&server, short_retry(1), Duration::from_millis(200)).await?;
 
         let result: BoxClientResult<serde_json::Value> = client.send_json(request(method)?).await;
 
@@ -1442,7 +1535,7 @@ mod test_box_client {
         mount_first_n(&server, path(API_PATH), ResponseTemplate::new(401), 1).await;
         mount_always(&server, path(API_PATH), ok_response()).await;
         // 再試行回数を0にし、再送が再試行回数に含まれないことも確かめる。
-        let client = create_client(&server, short_retry(0)?).await?;
+        let client = create_client(&server, short_retry(0)).await?;
 
         let _: serde_json::Value = client.send_json(request(method)?).await?;
 
@@ -1459,7 +1552,7 @@ mod test_box_client {
         let server = MockServer::start().await;
         mount_token(&server).await;
         mount_always(&server, path(API_PATH), ResponseTemplate::new(401)).await;
-        let client = create_client(&server, short_retry(2)?).await?;
+        let client = create_client(&server, short_retry(2)).await?;
 
         let result: BoxClientResult<serde_json::Value> = client.send_json(request("GET")?).await;
 
@@ -1489,7 +1582,7 @@ mod test_box_client {
             })),
         )
         .await;
-        let client = create_client(&server, short_retry(2)?).await?;
+        let client = create_client(&server, short_retry(2)).await?;
 
         let result: BoxClientResult<serde_json::Value> = client.send_json(request("GET")?).await;
 
@@ -1517,7 +1610,7 @@ mod test_box_client {
             ResponseTemplate::new(200).set_body_string("not json"),
         )
         .await;
-        let client = create_client(&server, short_retry(2)?).await?;
+        let client = create_client(&server, short_retry(2)).await?;
 
         let result: BoxClientResult<serde_json::Value> = client.send_json(request("GET")?).await;
 
@@ -1558,7 +1651,7 @@ mod test_box_client {
         let token_server = MockServer::start().await;
         mount_token(&token_server).await;
         let (api_base_url, connections) = start_truncating_server().await?;
-        let client = raw_server_client_builder(&api_base_url, &token_server, short_retry(2)?)?
+        let client = raw_server_client_builder(&api_base_url, &token_server, short_retry(2))?
             .build()
             .await?;
 
@@ -1595,7 +1688,7 @@ mod test_box_client {
         let client = raw_server_client_builder(
             &api_base_url,
             &server,
-            RetryPolicy::new(max_retries, DELAY, DELAY, Duration::ZERO)?,
+            retry_policy(max_retries, DELAY, DELAY, Duration::ZERO),
         )?
         .build()
         .await?;
@@ -1622,7 +1715,7 @@ mod test_box_client {
     async fn test_send_rejects_invalid_path_segment() -> anyhow::Result<()> {
         let server = MockServer::start().await;
         mount_token(&server).await;
-        let client = create_client(&server, short_retry(2)?).await?;
+        let client = create_client(&server, short_retry(2)).await?;
 
         let result: BoxClientResult<serde_json::Value> =
             client.send_json(ApiRequest::get(["items", ".."])).await;
@@ -1666,7 +1759,7 @@ mod test_box_client {
             .expect(1)
             .mount(&server)
             .await;
-        let mut builder = client_builder(&server, short_retry(0)?)?;
+        let mut builder = client_builder(&server, short_retry(0))?;
         if let Some(user_agent) = user_agent {
             builder = builder.user_agent(user_agent)?;
         }
@@ -1828,7 +1921,7 @@ mod test_box_client {
             .mount(&proxy)
             .await;
         let client = BoxClient::builder(test_config())
-            .retry(short_retry(0)?)
+            .retry(short_retry(0))
             .proxy(&proxy_url_with_credentials(&proxy)?)?
             .api_base_url(&format!("{target}/2.0"))?
             .token_url(&format!("{target}{TOKEN_PATH}"))?
@@ -1855,7 +1948,7 @@ mod test_box_client {
         mount_token(&server).await;
         mount_always(&server, path(API_PATH), ok_response()).await;
         // プロキシは接続を拒否するため、プロキシを使用した場合は失敗する。
-        let client = client_builder(&server, short_retry(0)?)?
+        let client = client_builder(&server, short_retry(0))?
             .proxy(&refused_url()?)?
             .no_proxy()
             .build()
@@ -1904,7 +1997,7 @@ mod test_box_client {
         let builder = format!("{:?}", BoxClient::builder(test_config()).proxy(&proxy_url)?);
         let client = format!(
             "{:?}",
-            client_builder(&server, short_retry(0)?)?
+            client_builder(&server, short_retry(0))?
                 .proxy(&proxy_url)?
                 .build()
                 .await?
@@ -1939,7 +2032,7 @@ mod test_box_client {
         fn assert_send<T: Send>(_: &T) {}
         let server = MockServer::start().await;
         mount_token(&server).await;
-        let client = create_client(&server, short_retry(0)?).await?;
+        let client = create_client(&server, short_retry(0)).await?;
 
         let future = client.send_json::<serde_json::Value>(request("GET")?);
 

@@ -55,14 +55,28 @@ pub(crate) fn test_config() -> BoxConfig {
     }
 }
 
+/// すべてのフィールドを指定した再試行設定を返す。
+pub(crate) fn retry_policy(
+    max_retries: u32,
+    initial_delay: Duration,
+    max_delay: Duration,
+    max_jitter: Duration,
+) -> RetryPolicy {
+    RetryPolicy::default()
+        .with_max_retries(max_retries)
+        .with_initial_delay(initial_delay)
+        .with_max_delay(max_delay)
+        .with_max_jitter(max_jitter)
+}
+
 /// テストが長時間待機しないように、短い待機時間の再試行設定を返す。
-pub(crate) fn short_retry(max_retries: u32) -> anyhow::Result<RetryPolicy> {
-    Ok(RetryPolicy::new(
+pub(crate) fn short_retry(max_retries: u32) -> RetryPolicy {
+    retry_policy(
         max_retries,
         Duration::from_millis(10),
         Duration::from_millis(50),
         Duration::from_millis(10),
-    )?)
+    )
 }
 
 /// アクセストークンを含むトークンエンドポイントの成功レスポンスを返す。
@@ -353,7 +367,7 @@ pub(crate) async fn assert_not_retried_with_response<T: std::fmt::Debug>(
         .respond_with(response)
         .mount(&server)
         .await;
-    let client = create_client(&server, short_retry(2)?).await?;
+    let client = create_client(&server, short_retry(2)).await?;
 
     let result = call(&client).await;
 
@@ -391,7 +405,7 @@ pub(crate) async fn assert_retried_after<T>(
         .respond_with(success)
         .mount(&server)
         .await;
-    let client = create_client(&server, short_retry(1)?).await?;
+    let client = create_client(&server, short_retry(1)).await?;
 
     call(&client).await?;
 

@@ -35,12 +35,11 @@ pub async fn setup() -> anyhow::Result<BoxClient> {
         .with_request_timeout(Duration::from_secs(300))
         .with_connect_timeout(Duration::from_secs(5))
         .with_download_read_timeout(Duration::from_secs(30));
-    let retry = RetryPolicy::new(
-        10,
-        Duration::from_millis(200),
-        Duration::from_secs(60),
-        Duration::from_secs(1),
-    )?;
+    let retry = RetryPolicy::default()
+        .with_max_retries(10)
+        .with_initial_delay(Duration::from_millis(200))
+        .with_max_delay(Duration::from_secs(60))
+        .with_max_jitter(Duration::from_secs(1));
 
     let config_file = std::env::var_os(BOX_CONFIG_FILE_ENV)
         .map_or_else(|| PathBuf::from(DEFAULT_BOX_CONFIG_FILE), PathBuf::from);

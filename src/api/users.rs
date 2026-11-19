@@ -95,7 +95,7 @@ mod test_get_current_user {
             })))
             .mount(&server)
             .await;
-        let client = create_client(&server, short_retry(0)?).await?;
+        let client = create_client(&server, short_retry(0)).await?;
 
         let user = client.me().await?;
 

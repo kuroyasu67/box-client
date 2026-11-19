@@ -984,7 +984,7 @@ mod test_file_information {
             .expect(1)
             .mount(&server)
             .await;
-        let client = create_client(&server, short_retry(0)?).await?;
+        let client = create_client(&server, short_retry(0)).await?;
 
         let file = client.file_information(&FileId::new("12345")).await?;
 
@@ -1006,7 +1006,7 @@ mod test_file_information {
             .respond_with(not_found_response())
             .mount(&server)
             .await;
-        let client = create_client(&server, short_retry(0)?).await?;
+        let client = create_client(&server, short_retry(0)).await?;
 
         let result = client.file_information(&FileId::new("999")).await;
 
@@ -1073,7 +1073,7 @@ mod test_copy_file {
             .expect(1)
             .mount(&server)
             .await;
-        let client = create_client(&server, short_retry(0)?).await?;
+        let client = create_client(&server, short_retry(0)).await?;
         let version = version.map(FileVersionId::new);
         let options = CopyFileOptions {
             name,
@@ -1101,7 +1101,7 @@ mod test_copy_file {
     async fn test_copy_file_rejects_invalid_name(#[case] name: &str) -> anyhow::Result<()> {
         let server = MockServer::start().await;
         mount_token(&server).await;
-        let client = create_client(&server, short_retry(0)?).await?;
+        let client = create_client(&server, short_retry(0)).await?;
         let requests_before = request_count(&server).await;
 
         let result = client
@@ -1299,7 +1299,7 @@ mod test_update_file {
             .expect(1)
             .mount(&server)
             .await;
-        let client = create_client(&server, short_retry(0)?).await?;
+        let client = create_client(&server, short_retry(0)).await?;
         let options = UpdateItemOptions { etag };
 
         let file = update.call(&client, &options).await?;
@@ -1336,7 +1336,7 @@ mod test_update_file {
     ) -> anyhow::Result<()> {
         let server = MockServer::start().await;
         mount_token(&server).await;
-        let client = create_client(&server, short_retry(0)?).await?;
+        let client = create_client(&server, short_retry(0)).await?;
         let requests_before = request_count(&server).await;
 
         let result = update.call(&client, &UpdateItemOptions::default()).await;
@@ -1420,7 +1420,7 @@ mod test_delete_file {
             .respond_with(ResponseTemplate::new(204))
             .mount(&server)
             .await;
-        let client = create_client(&server, short_retry(0)?).await?;
+        let client = create_client(&server, short_retry(0)).await?;
 
         let options = DeleteItemOptions { etag };
 
@@ -1439,7 +1439,7 @@ mod test_delete_file {
     async fn test_delete_file_invalid_etag() -> anyhow::Result<()> {
         let server = MockServer::start().await;
         mount_token(&server).await;
-        let client = create_client(&server, short_retry(0)?).await?;
+        let client = create_client(&server, short_retry(0)).await?;
         let requests_before = request_count(&server).await;
 
         let result = client
@@ -1563,7 +1563,7 @@ mod test_update_file_attributes {
             .expect(1)
             .mount(&server)
             .await;
-        let client = create_client(&server, short_retry(0)?).await?;
+        let client = create_client(&server, short_retry(0)).await?;
         let destination = MoveDestination::Folder(FolderId::new("456"));
         let tags = ["report"];
         let update = FileUpdate::default()
@@ -1610,7 +1610,7 @@ mod test_update_file_attributes {
             .expect(1)
             .mount(&server)
             .await;
-        let client = create_client(&server, short_retry(0)?).await?;
+        let client = create_client(&server, short_retry(0)).await?;
         let update = FileUpdate::default()
             .with_shared_link_removed()
             .with_lock_removed();
@@ -1627,7 +1627,7 @@ mod test_update_file_attributes {
     async fn test_rejects_empty_tags() -> anyhow::Result<()> {
         let server = MockServer::start().await;
         mount_token(&server).await;
-        let client = create_client(&server, short_retry(0)?).await?;
+        let client = create_client(&server, short_retry(0)).await?;
         let requests_before = request_count(&server).await;
 
         let result = client

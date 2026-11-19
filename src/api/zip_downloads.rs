@@ -567,7 +567,7 @@ mod test_create_zip_download {
             .expect(1)
             .mount(&server)
             .await;
-        let client = create_client(&server, short_retry(0)?).await?;
+        let client = create_client(&server, short_retry(0)).await?;
         let file_id = FileId::new("1");
         let folder_id = FolderId::new("2");
 
@@ -614,7 +614,7 @@ mod test_create_zip_download {
             .respond_with(created_response())
             .mount(&server)
             .await;
-        let client = create_client(&server, short_retry(1)?).await?;
+        let client = create_client(&server, short_retry(1)).await?;
         let file_id = FileId::new("1");
 
         client
@@ -634,7 +634,7 @@ mod test_create_zip_download {
     async fn test_rejects_invalid_items() -> anyhow::Result<()> {
         let server = MockServer::start().await;
         mount_token(&server).await;
-        let client = create_client(&server, short_retry(0)?).await?;
+        let client = create_client(&server, short_retry(0)).await?;
         let requests_before = request_count(&server).await;
         let root = FolderId::root();
         let file_id = FileId::new("1");
@@ -701,7 +701,7 @@ mod test_download_zip {
             .expect(1)
             .mount(&server)
             .await;
-        let client = create_client(&server, short_retry(0)?).await?;
+        let client = create_client(&server, short_retry(0)).await?;
         let dir = tempfile::tempdir()?;
         let zip_path = dir.path().join("archive.zip");
 
@@ -731,7 +731,7 @@ mod test_download_zip {
             .respond_with(ResponseTemplate::new(500))
             .mount(&server)
             .await;
-        let client = create_client(&server, short_retry(2)?).await?;
+        let client = create_client(&server, short_retry(2)).await?;
         let dir = tempfile::tempdir()?;
 
         let result = client
@@ -756,7 +756,7 @@ mod test_download_zip {
             .respond_with(not_found_response())
             .mount(&server)
             .await;
-        let client = create_client(&server, short_retry(0)?).await?;
+        let client = create_client(&server, short_retry(0)).await?;
         let dir = tempfile::tempdir()?;
         let zip_path = dir.path().join("archive.zip");
 
@@ -779,7 +779,7 @@ mod test_download_zip {
     async fn test_rejects_insecure_download_url() -> anyhow::Result<()> {
         let server = MockServer::start().await;
         mount_token(&server).await;
-        let client = create_client(&server, short_retry(0)?).await?;
+        let client = create_client(&server, short_retry(0)).await?;
         let dir = tempfile::tempdir()?;
         let zip_download: ZipDownload = serde_json::from_value(json!({
             "download_url": "http://dl.example.com/2.0/zip_downloads/abc/content",
@@ -831,7 +831,7 @@ mod test_download_zip {
             .expect(1)
             .mount(&server)
             .await;
-        let client = create_client(&server, short_retry(0)?).await?;
+        let client = create_client(&server, short_retry(0)).await?;
         let dir = tempfile::tempdir()?;
         let zip_path = dir.path().join("archive.zip");
         let folder_id = FolderId::new("2");

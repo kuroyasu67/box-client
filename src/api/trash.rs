@@ -552,7 +552,7 @@ mod test_trashed_folder_information {
             .expect(1)
             .mount(&server)
             .await;
-        let client = create_client(&server, short_retry(0)?).await?;
+        let client = create_client(&server, short_retry(0)).await?;
 
         let folder = client
             .trashed_folder_information(&FolderId::new("12345"))
@@ -578,7 +578,7 @@ mod test_trashed_folder_information {
     async fn test_trashed_folder_information_rejects_root() -> anyhow::Result<()> {
         let server = MockServer::start().await;
         mount_token(&server).await;
-        let client = create_client(&server, short_retry(0)?).await?;
+        let client = create_client(&server, short_retry(0)).await?;
         let requests_before = request_count(&server).await;
 
         let result = client.trashed_folder_information(&FolderId::root()).await;
@@ -602,7 +602,7 @@ mod test_trashed_folder_information {
             .respond_with(not_found_response())
             .mount(&server)
             .await;
-        let client = create_client(&server, short_retry(0)?).await?;
+        let client = create_client(&server, short_retry(0)).await?;
 
         let result = client
             .trashed_folder_information(&FolderId::new("999"))
@@ -663,7 +663,7 @@ mod test_trashed_file_information {
             .expect(1)
             .mount(&server)
             .await;
-        let client = create_client(&server, short_retry(0)?).await?;
+        let client = create_client(&server, short_retry(0)).await?;
 
         let file = client
             .trashed_file_information(&FileId::new("12345"))
@@ -693,7 +693,7 @@ mod test_trashed_file_information {
             .respond_with(not_found_response())
             .mount(&server)
             .await;
-        let client = create_client(&server, short_retry(0)?).await?;
+        let client = create_client(&server, short_retry(0)).await?;
 
         let result = client.trashed_file_information(&FileId::new("999")).await;
 
@@ -752,7 +752,7 @@ mod test_trashed_web_link_information {
             .expect(1)
             .mount(&server)
             .await;
-        let client = create_client(&server, short_retry(0)?).await?;
+        let client = create_client(&server, short_retry(0)).await?;
 
         let web_link = client
             .trashed_web_link_information(&WebLinkId::new("12345"))
@@ -785,7 +785,7 @@ mod test_trashed_web_link_information {
             .respond_with(not_found_response())
             .mount(&server)
             .await;
-        let client = create_client(&server, short_retry(0)?).await?;
+        let client = create_client(&server, short_retry(0)).await?;
 
         let result = client
             .trashed_web_link_information(&WebLinkId::new("999"))
@@ -904,7 +904,7 @@ mod test_restore_folder {
             .expect(1)
             .mount(&server)
             .await;
-        let client = create_client(&server, short_retry(0)?).await?;
+        let client = create_client(&server, short_retry(0)).await?;
         let parent_id = FolderId::new("111");
         let options = RestoreItemOptions {
             name: Some("restored"),
@@ -929,7 +929,7 @@ mod test_restore_folder {
     async fn test_restore_folder_rejects_root() -> anyhow::Result<()> {
         let server = MockServer::start().await;
         mount_token(&server).await;
-        let client = create_client(&server, short_retry(0)?).await?;
+        let client = create_client(&server, short_retry(0)).await?;
         let requests_before = request_count(&server).await;
 
         let result = client
@@ -1072,7 +1072,7 @@ mod test_restore_file {
             .expect(1)
             .mount(&server)
             .await;
-        let client = create_client(&server, short_retry(0)?).await?;
+        let client = create_client(&server, short_retry(0)).await?;
         let parent_id = FolderId::new("111");
         let options = RestoreItemOptions {
             name: Some("restored.pdf"),
@@ -1190,7 +1190,7 @@ mod test_restore_web_link {
             .expect(1)
             .mount(&server)
             .await;
-        let client = create_client(&server, short_retry(0)?).await?;
+        let client = create_client(&server, short_retry(0)).await?;
         let parent_id = FolderId::new("111");
         let options = RestoreItemOptions {
             name: Some("restored"),
@@ -1316,7 +1316,7 @@ mod test_list_trashed_items {
             })))
             .mount(&server)
             .await;
-        let client = create_client(&server, short_retry(0)?).await?;
+        let client = create_client(&server, short_retry(0)).await?;
 
         let page = client.list_trashed_items(marker, &options).await?;
 
@@ -1338,7 +1338,7 @@ mod test_list_trashed_items {
     async fn test_list_trashed_items_invalid_limit(#[case] limit: u32) -> anyhow::Result<()> {
         let server = MockServer::start().await;
         mount_token(&server).await;
-        let client = create_client(&server, short_retry(0)?).await?;
+        let client = create_client(&server, short_retry(0)).await?;
         let options = ListTrashedItemsOptions::default().with_limit(limit);
 
         let result = client.list_trashed_items(None, &options).await;
@@ -1365,7 +1365,7 @@ mod test_list_trashed_items {
     ) -> anyhow::Result<()> {
         let server = MockServer::start().await;
         mount_token(&server).await;
-        let client = create_client(&server, short_retry(0)?).await?;
+        let client = create_client(&server, short_retry(0)).await?;
         let options = ListTrashedItemsOptions::default().with_sort(sort);
 
         let result = client.list_trashed_items(None, &options).await;
@@ -1444,7 +1444,7 @@ mod test_list_all_trashed_items {
             .expect(1)
             .mount(&server)
             .await;
-        let client = create_client(&server, short_retry(0)?).await?;
+        let client = create_client(&server, short_retry(0)).await?;
 
         let items = client
             .list_all_trashed_items(&ListTrashedItemsOptions::default())
@@ -1480,7 +1480,7 @@ mod test_list_all_trashed_items {
             .expect(1)
             .mount(&server)
             .await;
-        let client = create_client(&server, short_retry(0)?).await?;
+        let client = create_client(&server, short_retry(0)).await?;
         let options = ListTrashedItemsOptions::default()
             .with_limit(1)
             .with_sort(ItemSort::Size)
@@ -1504,7 +1504,7 @@ mod test_list_all_trashed_items {
             .expect(2)
             .mount(&server)
             .await;
-        let client = create_client(&server, short_retry(0)?).await?;
+        let client = create_client(&server, short_retry(0)).await?;
 
         let result = client
             .list_all_trashed_items(&ListTrashedItemsOptions::default())
@@ -1535,7 +1535,7 @@ mod test_list_all_trashed_items {
             .respond_with(ResponseTemplate::new(403))
             .mount(&server)
             .await;
-        let client = create_client(&server, short_retry(0)?).await?;
+        let client = create_client(&server, short_retry(0)).await?;
 
         let result = client
             .list_all_trashed_items(&ListTrashedItemsOptions::default())

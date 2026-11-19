@@ -18,30 +18,51 @@ use crate::errors::{ApiError, BoxClientError, BoxClientResult};
 /// ただし、レスポンスに`Retry-After`ヘッダーがある場合は、指数バックオフを使用せず、
 /// `Retry-After`ヘッダーが示す時間だけ待機する。
 ///
-/// 不正な設定値を持つインスタンスを作成させないため、フィールドを非公開にし、[`RetryPolicy::new`]で検証する。
+/// 将来フィールドを追加しても利用者のコードが壊れないように、`#[non_exhaustive]`を付けている。
+/// そのため、クレートの外では構造体リテラルで作成できない。[`Default`]で作成し、`with_*`メソッドで値を設定する。
+///
+/// 設定値の条件は複数のフィールドにまたがるため、`with_*`メソッドでは検証せず、[`BoxClientBuilder::build`]で検証する。
+/// 条件は各フィールドの説明に記載する。
+///
+/// ```
+/// use std::time::Duration;
+///
+/// use box_client::RetryPolicy;
+///
+/// let retry = RetryPolicy::default()
+///     .with_max_retries(3)
+///     .with_initial_delay(Duration::from_secs(1))
+///     .with_max_delay(Duration::from_secs(10));
+/// assert_eq!(retry.max_retries, 3);
+/// ```
+///
+/// [`BoxClientBuilder::build`]: crate::BoxClientBuilder::build
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct RetryPolicy {
     /// 最大再試行回数
     ///
     /// 最初のリクエストは回数に含めない。`0`の場合は再試行しない。
-    max_retries: u32,
+    pub max_retries: u32,
 
     /// 1回目の再試行前に待機する時間
     ///
     /// n回目の再試行前の待機時間は`initial_delay * 2^(n - 1)`とする。
-    initial_delay: Duration,
+    /// `0`より大きく`max_delay`以下とする。`0`の場合は、待機せずに再試行し続けるためである。
+    pub initial_delay: Duration,
 
     /// 待機時間の上限
     ///
     /// `Retry-After`ヘッダーが示す時間がこの値よりも大きい場合は、再試行を中止する。
     /// また、指数バックオフで算出した待機時間がこの値よりも大きい場合は、待機時間をこの値に変更する。
-    max_delay: Duration,
+    pub max_delay: Duration,
 
     /// 待機時間に加算するジッターの上限
     ///
     /// 待機時間に`0`以上この値以下の乱数の時間を加算する。
     /// ジッターを加算した後は`max_delay`で切り詰めないため、待機時間の最大値は`max_delay + max_jitter`となる。
-    max_jitter: Duration,
+    /// `max_delay`以下とする。
+    pub max_jitter: Duration,
 }
 
 impl Default for RetryPolicy {
@@ -57,71 +78,57 @@ impl Default for RetryPolicy {
 }
 
 impl RetryPolicy {
-    /// コンストラクタ
-    ///
-    /// # Arguments
-    ///
-    /// - `max_retries`: 最大再試行回数
-    /// - `initial_delay`: 1回目の再試行前に待機する時間。`0`より大きく`max_delay`以下とする。
-    /// - `max_delay`: 待機時間の上限
-    /// - `max_jitter`: 待機時間に加算するジッターの上限。`max_delay`以下とする。
+    /// 最大再試行回数を設定する。
+    #[must_use]
+    pub fn with_max_retries(mut self, max_retries: u32) -> Self {
+        self.max_retries = max_retries;
+        self
+    }
+
+    /// 1回目の再試行前に待機する時間を設定する。
+    #[must_use]
+    pub fn with_initial_delay(mut self, initial_delay: Duration) -> Self {
+        self.initial_delay = initial_delay;
+        self
+    }
+
+    /// 待機時間の上限を設定する。
+    #[must_use]
+    pub fn with_max_delay(mut self, max_delay: Duration) -> Self {
+        self.max_delay = max_delay;
+        self
+    }
+
+    /// 待機時間に加算するジッターの上限を設定する。
+    #[must_use]
+    pub fn with_max_jitter(mut self, max_jitter: Duration) -> Self {
+        self.max_jitter = max_jitter;
+        self
+    }
+
+    /// 設定値が各フィールドの説明に記載した条件を満たすか検証する。
     ///
     /// # Errors
     ///
-    /// 設定値が上記の条件を満たさない場合は、[`BoxClientError::InvalidRetryPolicy`]を返す。
-    pub fn new(
-        max_retries: u32,
-        initial_delay: Duration,
-        max_delay: Duration,
-        max_jitter: Duration,
-    ) -> BoxClientResult<Self> {
+    /// 設定値が条件を満たさない場合は、[`BoxClientError::InvalidRetryPolicy`]を返す。
+    pub(crate) fn validate(&self) -> BoxClientResult<()> {
         // initial_delayが0の場合は、指数バックオフの待機時間が常に0となり、待機せずに再試行し続ける。
-        if initial_delay.is_zero() {
+        if self.initial_delay.is_zero() {
             return Err(BoxClientError::InvalidRetryPolicy(
                 "initial_delay must be greater than zero",
             ));
         }
-        if max_delay < initial_delay {
+        if self.max_delay < self.initial_delay {
             return Err(BoxClientError::InvalidRetryPolicy(
                 "initial_delay must be less than or equal to max_delay",
             ));
         }
-        if max_delay < max_jitter {
+        if self.max_delay < self.max_jitter {
             return Err(BoxClientError::InvalidRetryPolicy(
                 "max_jitter must be less than or equal to max_delay",
             ));
         }
-
-        Ok(Self {
-            max_retries,
-            initial_delay,
-            max_delay,
-            max_jitter,
-        })
-    }
-
-    /// 最大再試行回数を返す。
-    #[must_use]
-    pub fn max_retries(&self) -> u32 {
-        self.max_retries
-    }
-
-    /// 1回目の再試行前に待機する時間を返す。
-    #[must_use]
-    pub fn initial_delay(&self) -> Duration {
-        self.initial_delay
-    }
-
-    /// 待機時間の上限を返す。
-    #[must_use]
-    pub fn max_delay(&self) -> Duration {
-        self.max_delay
-    }
-
-    /// 待機時間に加算するジッターの上限を返す。
-    #[must_use]
-    pub fn max_jitter(&self) -> Duration {
-        self.max_jitter
+        Ok(())
     }
 
     /// 指数バックオフで算出し、上限で切り詰めた待機時間を返す。
@@ -339,7 +346,7 @@ where
 
         // 再試行を尽くしたエラーも呼び出し元に返すため、エラーの重さは呼び出し元が判断する。
         // ただし、呼び出し元が受け取るエラーにない試行回数と経過時間を残すため、WARNで出力する。
-        if policy.max_retries() <= number_of_retries {
+        if policy.max_retries <= number_of_retries {
             tracing::warn!(
                 operation,
                 attempts,
@@ -361,7 +368,7 @@ where
                     attempts,
                     elapsed_ms = started_at.elapsed().as_millis(),
                     retry_after_ms = retry_after.as_millis(),
-                    max_delay_ms = policy.max_delay().as_millis(),
+                    max_delay_ms = policy.max_delay.as_millis(),
                     error = &error as &(dyn std::error::Error + 'static),
                     "gave up retrying"
                 );
@@ -559,6 +566,7 @@ mod test_retry_policy {
     use rstest::rstest;
 
     use super::*;
+    use crate::test_support::retry_policy;
 
     /// テストの結果を再現できるように、乱数生成器のシードを固定する。
     const SEED: u64 = 42;
@@ -566,7 +574,22 @@ mod test_retry_policy {
     /// 乱数を使うため、結果が範囲内に収まることを複数回の試行で確かめる。
     const TRIALS: usize = 1_000;
 
-    /// 設定値が条件を満たす場合は、再試行設定を作成できることを確認
+    /// `with_*`メソッドで設定した値を保持することを確認
+    #[test]
+    fn test_with_methods() {
+        let policy = RetryPolicy::default()
+            .with_max_retries(3)
+            .with_initial_delay(Duration::from_secs(1))
+            .with_max_delay(Duration::from_secs(10))
+            .with_max_jitter(Duration::from_millis(500));
+
+        assert_eq!(policy.max_retries, 3);
+        assert_eq!(policy.initial_delay, Duration::from_secs(1));
+        assert_eq!(policy.max_delay, Duration::from_secs(10));
+        assert_eq!(policy.max_jitter, Duration::from_millis(500));
+    }
+
+    /// 設定値が条件を満たす場合は、検証を通ることを確認
     #[rstest]
     // `initial_delay`の下限
     #[case::min_initial_delay(Duration::from_nanos(1), Duration::from_secs(1))]
@@ -576,18 +599,11 @@ mod test_retry_policy {
     #[case::zero_jitter(Duration::from_millis(500), Duration::ZERO)]
     // `max_jitter`が`max_delay`と一致
     #[case::max_jitter_equals_max_delay(Duration::from_millis(500), Duration::from_secs(3))]
-    fn test_new_valid(
+    fn test_validate_valid(
         #[case] initial_delay: Duration,
         #[case] max_jitter: Duration,
     ) -> anyhow::Result<()> {
-        let max_delay = Duration::from_secs(3);
-
-        let policy = RetryPolicy::new(5, initial_delay, max_delay, max_jitter)?;
-
-        assert_eq!(policy.max_retries(), 5);
-        assert_eq!(policy.initial_delay(), initial_delay);
-        assert_eq!(policy.max_delay(), max_delay);
-        assert_eq!(policy.max_jitter(), max_jitter);
+        retry_policy(5, initial_delay, Duration::from_secs(3), max_jitter).validate()?;
 
         Ok(())
     }
@@ -606,8 +622,8 @@ mod test_retry_policy {
         Duration::from_millis(500),
         Duration::from_secs(3) + Duration::from_nanos(1)
     )]
-    fn test_new_invalid(#[case] initial_delay: Duration, #[case] max_jitter: Duration) {
-        let result = RetryPolicy::new(5, initial_delay, Duration::from_secs(3), max_jitter);
+    fn test_validate_invalid(#[case] initial_delay: Duration, #[case] max_jitter: Duration) {
+        let result = retry_policy(5, initial_delay, Duration::from_secs(3), max_jitter).validate();
 
         assert!(
             matches!(result, Err(BoxClientError::InvalidRetryPolicy(_))),
@@ -615,17 +631,10 @@ mod test_retry_policy {
         );
     }
 
-    /// 既定の再試行設定が、コンストラクタの検証を通る値であることを確認
+    /// 既定の再試行設定が、検証を通る値であることを確認
     #[test]
     fn test_default_is_valid() -> anyhow::Result<()> {
-        let default = RetryPolicy::default();
-
-        RetryPolicy::new(
-            default.max_retries(),
-            default.initial_delay(),
-            default.max_delay(),
-            default.max_jitter(),
-        )?;
+        RetryPolicy::default().validate()?;
 
         Ok(())
     }
@@ -652,43 +661,39 @@ mod test_retry_policy {
         #[case] initial_delay: Duration,
         #[case] number_of_retries: u32,
         #[case] expected: Duration,
-    ) -> anyhow::Result<()> {
-        let policy = RetryPolicy::new(5, initial_delay, Duration::from_secs(3), Duration::ZERO)?;
+    ) {
+        let policy = retry_policy(5, initial_delay, Duration::from_secs(3), Duration::ZERO);
 
         assert_eq!(policy.delay_duration(number_of_retries), expected);
-
-        Ok(())
     }
 
     /// 倍率はオーバーフローしないが、待機時間がDurationでオーバーフローする場合は、上限を返すことを確認
     #[test]
-    fn test_delay_duration_overflow() -> anyhow::Result<()> {
-        let policy = RetryPolicy::new(5, Duration::MAX, Duration::MAX, Duration::ZERO)?;
+    fn test_delay_duration_overflow() {
+        let policy = retry_policy(5, Duration::MAX, Duration::MAX, Duration::ZERO);
 
         assert_eq!(policy.delay_duration(2), Duration::MAX);
-
-        Ok(())
     }
 
     /// ジッターを加算する前の待機時間が500ミリ秒、1秒、2秒と倍増し、2秒で頭打ちになる再試行設定を返す。
-    fn policy_with_jitter(max_jitter: Duration) -> anyhow::Result<RetryPolicy> {
-        Ok(RetryPolicy::new(
+    fn policy_with_jitter(max_jitter: Duration) -> RetryPolicy {
+        retry_policy(
             5,
             Duration::from_millis(500),
             Duration::from_secs(2),
             max_jitter,
-        )?)
+        )
     }
 
     /// 上限で切り詰めた待機時間にジッターを加算し、ジッターが0と`max_jitter`の両端の値を取りうることを確認
     #[test]
-    fn test_jittered_delay_duration_reaches_both_ends() -> anyhow::Result<()> {
+    fn test_jittered_delay_duration_reaches_both_ends() {
         // 取りうるジッターを0ナノ秒と1ナノ秒の2通りに限定し、結果が両端の値だけになることを確かめる。
         // 上限で切り詰められる再試行回数を指定し、ジッターを加算した後に上限で切り詰めないことも確かめる。
         let max_jitter = Duration::from_nanos(1);
-        let policy = policy_with_jitter(max_jitter)?;
+        let policy = policy_with_jitter(max_jitter);
         let mut rng = StdRng::seed_from_u64(SEED);
-        let max_delay = policy.max_delay();
+        let max_delay = policy.max_delay;
 
         let durations: HashSet<Duration> = (0..TRIALS)
             .map(|_| policy.jittered_delay_duration(4, &mut rng))
@@ -698,65 +703,55 @@ mod test_retry_policy {
             durations,
             HashSet::from([max_delay, max_delay + max_jitter])
         );
-
-        Ok(())
     }
 
     /// 再試行でない場合は、ジッターを加算せずに待機しないことを確認
     #[test]
-    fn test_jittered_delay_duration_not_retry() -> anyhow::Result<()> {
-        let policy = policy_with_jitter(Duration::from_secs(1))?;
+    fn test_jittered_delay_duration_not_retry() {
+        let policy = policy_with_jitter(Duration::from_secs(1));
         let mut rng = StdRng::seed_from_u64(SEED);
 
         for _ in 0..TRIALS {
             assert_eq!(policy.jittered_delay_duration(0, &mut rng), Duration::ZERO);
         }
-
-        Ok(())
     }
 
     /// ジッターの上限が0の場合は、ジッターを加算しないことを確認
     #[test]
-    fn test_jittered_delay_duration_without_jitter() -> anyhow::Result<()> {
-        let policy = policy_with_jitter(Duration::ZERO)?;
+    fn test_jittered_delay_duration_without_jitter() {
+        let policy = policy_with_jitter(Duration::ZERO);
         let mut rng = StdRng::seed_from_u64(SEED);
 
         assert_eq!(
             policy.jittered_delay_duration(1, &mut rng),
             Duration::from_millis(500)
         );
-
-        Ok(())
     }
 
     /// ジッターの上限のナノ秒がu64に収まらない場合でも、ジッターが上限以下になることを確認
     #[test]
-    fn test_jitter_exceeds_u64_nanos() -> anyhow::Result<()> {
+    fn test_jitter_exceeds_u64_nanos() {
         // u64のナノ秒は約584年分であるため、それを超える上限を指定する。
         let max_jitter = Duration::from_secs(u64::MAX);
-        let policy = RetryPolicy::new(5, Duration::from_secs(1), Duration::MAX, max_jitter)?;
+        let policy = retry_policy(5, Duration::from_secs(1), Duration::MAX, max_jitter);
         let mut rng = StdRng::seed_from_u64(SEED);
 
         for _ in 0..TRIALS {
             let jitter = policy.jitter(&mut rng);
             assert!(jitter <= max_jitter, "jitter: {jitter:?}");
         }
-
-        Ok(())
     }
 
     /// 待機時間とジッターの和がDurationの最大値を超えても、パニックせずに最大値を返すことを確認
     #[test]
-    fn test_jittered_delay_duration_saturates() -> anyhow::Result<()> {
-        let policy = RetryPolicy::new(5, Duration::MAX, Duration::MAX, Duration::MAX)?;
+    fn test_jittered_delay_duration_saturates() {
+        let policy = retry_policy(5, Duration::MAX, Duration::MAX, Duration::MAX);
         let mut rng = StdRng::seed_from_u64(SEED);
 
         for _ in 0..TRIALS {
             let duration = policy.jittered_delay_duration(1, &mut rng);
             assert_eq!(duration, Duration::MAX);
         }
-
-        Ok(())
     }
 
     /// Retry-Afterヘッダーが示す待機時間の有無と上限に応じて、再試行前の待機時間を決定することを確認
@@ -774,20 +769,18 @@ mod test_retry_policy {
     fn test_retry_delay(
         #[case] retry_after: Option<Duration>,
         #[case] expected: Result<Duration, Duration>,
-    ) -> anyhow::Result<()> {
-        let policy = RetryPolicy::new(
+    ) {
+        let policy = retry_policy(
             5,
             Duration::from_millis(500),
             Duration::from_secs(3),
             Duration::ZERO,
-        )?;
+        );
         let mut rng = StdRng::seed_from_u64(SEED);
 
         let result = policy.retry_delay(1, retry_after, &mut rng);
 
         assert_eq!(result, expected);
-
-        Ok(())
     }
 
     /// Retry-Afterヘッダーが示す待機時間より短くならないように、ジッターを加算のみすることを確認
@@ -795,7 +788,7 @@ mod test_retry_policy {
     fn test_retry_delay_adds_jitter_to_retry_after() -> anyhow::Result<()> {
         let max_jitter = Duration::from_nanos(1);
         let retry_after = Duration::from_secs(1);
-        let policy = policy_with_jitter(max_jitter)?;
+        let policy = policy_with_jitter(max_jitter);
         let mut rng = StdRng::seed_from_u64(SEED);
 
         let delays = (0..TRIALS)
@@ -938,15 +931,16 @@ mod test_run_with_retry {
     use rstest::rstest;
 
     use super::*;
+    use crate::test_support::retry_policy;
 
     /// テストが長時間待機しないように、短い待機時間の再試行設定を返す。
-    fn short_policy(max_retries: u32) -> anyhow::Result<RetryPolicy> {
-        Ok(RetryPolicy::new(
+    fn short_policy(max_retries: u32) -> RetryPolicy {
+        retry_policy(
             max_retries,
             Duration::from_millis(1),
             Duration::from_millis(5),
             Duration::from_millis(1),
-        )?)
+        )
     }
 
     /// 試行が失敗したことを表すエラーを返す。
@@ -959,7 +953,7 @@ mod test_run_with_retry {
     async fn test_retries_until_success() -> anyhow::Result<()> {
         let attempts = AtomicU32::new(0);
 
-        let value = run_with_retry(&short_policy(3)?, "test", || async {
+        let value = run_with_retry(&short_policy(3), "test", || async {
             if attempts.fetch_add(1, Ordering::SeqCst) < 2 {
                 Err(AttemptError::Retryable {
                     error: dummy_error(),
@@ -982,7 +976,7 @@ mod test_run_with_retry {
     async fn test_does_not_retry_fatal_error() -> anyhow::Result<()> {
         let attempts = AtomicU32::new(0);
 
-        let result: BoxClientResult<()> = run_with_retry(&short_policy(3)?, "test", || async {
+        let result: BoxClientResult<()> = run_with_retry(&short_policy(3), "test", || async {
             attempts.fetch_add(1, Ordering::SeqCst);
             Err(AttemptError::Fatal(dummy_error()))
         })
@@ -1007,7 +1001,7 @@ mod test_run_with_retry {
         let attempts = AtomicU32::new(0);
 
         let result: BoxClientResult<()> =
-            run_with_retry(&short_policy(max_retries)?, "test", || async {
+            run_with_retry(&short_policy(max_retries), "test", || async {
                 attempts.fetch_add(1, Ordering::SeqCst);
                 Err(AttemptError::Retryable {
                     error: dummy_error(),
@@ -1027,7 +1021,7 @@ mod test_run_with_retry {
     async fn test_gives_up_when_retry_after_too_long() -> anyhow::Result<()> {
         let attempts = AtomicU32::new(0);
 
-        let result: BoxClientResult<()> = run_with_retry(&short_policy(3)?, "test", || async {
+        let result: BoxClientResult<()> = run_with_retry(&short_policy(3), "test", || async {
             attempts.fetch_add(1, Ordering::SeqCst);
             Err(AttemptError::Retryable {
                 error: dummy_error(),
