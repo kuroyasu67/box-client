@@ -46,7 +46,7 @@ pub async fn setup() -> anyhow::Result<BoxClient> {
     let client = BoxClient::builder(BoxConfig::from_file(config_file)?)
         .timeout(timeout)
         .retry(retry)
-        .chunked_upload_threshold(MIN_CHUNKED_UPLOAD_THRESHOLD)?
+        .chunked_upload_threshold(MIN_CHUNKED_UPLOAD_THRESHOLD)
         .build()
         .await?;
 

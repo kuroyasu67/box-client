@@ -34,6 +34,9 @@ const DIGEST: HeaderName = HeaderName::from_static("digest");
 
 /// ファイルのアップロードのオプション
 ///
+/// 将来フィールドを追加しても利用者のコードが壊れないように、`#[non_exhaustive]`を付けている。
+/// そのため、クレートの外では構造体リテラルで作成できない。[`Default`]で作成し、`with_*`メソッドで値を設定する。
+///
 /// # Examples
 ///
 /// ```
@@ -61,6 +64,9 @@ impl<'a> UploadFileOptions<'a> {
 }
 
 /// ファイルの内容の更新のオプション
+///
+/// 将来フィールドを追加しても利用者のコードが壊れないように、`#[non_exhaustive]`を付けている。
+/// そのため、クレートの外では構造体リテラルで作成できない。[`Default`]で作成し、`with_*`メソッドで値を設定する。
 ///
 /// # Examples
 ///
@@ -1463,8 +1469,8 @@ mod test_upload_file {
             .respond_with(ResponseTemplate::new(202).insert_header("retry-after", "0"))
             .mount(&server)
             .await;
-        let client = client_builder(&server, short_retry(0))?
-            .max_commit_polls(max_commit_polls)?
+        let client = client_builder(&server, short_retry(0))
+            .max_commit_polls(max_commit_polls)
             .build()
             .await?;
 
@@ -1748,9 +1754,9 @@ mod test_upload_file {
                 .mount(&server)
                 .await;
         }
-        let mut builder = client_builder(&server, short_retry(0))?;
+        let mut builder = client_builder(&server, short_retry(0));
         if let Some(threshold) = threshold {
-            builder = builder.chunked_upload_threshold(threshold)?;
+            builder = builder.chunked_upload_threshold(threshold);
         }
         let client = builder.build().await?;
 

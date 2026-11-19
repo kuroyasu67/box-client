@@ -262,10 +262,7 @@ pub(crate) async fn create_client(
 /// モックサーバーに接続し、テストが長時間待機しないタイムアウトを設定したBOXクライアントのビルダーを返す。
 ///
 /// 呼び出し側は、テストする設定をビルダーに追加してからBOXクライアントを作成する。
-pub(crate) fn client_builder(
-    server: &MockServer,
-    retry: RetryPolicy,
-) -> BoxClientResult<BoxClientBuilder> {
+pub(crate) fn client_builder(server: &MockServer, retry: RetryPolicy) -> BoxClientBuilder {
     BoxClient::builder(test_config())
         .timeout(TimeoutConfig {
             request_timeout: Duration::from_secs(2),
@@ -273,8 +270,8 @@ pub(crate) fn client_builder(
             download_read_timeout: Duration::from_secs(2),
         })
         .retry(retry)
-        .api_base_url(&format!("{}/2.0", server.uri()))?
-        .upload_base_url(&format!("{}{UPLOAD_BASE_PATH}", server.uri()))?
+        .api_base_url(&format!("{}/2.0", server.uri()))
+        .upload_base_url(&format!("{}{UPLOAD_BASE_PATH}", server.uri()))
         .token_url(&format!("{}{TOKEN_PATH}", server.uri()))
 }
 
@@ -285,10 +282,10 @@ pub(crate) fn raw_server_client_builder(
     api_base_url: &Url,
     token_server: &MockServer,
     retry: RetryPolicy,
-) -> BoxClientResult<BoxClientBuilder> {
+) -> BoxClientBuilder {
     BoxClient::builder(test_config())
         .retry(retry)
-        .api_base_url(api_base_url.as_str())?
+        .api_base_url(api_base_url.as_str())
         .token_url(&format!("{}{TOKEN_PATH}", token_server.uri()))
 }
 
@@ -303,7 +300,7 @@ pub(crate) async fn create_client_with_timeout(
     retry: RetryPolicy,
     timeout: Duration,
 ) -> BoxClientResult<BoxClient> {
-    client_builder(server, retry)?
+    client_builder(server, retry)
         .timeout(TimeoutConfig {
             request_timeout: timeout,
             connect_timeout: Duration::from_secs(1),
@@ -319,8 +316,8 @@ pub(crate) async fn create_client_with_upload_concurrency(
     retry: RetryPolicy,
     upload_concurrency: usize,
 ) -> BoxClientResult<BoxClient> {
-    client_builder(server, retry)?
-        .upload_concurrency(upload_concurrency)?
+    client_builder(server, retry)
+        .upload_concurrency(upload_concurrency)
         .build()
         .await
 }

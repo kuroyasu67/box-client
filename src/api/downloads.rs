@@ -18,6 +18,9 @@ use crate::{
 
 /// ファイルのダウンロードのオプション
 ///
+/// 将来フィールドを追加しても利用者のコードが壊れないように、`#[non_exhaustive]`を付けている。
+/// そのため、クレートの外では構造体リテラルで作成できない。[`Default`]で作成し、`with_*`メソッドで値を設定する。
+///
 /// # Examples
 ///
 /// ```
@@ -470,8 +473,8 @@ mod test_download_file {
             .expect(u64::from(max_download_polls) + 1)
             .mount(&server)
             .await;
-        let client = client_builder(&server, short_retry(0))?
-            .max_download_polls(max_download_polls)?
+        let client = client_builder(&server, short_retry(0))
+            .max_download_polls(max_download_polls)
             .build()
             .await?;
 
@@ -620,7 +623,7 @@ mod test_download_file {
         download_read_timeout: Duration,
     ) -> anyhow::Result<BoxClient> {
         Ok(
-            raw_server_client_builder(&api_base_url, token_server, short_retry(0))?
+            raw_server_client_builder(&api_base_url, token_server, short_retry(0))
                 .timeout(
                     TimeoutConfig::default()
                         .with_request_timeout(request_timeout)
@@ -708,7 +711,7 @@ mod test_download_file {
         let token_server = MockServer::start().await;
         mount_token(&token_server).await;
         let (api_base_url, connections) = start_truncating_once_server().await?;
-        let client = raw_server_client_builder(&api_base_url, &token_server, short_retry(1))?
+        let client = raw_server_client_builder(&api_base_url, &token_server, short_retry(1))
             .build()
             .await?;
 

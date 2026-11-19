@@ -97,6 +97,8 @@ pub struct Folder {
 /// 将来フィールドを追加しても利用者のコードが壊れないように、`#[non_exhaustive]`を付けている。
 /// そのため、クレートの外では構造体リテラルで作成できない。[`Default`]で作成し、`with_*`メソッドで値を設定する。
 ///
+/// # Examples
+///
 /// ```
 /// use box_client::{ItemSort, ListItemsOptions, SortDirection};
 ///
@@ -184,6 +186,9 @@ impl<'a> CreateFolderBody<'a> {
 
 /// フォルダのコピーのオプション
 ///
+/// 将来フィールドを追加しても利用者のコードが壊れないように、`#[non_exhaustive]`を付けている。
+/// そのため、クレートの外では構造体リテラルで作成できない。[`Default`]で作成し、`with_*`メソッドで値を設定する。
+///
 /// # Examples
 ///
 /// ```
@@ -244,6 +249,8 @@ impl<'a> CopyFolderBody<'a> {
 ///
 /// 将来フィールドを追加しても利用者のコードが壊れないように、`#[non_exhaustive]`を付けている。
 /// そのため、クレートの外では構造体リテラルで作成できない。[`Default`]で作成し、`with_*`メソッドで値を設定する。
+///
+/// # Examples
 ///
 /// ```
 /// use box_client::DeleteFolderOptions;

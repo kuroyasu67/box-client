@@ -24,6 +24,8 @@ use crate::errors::{ApiError, BoxClientError, BoxClientResult};
 /// 設定値の条件は複数のフィールドにまたがるため、`with_*`メソッドでは検証せず、[`BoxClientBuilder::build`]で検証する。
 /// 条件は各フィールドの説明に記載する。
 ///
+/// # Examples
+///
 /// ```
 /// use std::time::Duration;
 ///
@@ -37,7 +39,7 @@ use crate::errors::{ApiError, BoxClientError, BoxClientResult};
 /// ```
 ///
 /// [`BoxClientBuilder::build`]: crate::BoxClientBuilder::build
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct RetryPolicy {
     /// 最大再試行回数

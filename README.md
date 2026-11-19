@@ -500,7 +500,7 @@ BOXは、中止しなかったアップロードセッションを7日後に破�
 利用者が`BoxClientBuilder::user_agent`でアプリケーションの名前を指定した場合、`BoxClient`は、その後ろに空白とこのクレートの名前とバージョンを続けた`<user_agent> box-client/<version>`を送信する。
 アプリケーションの名前を指定すると、BOXのログで呼び出し元のアプリケーションを識別しやすくなる。
 
-空文字列、空白だけの文字列、およびヘッダーの値に使用できない文字を含む文字列は、`BoxClientBuilder::user_agent`でエラーになる。
+空文字列、空白だけの文字列、およびヘッダーの値に使用できない文字を含む文字列は、`BoxClientBuilder::build()`でエラーになる。
 
 ### プロキシ
 
@@ -513,12 +513,12 @@ BOXは、中止しなかったアップロードセッションを7日後に破�
   `BoxClient`は、ユーザー名とパスワードを`Proxy-Authorization`ヘッダーで送信する。
   ユーザー名とパスワードに`@`や`:`などを含める場合、利用者はパーセントエンコードする。
 - プロキシのURLのスキームは、`http`または`https`とする。
-  クエリまたはフラグメントを含むURL、およびホストを含まないURLは、`BoxClientBuilder::proxy`でエラーになる。
+  クエリまたはフラグメントを含むURL、およびホストを含まないURLは、`BoxClientBuilder::build()`でエラーになる。
 - プロキシのURLは認証情報を含みうるため、`BoxClient`は、URLをDebug出力やエラーに含めない。
 
 ```rust
 let client = BoxClient::builder(config)
-    .proxy("http://user:password@proxy.example.com:8080")?
+    .proxy("http://user:password@proxy.example.com:8080")
     .build()
     .await?;
 ```
@@ -536,7 +536,7 @@ let client = BoxClient::builder(config)
 
 `BoxClient`は、これらのURLにアクセストークンまたはJWTアサーションを送信する。
 したがって、BOX以外のサーバーや暗号化しない通信で送信しないように、`BoxClient`は次の条件を満たすURLだけを受け付ける。
-条件を満たさないURLは、各メソッドでエラーになる。
+条件を満たさないURLは、`BoxClientBuilder::build()`でエラーになる。
 
 - スキームが`https`である。
   ただし、ホストが`localhost`またはループバックアドレス（`127.0.0.0/8`、`::1`）の場合は、モックサーバーに接続できるように`http`も受け付ける。
@@ -548,10 +548,10 @@ BOXは、`aud`クレームがBOXのトークンエンドポイントのURLと一
 
 ```rust
 let client = BoxClient::builder(config)
-    .user_agent("my-app/1.0")?
-    .api_base_url("http://127.0.0.1:8080/2.0")?
-    .upload_base_url("http://127.0.0.1:8080/api/2.0")?
-    .token_url("http://127.0.0.1:8080/oauth2/token")?
+    .user_agent("my-app/1.0")
+    .api_base_url("http://127.0.0.1:8080/2.0")
+    .upload_base_url("http://127.0.0.1:8080/api/2.0")
+    .token_url("http://127.0.0.1:8080/oauth2/token")
     .build()
     .await?;
 ```

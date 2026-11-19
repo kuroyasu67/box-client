@@ -90,6 +90,11 @@ pub const MAX_FILE_VERSIONS_OFFSET: u64 = max_file_versions_offset!();
 
 /// ファイルのバージョンのリストのオプション
 ///
+/// 将来フィールドを追加しても利用者のコードが壊れないように、`#[non_exhaustive]`を付けている。
+/// そのため、クレートの外では構造体リテラルで作成できない。[`Default`]で作成し、`with_*`メソッドで値を設定する。
+///
+/// # Examples
+///
 /// ```
 /// use box_client::ListFileVersionsOptions;
 ///

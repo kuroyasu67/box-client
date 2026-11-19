@@ -198,7 +198,7 @@ impl BoxClient {
             api_base_url: None,
             upload_base_url: None,
             token_url: None,
-            user_agent: HeaderValue::from_static(CRATE_USER_AGENT),
+            user_agent: None,
             proxy: ProxySetting::System,
         }
     }
@@ -453,17 +453,20 @@ pub struct BoxClientBuilder {
     /// ファイルのダウンロードで、BOXが202を返した場合にリクエストを再送する回数の上限
     max_download_polls: u32,
 
+    // 次の3つのURLは、セッターで解釈した結果を保持し、エラーは[`BoxClientBuilder::build`]で返す。
+    // 解釈する前の文字列を保持すると、認証情報を含みうるURLがビルダーのDebug出力に含まれるためである。
+    // エラーは、認証情報を含みうる部分を取り除いたURLだけを含む。
     /// REST APIのベースURL。`None`の場合はBOXのURLを使用する。
-    api_base_url: Option<Url>,
+    api_base_url: Option<BoxClientResult<Url>>,
 
     /// アップロードのAPIのベースURL。`None`の場合はBOXのURLを使用する。
-    upload_base_url: Option<Url>,
+    upload_base_url: Option<BoxClientResult<Url>>,
 
     /// トークンエンドポイントのURL。`None`の場合はBOXのURLを使用する。
-    token_url: Option<String>,
+    token_url: Option<BoxClientResult<Url>>,
 
-    /// `User-Agent`ヘッダーの値
-    user_agent: HeaderValue,
+    /// `User-Agent`ヘッダーで送信するアプリケーションの名前。`None`の場合はこのクレートの名前とバージョンだけを送信する。
+    user_agent: Option<String>,
 
     /// プロキシの設定
     proxy: ProxySetting,
@@ -485,6 +488,36 @@ enum ProxySetting {
 }
 
 impl ProxySetting {
+    /// 指定したプロキシのURLが、[`BoxClientBuilder::proxy`]に記載した条件を満たすか検証する。
+    ///
+    /// # Errors
+    ///
+    /// 条件を満たさない場合は、[`BoxClientError::InvalidProxyUrl`]を返す。
+    /// エラーには、認証情報を含みうるURLを含めない。
+    fn validate(&self) -> BoxClientResult<()> {
+        let Self::Url(proxy_url) = self else {
+            return Ok(());
+        };
+        let url = Url::parse(proxy_url.expose_secret())
+            .map_err(|_| BoxClientError::InvalidProxyUrl("the proxy url cannot be parsed"))?;
+        if !matches!(url.scheme(), "http" | "https") {
+            return Err(BoxClientError::InvalidProxyUrl(
+                "the scheme of the proxy url must be http or https",
+            ));
+        }
+        if url.host_str().is_none_or(str::is_empty) {
+            return Err(BoxClientError::InvalidProxyUrl(
+                "the proxy url must contain a host",
+            ));
+        }
+        if url.query().is_some() || url.fragment().is_some() {
+            return Err(BoxClientError::InvalidProxyUrl(
+                "the proxy url must not contain a query or fragment",
+            ));
+        }
+        Ok(())
+    }
+
     /// HTTPクライアントのビルダーに、プロキシの設定を適用する。
     ///
     /// # Errors
@@ -543,20 +576,12 @@ impl BoxClientBuilder {
     /// 例えば8MiBの場合は、この値が4のときに最大32MiBをメモリに保持する。
     /// `1`を指定すると、部分を1つずつ順にアップロードする。
     ///
-    /// # Errors
-    ///
-    /// `upload_concurrency`が[`MIN_UPLOAD_CONCURRENCY`]以上[`MAX_UPLOAD_CONCURRENCY`]以下でない場合は、
-    /// [`BoxClientError::InvalidUploadConcurrency`]を返す。
-    pub fn upload_concurrency(mut self, upload_concurrency: usize) -> BoxClientResult<Self> {
-        if !(MIN_UPLOAD_CONCURRENCY..=MAX_UPLOAD_CONCURRENCY).contains(&upload_concurrency) {
-            return Err(BoxClientError::InvalidUploadConcurrency {
-                upload_concurrency,
-                min: MIN_UPLOAD_CONCURRENCY,
-                max: MAX_UPLOAD_CONCURRENCY,
-            });
-        }
+    /// [`MIN_UPLOAD_CONCURRENCY`]以上[`MAX_UPLOAD_CONCURRENCY`]以下を指定する。
+    /// 範囲外の値は[`BoxClientBuilder::build`]でエラーになる。
+    #[must_use]
+    pub fn upload_concurrency(mut self, upload_concurrency: usize) -> Self {
         self.upload_concurrency = upload_concurrency;
-        Ok(self)
+        self
     }
 
     /// 分割アップロードに切り替えるファイルサイズ（バイト）を指定する。
@@ -566,25 +591,12 @@ impl BoxClientBuilder {
     /// この値を超えるファイルは、分割アップロードのAPIでアップロードする。
     /// 値を小さくすると、1回のリクエストでアップロードするときに使用するメモリと、1回のリクエストで送信するデータを減らせる。
     ///
-    /// # Errors
-    ///
-    /// `chunked_upload_threshold`が[`MIN_CHUNKED_UPLOAD_THRESHOLD`]以上[`MAX_CHUNKED_UPLOAD_THRESHOLD`]以下でない場合は、
-    /// [`BoxClientError::InvalidChunkedUploadThreshold`]を返す。
-    pub fn chunked_upload_threshold(
-        mut self,
-        chunked_upload_threshold: u64,
-    ) -> BoxClientResult<Self> {
-        if !(MIN_CHUNKED_UPLOAD_THRESHOLD..=MAX_CHUNKED_UPLOAD_THRESHOLD)
-            .contains(&chunked_upload_threshold)
-        {
-            return Err(BoxClientError::InvalidChunkedUploadThreshold {
-                chunked_upload_threshold,
-                min: MIN_CHUNKED_UPLOAD_THRESHOLD,
-                max: MAX_CHUNKED_UPLOAD_THRESHOLD,
-            });
-        }
+    /// [`MIN_CHUNKED_UPLOAD_THRESHOLD`]以上[`MAX_CHUNKED_UPLOAD_THRESHOLD`]以下を指定する。
+    /// 範囲外の値は[`BoxClientBuilder::build`]でエラーになる。
+    #[must_use]
+    pub fn chunked_upload_threshold(mut self, chunked_upload_threshold: u64) -> Self {
         self.chunked_upload_threshold = chunked_upload_threshold;
-        Ok(self)
+        self
     }
 
     /// 分割アップロードのコミットで、BOXが処理中を示す202を返した場合に、コミットを再送する回数の上限を指定する。
@@ -593,13 +605,11 @@ impl BoxClientBuilder {
     /// `0`を指定すると、BOXクライアントは、BOXが202を返した時点で再送せずにエラーを返す。
     /// 202の後の再送は、再試行設定の最大再試行回数に含めない。
     ///
-    /// # Errors
-    ///
-    /// `max_commit_polls`が[`MAX_COMMIT_POLLS_LIMIT`]を超える場合は、[`BoxClientError::InvalidMaxPolls`]を返す。
-    pub fn max_commit_polls(mut self, max_commit_polls: u32) -> BoxClientResult<Self> {
-        self.max_commit_polls =
-            validate_max_polls("max_commit_polls", max_commit_polls, MAX_COMMIT_POLLS_LIMIT)?;
-        Ok(self)
+    /// [`MAX_COMMIT_POLLS_LIMIT`]以下を指定する。上限を超える値は[`BoxClientBuilder::build`]でエラーになる。
+    #[must_use]
+    pub fn max_commit_polls(mut self, max_commit_polls: u32) -> Self {
+        self.max_commit_polls = max_commit_polls;
+        self
     }
 
     /// ファイルのダウンロードで、BOXがダウンロードの準備ができていないことを示す202を返した場合に、
@@ -608,16 +618,11 @@ impl BoxClientBuilder {
     /// `0`を指定すると、BOXクライアントは、BOXが202を返した時点で再送せずにエラーを返す。
     /// 202の後の再送は、再試行設定の最大再試行回数に含めない。
     ///
-    /// # Errors
-    ///
-    /// `max_download_polls`が[`MAX_DOWNLOAD_POLLS_LIMIT`]を超える場合は、[`BoxClientError::InvalidMaxPolls`]を返す。
-    pub fn max_download_polls(mut self, max_download_polls: u32) -> BoxClientResult<Self> {
-        self.max_download_polls = validate_max_polls(
-            "max_download_polls",
-            max_download_polls,
-            MAX_DOWNLOAD_POLLS_LIMIT,
-        )?;
-        Ok(self)
+    /// [`MAX_DOWNLOAD_POLLS_LIMIT`]以下を指定する。上限を超える値は[`BoxClientBuilder::build`]でエラーになる。
+    #[must_use]
+    pub fn max_download_polls(mut self, max_download_polls: u32) -> Self {
+        self.max_download_polls = max_download_polls;
+        self
     }
 
     /// `User-Agent`ヘッダーで送信するアプリケーションの名前を指定する。
@@ -628,21 +633,12 @@ impl BoxClientBuilder {
     ///
     /// アクセストークンの取得とファイルのダウンロードを含む、すべてのリクエストで送信する。
     ///
-    /// # Errors
-    ///
-    /// `user_agent`が空文字列または空白だけの場合は、[`BoxClientError::InvalidArgument`]を返す。
-    /// `user_agent`に制御文字など、ヘッダーの値に使用できない文字が含まれる場合は、
-    /// [`BoxClientError::InvalidHeaderValue`]を返す。
-    pub fn user_agent(mut self, user_agent: &str) -> BoxClientResult<Self> {
-        let user_agent = user_agent.trim();
-        if user_agent.is_empty() {
-            return Err(BoxClientError::InvalidArgument(
-                "user agent must not be empty",
-            ));
-        }
-        self.user_agent = HeaderValue::from_str(&format!("{user_agent} {CRATE_USER_AGENT}"))
-            .map_err(BoxClientError::InvalidHeaderValue)?;
-        Ok(self)
+    /// 空文字列、空白だけの文字列、および制御文字などヘッダーの値に使用できない文字を含む文字列は、
+    /// [`BoxClientBuilder::build`]でエラーになる。
+    #[must_use]
+    pub fn user_agent(mut self, user_agent: &str) -> Self {
+        self.user_agent = Some(user_agent.to_owned());
+        self
     }
 
     /// すべてのリクエストを、指定したプロキシを経由して送信する。
@@ -655,34 +651,15 @@ impl BoxClientBuilder {
     /// URLにユーザー名とパスワードを含める。ユーザー名とパスワードに`@`や`:`などを含める場合は、パーセントエンコードする。
     /// BOXクライアントは、プロキシのURLを`SecretString`で保持し、ログやDebug出力に含めない。
     ///
-    /// # Errors
+    /// 次の条件を満たすURLを指定する。条件を満たさないURLは[`BoxClientBuilder::build`]でエラーになる。
     ///
-    /// 次の場合は、[`BoxClientError::InvalidProxyUrl`]を返す。
-    /// エラーには、認証情報を含みうるURLを含めない。
-    ///
-    /// - URLを解釈できない、またはホストを含まない。
-    /// - スキームが`http`または`https`でない。
-    /// - クエリまたはフラグメントを含む。
-    pub fn proxy(mut self, proxy_url: &str) -> BoxClientResult<Self> {
-        let url = Url::parse(proxy_url)
-            .map_err(|_| BoxClientError::InvalidProxyUrl("the proxy url cannot be parsed"))?;
-        if !matches!(url.scheme(), "http" | "https") {
-            return Err(BoxClientError::InvalidProxyUrl(
-                "the scheme of the proxy url must be http or https",
-            ));
-        }
-        if url.host_str().is_none_or(str::is_empty) {
-            return Err(BoxClientError::InvalidProxyUrl(
-                "the proxy url must contain a host",
-            ));
-        }
-        if url.query().is_some() || url.fragment().is_some() {
-            return Err(BoxClientError::InvalidProxyUrl(
-                "the proxy url must not contain a query or fragment",
-            ));
-        }
+    /// - URLを解釈でき、ホストを含む。
+    /// - スキームが`http`または`https`である。
+    /// - クエリおよびフラグメントを含まない。
+    #[must_use]
+    pub fn proxy(mut self, proxy_url: &str) -> Self {
         self.proxy = ProxySetting::Url(SecretString::from(proxy_url));
-        Ok(self)
+        self
     }
 
     /// プロキシを使用せずに、すべてのリクエストを直接送信する。
@@ -701,27 +678,22 @@ impl BoxClientBuilder {
     /// 利用者のテストで、BOXの代わりにモックサーバーへ接続する場合などに使用する。
     /// ベースURLの後ろに、`folders/0`のようなAPIのパスを続けてリクエストを送信する。
     ///
-    /// # Errors
-    ///
-    /// URLを解釈できない場合、またはURLが[`BoxClientBuilder::token_url`]に記載した条件を満たさない場合は、
-    /// [`BoxClientError::InvalidEndpointUrl`]を返す。
-    pub fn api_base_url(mut self, api_base_url: &str) -> BoxClientResult<Self> {
-        self.api_base_url = Some(parse_endpoint_url("api_base_url", api_base_url)?);
-        Ok(self)
+    /// [`BoxClientBuilder::token_url`]に記載した条件を満たすURLを指定する。
+    /// 条件を満たさないURLは[`BoxClientBuilder::build`]でエラーになる。
+    #[must_use]
+    pub fn api_base_url(mut self, api_base_url: &str) -> Self {
+        self.api_base_url = Some(parse_endpoint_url("api_base_url", api_base_url));
+        self
     }
 
     /// アップロードのAPIのベースURLを指定する。既定値は`https://upload.box.com/api/2.0`とする。
     ///
     /// BOXは、ファイルのアップロードを、REST APIとは別のホストで受け付ける。
-    /// 用途と注意点は、[`BoxClientBuilder::api_base_url`]と同じである。
-    ///
-    /// # Errors
-    ///
-    /// URLを解釈できない場合、またはURLが[`BoxClientBuilder::token_url`]に記載した条件を満たさない場合は、
-    /// [`BoxClientError::InvalidEndpointUrl`]を返す。
-    pub fn upload_base_url(mut self, upload_base_url: &str) -> BoxClientResult<Self> {
-        self.upload_base_url = Some(parse_endpoint_url("upload_base_url", upload_base_url)?);
-        Ok(self)
+    /// 用途、注意点およびURLの条件は、[`BoxClientBuilder::api_base_url`]と同じである。
+    #[must_use]
+    pub fn upload_base_url(mut self, upload_base_url: &str) -> Self {
+        self.upload_base_url = Some(parse_endpoint_url("upload_base_url", upload_base_url));
+        self
     }
 
     /// トークンエンドポイントのURLを指定する。既定値は`https://api.box.com/oauth2/token`とする。
@@ -733,17 +705,15 @@ impl BoxClientBuilder {
     ///
     /// アクセストークンやクライアントシークレットを、BOX以外のサーバーや暗号化しない通信で送信しないように、
     /// このメソッド、[`BoxClientBuilder::api_base_url`]および[`BoxClientBuilder::upload_base_url`]は、
-    /// 次の条件を満たすURLだけを受け付ける。
+    /// 次の条件を満たすURLだけを受け付ける。条件を満たさないURLは[`BoxClientBuilder::build`]でエラーになる。
     ///
+    /// - URLを解釈でき、ベースURLにできる。
     /// - スキームが`https`である。ただし、ホストが`localhost`またはループバックアドレスの場合は、`http`も受け付ける。
     /// - ユーザー名とパスワード、クエリおよびフラグメントを含まない。
-    ///
-    /// # Errors
-    ///
-    /// URLを解釈できない場合、または上記の条件を満たさない場合は、[`BoxClientError::InvalidEndpointUrl`]を返す。
-    pub fn token_url(mut self, token_url: &str) -> BoxClientResult<Self> {
-        self.token_url = Some(parse_endpoint_url("token_url", token_url)?.into());
-        Ok(self)
+    #[must_use]
+    pub fn token_url(mut self, token_url: &str) -> Self {
+        self.token_url = Some(parse_endpoint_url("token_url", token_url));
+        self
     }
 
     /// REST APIとファイルのダウンロードで共通の、プロキシ、`User-Agent`ヘッダーおよび接続のタイムアウトを設定した
@@ -751,32 +721,30 @@ impl BoxClientBuilder {
     ///
     /// 呼び出し元は、HTTPクライアントの用途に応じたタイムアウトを追加してから、HTTPクライアントを作成する。
     ///
+    /// # Arguments
+    ///
+    /// - `user_agent`: `User-Agent`ヘッダーの値
+    ///
     /// # Errors
     ///
     /// HTTPクライアントがプロキシのURLを使用できない場合は、[`BoxClientError::InvalidProxyUrl`]を返す。
-    fn http_client_builder(&self) -> BoxClientResult<reqwest::ClientBuilder> {
+    fn http_client_builder(
+        &self,
+        user_agent: &HeaderValue,
+    ) -> BoxClientResult<reqwest::ClientBuilder> {
         Ok(self
             .proxy
             .apply(reqwest::Client::builder())?
-            .user_agent(self.user_agent.clone())
+            .user_agent(user_agent.clone())
             .connect_timeout(self.timeout.connect_timeout))
     }
 
-    /// BOXクライアントを作成する。
-    ///
-    /// 利用者が設定の誤りに起動時に気づけるように、このメソッドは最初のアクセストークンを取得する。
+    /// URL以外の設定値が、各セッターに記載した条件を満たすか検証する。
     ///
     /// # Errors
     ///
-    /// 次の場合は、トークンエンドポイントへリクエストせずにエラーを返す。
-    ///
-    /// - タイムアウト設定が[`TimeoutConfig`]に記載した条件を満たさない場合は、[`BoxClientError::InvalidTimeoutConfig`]を返す。
-    /// - 再試行設定が[`RetryPolicy`]に記載した条件を満たさない場合は、[`BoxClientError::InvalidRetryPolicy`]を返す。
-    /// - `refresh_before_expiry`が[`MAX_REFRESH_BEFORE_EXPIRY`]を超える場合は、[`BoxClientError::InvalidRefreshBeforeExpiry`]を返す。
-    ///
-    /// HTTPクライアントを作成できない場合、秘密鍵を復号できない場合、
-    /// またはアクセストークンを取得できない場合もエラーを返す。
-    pub async fn build(self) -> BoxClientResult<BoxClient> {
+    /// 条件を満たさない設定値がある場合は、その設定値に対応するエラーを返す。
+    fn validate(&self) -> BoxClientResult<()> {
         self.timeout.validate()?;
         self.retry.validate()?;
         if MAX_REFRESH_BEFORE_EXPIRY < self.refresh_before_expiry {
@@ -785,28 +753,85 @@ impl BoxClientBuilder {
                 max: MAX_REFRESH_BEFORE_EXPIRY,
             });
         }
+        if !(MIN_UPLOAD_CONCURRENCY..=MAX_UPLOAD_CONCURRENCY).contains(&self.upload_concurrency) {
+            return Err(BoxClientError::InvalidUploadConcurrency {
+                upload_concurrency: self.upload_concurrency,
+                min: MIN_UPLOAD_CONCURRENCY,
+                max: MAX_UPLOAD_CONCURRENCY,
+            });
+        }
+        if !(MIN_CHUNKED_UPLOAD_THRESHOLD..=MAX_CHUNKED_UPLOAD_THRESHOLD)
+            .contains(&self.chunked_upload_threshold)
+        {
+            return Err(BoxClientError::InvalidChunkedUploadThreshold {
+                chunked_upload_threshold: self.chunked_upload_threshold,
+                min: MIN_CHUNKED_UPLOAD_THRESHOLD,
+                max: MAX_CHUNKED_UPLOAD_THRESHOLD,
+            });
+        }
+        validate_max_polls(
+            "max_commit_polls",
+            self.max_commit_polls,
+            MAX_COMMIT_POLLS_LIMIT,
+        )?;
+        validate_max_polls(
+            "max_download_polls",
+            self.max_download_polls,
+            MAX_DOWNLOAD_POLLS_LIMIT,
+        )?;
+        self.proxy.validate()
+    }
+
+    /// BOXクライアントを作成する。
+    ///
+    /// 利用者が設定の誤りに起動時に気づけるように、このメソッドは最初のアクセストークンを取得する。
+    ///
+    /// # Errors
+    ///
+    /// 設定値が次の条件を満たさない場合は、トークンエンドポイントへリクエストせずにエラーを返す。
+    ///
+    /// - タイムアウト設定が[`TimeoutConfig`]に記載した条件を満たさない場合は、[`BoxClientError::InvalidTimeoutConfig`]を返す。
+    /// - 再試行設定が[`RetryPolicy`]に記載した条件を満たさない場合は、[`BoxClientError::InvalidRetryPolicy`]を返す。
+    /// - `refresh_before_expiry`が[`MAX_REFRESH_BEFORE_EXPIRY`]を超える場合は、[`BoxClientError::InvalidRefreshBeforeExpiry`]を返す。
+    /// - `upload_concurrency`が範囲外の場合は、[`BoxClientError::InvalidUploadConcurrency`]を返す。
+    /// - `chunked_upload_threshold`が範囲外の場合は、[`BoxClientError::InvalidChunkedUploadThreshold`]を返す。
+    /// - `max_commit_polls`または`max_download_polls`が上限を超える場合は、[`BoxClientError::InvalidMaxPolls`]を返す。
+    /// - プロキシのURLが条件を満たさない場合は、[`BoxClientError::InvalidProxyUrl`]を返す。
+    /// - `user_agent`が空文字列または空白だけの場合は、[`BoxClientError::InvalidArgument`]を返す。
+    ///   ヘッダーの値に使用できない文字を含む場合は、[`BoxClientError::InvalidHeaderValue`]を返す。
+    /// - `api_base_url`、`upload_base_url`または`token_url`が条件を満たさない場合は、
+    ///   [`BoxClientError::InvalidEndpointUrl`]を返す。
+    ///
+    /// HTTPクライアントを作成できない場合、秘密鍵を復号できない場合、
+    /// またはアクセストークンを取得できない場合もエラーを返す。
+    pub async fn build(self) -> BoxClientResult<BoxClient> {
+        self.validate()?;
+        let user_agent = user_agent_header(self.user_agent.as_deref())?;
 
         // `http_client_builder`は`self`を参照するため、`self`のフィールドを取り出す前にHTTPクライアントを作成する。
         let http_client = self
-            .http_client_builder()?
+            .http_client_builder(&user_agent)?
             .timeout(self.timeout.request_timeout)
             .build()?;
         let download_client = self
-            .http_client_builder()?
+            .http_client_builder(&user_agent)?
             .read_timeout(self.timeout.download_read_timeout)
             .build()?;
         let api_base_url = self
             .api_base_url
-            .map_or_else(|| default_url(BOX_API_BASE_URL), Ok)?;
+            .unwrap_or_else(|| default_url(BOX_API_BASE_URL))?;
         let upload_base_url = self
             .upload_base_url
-            .map_or_else(|| default_url(BOX_UPLOAD_BASE_URL), Ok)?;
-        let token_url = self.token_url.unwrap_or_else(|| BOX_TOKEN_URL.to_owned());
+            .unwrap_or_else(|| default_url(BOX_UPLOAD_BASE_URL))?;
+        let token_url = self
+            .token_url
+            .transpose()?
+            .map_or_else(|| BOX_TOKEN_URL.to_owned(), String::from);
         let token_manager = Arc::new(TokenManager::new(
             http_client.clone(),
             &self.config,
             token_url,
-            self.retry.clone(),
+            self.retry,
             self.refresh_before_expiry,
         )?);
         token_manager.access_token().await?;
@@ -920,7 +945,7 @@ fn redact_url(url: &Url) -> String {
 /// # Errors
 ///
 /// `max_polls`が`limit`を超える場合は、[`BoxClientError::InvalidMaxPolls`]を返す。
-fn validate_max_polls(name: &'static str, max_polls: u32, limit: u32) -> BoxClientResult<u32> {
+fn validate_max_polls(name: &'static str, max_polls: u32, limit: u32) -> BoxClientResult<()> {
     if limit < max_polls {
         return Err(BoxClientError::InvalidMaxPolls {
             name,
@@ -928,7 +953,32 @@ fn validate_max_polls(name: &'static str, max_polls: u32, limit: u32) -> BoxClie
             limit,
         });
     }
-    Ok(max_polls)
+    Ok(())
+}
+
+/// `User-Agent`ヘッダーの値を返す。
+///
+/// # Arguments
+///
+/// - `user_agent`: 利用者が指定したアプリケーションの名前。`None`の場合はこのクレートの名前とバージョンだけを返す。
+///
+/// # Errors
+///
+/// `user_agent`が空文字列または空白だけの場合は、[`BoxClientError::InvalidArgument`]を返す。
+/// `user_agent`に制御文字など、ヘッダーの値に使用できない文字が含まれる場合は、
+/// [`BoxClientError::InvalidHeaderValue`]を返す。
+fn user_agent_header(user_agent: Option<&str>) -> BoxClientResult<HeaderValue> {
+    let Some(user_agent) = user_agent else {
+        return Ok(HeaderValue::from_static(CRATE_USER_AGENT));
+    };
+    let user_agent = user_agent.trim();
+    if user_agent.is_empty() {
+        return Err(BoxClientError::InvalidArgument(
+            "user agent must not be empty",
+        ));
+    }
+    HeaderValue::from_str(&format!("{user_agent} {CRATE_USER_AGENT}"))
+        .map_err(BoxClientError::InvalidHeaderValue)
 }
 
 /// BOXクライアントのタイムアウト設定
@@ -938,6 +988,8 @@ fn validate_max_polls(name: &'static str, max_polls: u32, limit: u32) -> BoxClie
 ///
 /// [`RetryPolicy`]と同じく、`with_*`メソッドでは検証せず、[`BoxClientBuilder::build`]で検証する。
 /// すべてのタイムアウトは`0`より大きくする。
+///
+/// # Examples
 ///
 /// ```
 /// use std::time::Duration;
@@ -949,7 +1001,7 @@ fn validate_max_polls(name: &'static str, max_polls: u32, limit: u32) -> BoxClie
 ///     .with_connect_timeout(Duration::from_secs(5));
 /// assert_eq!(timeout.request_timeout, Duration::from_secs(60));
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct TimeoutConfig {
     /// 接続の開始からレスポンスボディの受信完了までのタイムアウト
@@ -1080,22 +1132,40 @@ mod test_box_client {
         Ok(())
     }
 
-    /// 分割アップロードの並列数が最小値以上最大値以下の場合のみ、ビルダーに設定することを確認
+    /// ビルダーからBOXクライアントを作成し、作成の結果とトークンエンドポイントへのリクエスト数を返す。
+    ///
+    /// 設定の誤りを検出した場合は、トークンエンドポイントへリクエストしないことを確かめるために使用する。
+    async fn build_and_count_token_requests(
+        server: &MockServer,
+        builder: BoxClientBuilder,
+    ) -> (BoxClientResult<BoxClient>, usize) {
+        let result = builder.build().await;
+        let count = count_requests_to_path(server, TOKEN_PATH).await;
+        (result, count)
+    }
+
+    /// 分割アップロードの並列数が最小値以上最大値以下の場合のみ、BOXクライアントを作成することを確認
     #[rstest]
     #[case::zero(0, false)]
     #[case::min(MIN_UPLOAD_CONCURRENCY, true)]
     #[case::default(DEFAULT_UPLOAD_CONCURRENCY, true)]
     #[case::max(MAX_UPLOAD_CONCURRENCY, true)]
     #[case::above_max(MAX_UPLOAD_CONCURRENCY + 1, false)]
-    fn test_builder_validates_upload_concurrency(
+    #[tokio::test]
+    async fn test_build_validates_upload_concurrency(
         #[case] upload_concurrency: usize,
         #[case] valid: bool,
     ) {
-        let result = BoxClient::builder(test_config()).upload_concurrency(upload_concurrency);
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        let builder =
+            client_builder(&server, short_retry(0)).upload_concurrency(upload_concurrency);
+
+        let (result, token_requests) = build_and_count_token_requests(&server, builder).await;
 
         if valid {
             assert!(
-                matches!(&result, Ok(builder) if builder.upload_concurrency == upload_concurrency),
+                matches!(&result, Ok(client) if client.upload_concurrency() == upload_concurrency),
                 "result: {result:?}"
             );
         } else {
@@ -1109,24 +1179,30 @@ mod test_box_client {
                 ),
                 "result: {result:?}"
             );
+            assert_eq!(token_requests, 0);
         }
     }
 
-    /// 分割アップロードに切り替えるファイルサイズが最小値以上最大値以下の場合のみ、ビルダーに設定することを確認
+    /// 分割アップロードに切り替えるファイルサイズが最小値以上最大値以下の場合のみ、BOXクライアントを作成することを確認
     #[rstest]
     #[case::below_min(MIN_CHUNKED_UPLOAD_THRESHOLD - 1, false)]
     #[case::min(MIN_CHUNKED_UPLOAD_THRESHOLD, true)]
     #[case::max(MAX_CHUNKED_UPLOAD_THRESHOLD, true)]
     #[case::above_max(MAX_CHUNKED_UPLOAD_THRESHOLD + 1, false)]
-    fn test_builder_validates_chunked_upload_threshold(
+    #[tokio::test]
+    async fn test_build_validates_chunked_upload_threshold(
         #[case] threshold: u64,
         #[case] valid: bool,
     ) {
-        let result = BoxClient::builder(test_config()).chunked_upload_threshold(threshold);
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        let builder = client_builder(&server, short_retry(0)).chunked_upload_threshold(threshold);
+
+        let (result, token_requests) = build_and_count_token_requests(&server, builder).await;
 
         if valid {
             assert!(
-                matches!(&result, Ok(builder) if builder.chunked_upload_threshold == threshold),
+                matches!(&result, Ok(client) if client.chunked_upload_threshold() == threshold),
                 "result: {result:?}"
             );
         } else {
@@ -1143,6 +1219,7 @@ mod test_box_client {
                 ),
                 "result: {result:?}"
             );
+            assert_eq!(token_requests, 0);
         }
     }
 
@@ -1157,9 +1234,9 @@ mod test_box_client {
     ) -> anyhow::Result<()> {
         let server = MockServer::start().await;
         mount_token(&server).await;
-        let mut builder = client_builder(&server, short_retry(0))?;
+        let mut builder = client_builder(&server, short_retry(0));
         if let Some(threshold) = specified {
-            builder = builder.chunked_upload_threshold(threshold)?;
+            builder = builder.chunked_upload_threshold(threshold);
         }
 
         let client = builder.build().await?;
@@ -1169,33 +1246,45 @@ mod test_box_client {
         Ok(())
     }
 
-    /// 202を受け取った場合に再送する回数の上限が、指定できる最大値以下の場合のみ、ビルダーに設定することを確認
+    /// 202を受け取った場合に再送する回数の上限が、指定できる最大値以下の場合のみ、BOXクライアントを作成することを確認
     #[rstest]
     #[case::zero(0, true)]
     #[case::default_commit(DEFAULT_MAX_COMMIT_POLLS, true)]
     #[case::default_download(DEFAULT_MAX_DOWNLOAD_POLLS, true)]
     #[case::limit(MAX_COMMIT_POLLS_LIMIT, true)]
     #[case::above_limit(MAX_COMMIT_POLLS_LIMIT + 1, false)]
-    fn test_builder_validates_max_polls(#[case] max_polls: u32, #[case] valid: bool) {
+    #[tokio::test]
+    async fn test_build_validates_max_polls(#[case] max_polls: u32, #[case] valid: bool) {
+        type Setter = fn(BoxClientBuilder, u32) -> BoxClientBuilder;
+        type Getter = fn(&BoxClient) -> u32;
         // 2つの上限は同じ最大値を持つため、同じ値で両方を検証する。
         assert_eq!(MAX_COMMIT_POLLS_LIMIT, MAX_DOWNLOAD_POLLS_LIMIT);
-        let commit = BoxClient::builder(test_config()).max_commit_polls(max_polls);
-        let download = BoxClient::builder(test_config()).max_download_polls(max_polls);
+        let cases: [(&str, Setter, Getter); 2] = [
+            (
+                "max_commit_polls",
+                BoxClientBuilder::max_commit_polls,
+                BoxClient::max_commit_polls,
+            ),
+            (
+                "max_download_polls",
+                BoxClientBuilder::max_download_polls,
+                BoxClient::max_download_polls,
+            ),
+        ];
 
-        if valid {
-            assert!(
-                matches!(&commit, Ok(builder) if builder.max_commit_polls == max_polls),
-                "commit: {commit:?}"
-            );
-            assert!(
-                matches!(&download, Ok(builder) if builder.max_download_polls == max_polls),
-                "download: {download:?}"
-            );
-        } else {
-            for (result, expected_name) in [
-                (commit.map(|_| ()), "max_commit_polls"),
-                (download.map(|_| ()), "max_download_polls"),
-            ] {
+        for (expected_name, setter, getter) in cases {
+            let server = MockServer::start().await;
+            mount_token(&server).await;
+            let builder = setter(client_builder(&server, short_retry(0)), max_polls);
+
+            let (result, token_requests) = build_and_count_token_requests(&server, builder).await;
+
+            if valid {
+                assert!(
+                    matches!(&result, Ok(client) if getter(client) == max_polls),
+                    "{expected_name}: {result:?}"
+                );
+            } else {
                 assert!(
                     matches!(
                         &result,
@@ -1204,8 +1293,9 @@ mod test_box_client {
                                 && *m == max_polls
                                 && *limit == MAX_COMMIT_POLLS_LIMIT
                     ),
-                    "result: {result:?}"
+                    "{expected_name}: {result:?}"
                 );
+                assert_eq!(token_requests, 0, "{expected_name}");
             }
         }
     }
@@ -1222,11 +1312,11 @@ mod test_box_client {
     ) -> anyhow::Result<()> {
         let server = MockServer::start().await;
         mount_token(&server).await;
-        let mut builder = client_builder(&server, short_retry(0))?;
+        let mut builder = client_builder(&server, short_retry(0));
         if let Some((commit, download)) = specified {
             builder = builder
-                .max_commit_polls(commit)?
-                .max_download_polls(download)?;
+                .max_commit_polls(commit)
+                .max_download_polls(download);
         }
 
         let client = builder.build().await?;
@@ -1256,8 +1346,8 @@ mod test_box_client {
         let result = BoxClient::builder(test_config())
             .retry(short_retry(0))
             .refresh_before_expiry(refresh_before_expiry)
-            .api_base_url(&format!("{}/2.0", server.uri()))?
-            .token_url(&format!("{}{TOKEN_PATH}", server.uri()))?
+            .api_base_url(&format!("{}/2.0", server.uri()))
+            .token_url(&format!("{}{TOKEN_PATH}", server.uri()))
             .build()
             .await;
 
@@ -1295,7 +1385,7 @@ mod test_box_client {
 
         let result = BoxClient::builder(test_config())
             .timeout(timeout)
-            .token_url(&format!("{}{TOKEN_PATH}", server.uri()))?
+            .token_url(&format!("{}{TOKEN_PATH}", server.uri()))
             .build()
             .await;
 
@@ -1317,7 +1407,7 @@ mod test_box_client {
 
         let result = BoxClient::builder(test_config())
             .retry(RetryPolicy::default().with_initial_delay(Duration::ZERO))
-            .token_url(&format!("{}{TOKEN_PATH}", server.uri()))?
+            .token_url(&format!("{}{TOKEN_PATH}", server.uri()))
             .build()
             .await;
 
@@ -1651,7 +1741,7 @@ mod test_box_client {
         let token_server = MockServer::start().await;
         mount_token(&token_server).await;
         let (api_base_url, connections) = start_truncating_server().await?;
-        let client = raw_server_client_builder(&api_base_url, &token_server, short_retry(2))?
+        let client = raw_server_client_builder(&api_base_url, &token_server, short_retry(2))
             .build()
             .await?;
 
@@ -1689,7 +1779,7 @@ mod test_box_client {
             &api_base_url,
             &server,
             retry_policy(max_retries, DELAY, DELAY, Duration::ZERO),
-        )?
+        )
         .build()
         .await?;
 
@@ -1759,9 +1849,9 @@ mod test_box_client {
             .expect(1)
             .mount(&server)
             .await;
-        let mut builder = client_builder(&server, short_retry(0))?;
+        let mut builder = client_builder(&server, short_retry(0));
         if let Some(user_agent) = user_agent {
-            builder = builder.user_agent(user_agent)?;
+            builder = builder.user_agent(user_agent);
         }
         // `User-Agent`ヘッダーが一致しない場合は、トークンエンドポイントが404を返すため、構築に失敗する。
         let client = builder.build().await?;
@@ -1784,8 +1874,16 @@ mod test_box_client {
     #[case::empty("", "InvalidArgument")]
     #[case::whitespace("  ", "InvalidArgument")]
     #[case::control_character("my-app\n1.0", "InvalidHeaderValue")]
-    fn test_builder_rejects_invalid_user_agent(#[case] user_agent: &str, #[case] expected: &str) {
-        let result = BoxClient::builder(test_config()).user_agent(user_agent);
+    #[tokio::test]
+    async fn test_build_rejects_invalid_user_agent(
+        #[case] user_agent: &str,
+        #[case] expected: &str,
+    ) {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        let builder = client_builder(&server, short_retry(0)).user_agent(user_agent);
+
+        let (result, token_requests) = build_and_count_token_requests(&server, builder).await;
 
         let actual = match &result {
             Err(BoxClientError::InvalidArgument(_)) => "InvalidArgument",
@@ -1793,6 +1891,7 @@ mod test_box_client {
             _ => "other",
         };
         assert_eq!(actual, expected, "result: {result:?}");
+        assert_eq!(token_requests, 0);
     }
 
     /// httpsのURLと、ローカルホストまたはループバックアドレスのhttpのURLだけを受け付けることを確認
@@ -1820,8 +1919,9 @@ mod test_box_client {
     #[case::fragment("https://api.box.com/2.0#secret", Some("https://api.box.com/2.0"))]
     #[case::unparsable("not a secret url", Some("<unparsable>"))]
     #[case::relative("/2.0", Some("<unparsable>"))]
-    fn test_builder_validates_endpoint_urls(#[case] url: &str, #[case] expected: Option<&str>) {
-        type Setter = fn(BoxClientBuilder, &str) -> BoxClientResult<BoxClientBuilder>;
+    #[tokio::test]
+    async fn test_build_validates_endpoint_urls(#[case] url: &str, #[case] expected: Option<&str>) {
+        type Setter = fn(BoxClientBuilder, &str) -> BoxClientBuilder;
         let setters: [(&str, Setter); 3] = [
             ("api_base_url", BoxClientBuilder::api_base_url),
             ("upload_base_url", BoxClientBuilder::upload_base_url),
@@ -1829,12 +1929,22 @@ mod test_box_client {
         ];
 
         for (expected_name, setter) in setters {
-            let result = setter(BoxClient::builder(test_config()), url);
+            let builder = setter(BoxClient::builder(test_config()), url);
+            // 拒否するURLは認証情報を含みうるため、取り除く部分がある場合は、ビルダーのDebug出力にも元のURLを含めない。
+            if expected.is_some_and(|expected_url| expected_url != url) {
+                let debug = format!("{builder:?}");
+                assert!(!debug.contains(url), "{expected_name}: {debug}");
+            }
 
             match expected {
-                None => assert!(result.is_ok(), "{expected_name}: {:?}", result.err()),
+                // 受け付けるURLでBOXクライアントを作成すると、そのURLへ接続するため、URLの解釈だけを確かめる。
+                None => {
+                    let result = parse_endpoint_url(expected_name, url);
+                    assert!(result.is_ok(), "{expected_name}: {:?}", result.err());
+                }
+                // 拒否するURLは、トークンエンドポイントへ接続する前にエラーになる。
                 Some(expected_url) => {
-                    let Err(error) = result else {
+                    let Err(error) = builder.build().await else {
                         panic!("{expected_name}: unexpected success");
                     };
                     assert!(
@@ -1922,9 +2032,9 @@ mod test_box_client {
             .await;
         let client = BoxClient::builder(test_config())
             .retry(short_retry(0))
-            .proxy(&proxy_url_with_credentials(&proxy)?)?
-            .api_base_url(&format!("{target}/2.0"))?
-            .token_url(&format!("{target}{TOKEN_PATH}"))?
+            .proxy(&proxy_url_with_credentials(&proxy)?)
+            .api_base_url(&format!("{target}/2.0"))
+            .token_url(&format!("{target}{TOKEN_PATH}"))
             .build()
             .await?;
         let dir = tempfile::tempdir()?;
@@ -1948,8 +2058,8 @@ mod test_box_client {
         mount_token(&server).await;
         mount_always(&server, path(API_PATH), ok_response()).await;
         // プロキシは接続を拒否するため、プロキシを使用した場合は失敗する。
-        let client = client_builder(&server, short_retry(0))?
-            .proxy(&refused_url()?)?
+        let client = client_builder(&server, short_retry(0))
+            .proxy(&refused_url()?)
             .no_proxy()
             .build()
             .await?;
@@ -1972,13 +2082,17 @@ mod test_box_client {
     #[case::no_host("http://", false)]
     #[case::query("http://user:secret@proxy.example.com?key=value", false)]
     #[case::fragment("http://user:secret@proxy.example.com#top", false)]
-    fn test_builder_validates_proxy_url(#[case] url: &str, #[case] valid: bool) {
-        let result = BoxClient::builder(test_config()).proxy(url);
+    #[tokio::test]
+    async fn test_build_validates_proxy_url(#[case] url: &str, #[case] valid: bool) {
+        let builder = BoxClient::builder(test_config()).proxy(url);
 
         if valid {
+            // 受け付けるURLでBOXクライアントを作成すると、そのプロキシへ接続するため、URLの検証だけを確かめる。
+            let result = builder.proxy.validate();
             assert!(result.is_ok(), "result: {:?}", result.err());
         } else {
-            let error = match result {
+            // 拒否するURLは、トークンエンドポイントへ接続する前にエラーになる。
+            let error = match builder.build().await {
                 Err(e @ BoxClientError::InvalidProxyUrl(_)) => e,
                 other => panic!("unexpected result: {other:?}"),
             };
@@ -1994,11 +2108,11 @@ mod test_box_client {
         mount_token(&server).await;
         // モックサーバーをプロキシとしても使用し、プロキシの認証情報も出力しないことを確かめる。
         let proxy_url = proxy_url_with_credentials(&server)?;
-        let builder = format!("{:?}", BoxClient::builder(test_config()).proxy(&proxy_url)?);
+        let builder = format!("{:?}", BoxClient::builder(test_config()).proxy(&proxy_url));
         let client = format!(
             "{:?}",
-            client_builder(&server, short_retry(0))?
-                .proxy(&proxy_url)?
+            client_builder(&server, short_retry(0))
+                .proxy(&proxy_url)
                 .build()
                 .await?
         );

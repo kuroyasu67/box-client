@@ -27,6 +27,8 @@ use crate::{
 /// 将来フィールドを追加しても利用者のコードが壊れないように、`#[non_exhaustive]`を付けている。
 /// そのため、クレートの外では構造体リテラルで作成できない。[`Default`]で作成し、`with_*`メソッドで値を設定する。
 ///
+/// # Examples
+///
 /// ```
 /// use box_client::{ItemSort, ListTrashedItemsOptions, SortDirection};
 ///
@@ -70,6 +72,8 @@ pub struct ListTrashedItemsOptions {
 ///
 /// 将来フィールドを追加しても利用者のコードが壊れないように、`#[non_exhaustive]`を付けている。
 /// そのため、クレートの外では構造体リテラルで作成できない。[`Default`]で作成し、`with_*`メソッドで値を設定する。
+///
+/// # Examples
 ///
 /// ```
 /// use box_client::{FolderId, RestoreItemOptions};
