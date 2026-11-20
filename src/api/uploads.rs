@@ -1732,7 +1732,7 @@ mod test_upload_file {
     ///
     /// アップロードの方法だけを確かめるため、BOXはどちらのアップロードにもエラーを返す。
     #[rstest]
-    // 既定値（50MiB）以下のファイルは、1回のリクエストでアップロードする。
+    // 既定値（50,000,000バイト）以下のファイルは、1回のリクエストでアップロードする。
     #[case::default_threshold(None, "/files/content")]
     // 最小値を指定した場合は、最小値を超えるファイルを分割アップロードする。
     #[case::min_threshold(Some(MIN_CHUNKED_UPLOAD_THRESHOLD), "/files/upload_sessions")]

@@ -1,16 +1,18 @@
 //! Webリンクに関するAPI
 //!
-//! BOXのドキュメントは、Webリンクの更新（`PUT /web_links/{web_link_id}`）が`If-Match`ヘッダーを受け付けることを明記していない。
+//! BOXのドキュメントは、Webリンクの更新（`PUT /web_links/{web_link_id}`）および削除（`DELETE /web_links/{web_link_id}`）が
+//! `If-Match`ヘッダーを受け付けることを明記していない。
 //! しかし、Webリンクの`ETag`は`If-Match`ヘッダーで使用すると記載しているため、
-//! Webリンクを更新するメソッドは、ファイルおよびフォルダと同じく、`options.etag`を指定した場合に`If-Match`ヘッダーで送信する。
+//! Webリンクを更新および削除するメソッドは、ファイルおよびフォルダと同じく、`options.etag`を指定した場合に`If-Match`ヘッダーで送信する。
 
 use garde::Validate;
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
 use crate::{
-    BoxClient, BoxClientError, BoxClientResult, FolderId, FolderItem, Idempotency, ItemStatus,
-    MAX_DESCRIPTION_CHARS, MoveDestination, PathCollection, UserMini, WebLinkId,
+    BoxClient, BoxClientError, BoxClientResult, DeleteItemOptions, FolderId, FolderItem,
+    Idempotency, ItemStatus, MAX_DESCRIPTION_CHARS, MoveDestination, PathCollection, UserMini,
+    WebLinkId,
     api::types::{
         MAX_NAME_CHARS, MoveBody, MoveParent, ParentFolder, RenameBody, SetDescriptionBody,
         UpdateItemOptions, update_item_request, validate_optional_item_name, validated,
@@ -627,18 +629,26 @@ impl BoxClient {
     /// # Arguments
     ///
     /// - `web_link_id`: 削除するWebリンクのID
+    /// - `options`: `ETag`のオプション。`ETag`を指定した場合は、`If-Match`ヘッダーで送信する。
     ///
     /// # Errors
     ///
+    /// `options.etag`に使用できない文字が含まれる場合は、リクエストを送信せずに[`BoxClientError::InvalidHeaderValue`]を返す。
     /// BOXがエラーレスポンスを返した場合は、[`BoxClientError::Api`]を返す。
     /// 公式ドキュメントは、このAPIが返すエラーのステータスを個別に記載していない。
+    /// ファイルの削除と同じく、Webリンクが`ETag`の取得後に変更されている場合は、BOXが412を返すと想定している。
     ///
     /// 再試行できないエラーが発生した場合、または再試行回数の上限に達した場合はエラーを返す。
     /// 5xxまたはタイムアウトでエラーを返した場合は、BOXがWebリンクを削除した可能性があるため、
     /// [`BoxClient::web_link_information`]でWebリンクの状態を確認する。
-    pub async fn delete_web_link(&self, web_link_id: &WebLinkId) -> BoxClientResult<()> {
+    pub async fn delete_web_link(
+        &self,
+        web_link_id: &WebLinkId,
+        options: &DeleteItemOptions<'_>,
+    ) -> BoxClientResult<()> {
         let request = ApiRequest::delete(["web_links", web_link_id.as_ref()])
-            .idempotency(Idempotency::NonIdempotent);
+            .idempotency(Idempotency::NonIdempotent)
+            .if_match(options.etag)?;
 
         self.send_empty(request).await?;
 
@@ -1129,16 +1139,19 @@ mod test_delete_web_link {
 
     use super::*;
     use crate::test_support::{
-        assert_not_retried, assert_retried_after, count_requests, create_client, mount_token,
-        operation_blocked_response, short_retry,
+        assert_not_retried, assert_retried_after, create_client, if_match_headers, mount_token,
+        operation_blocked_response, request_count, short_retry,
     };
 
     /// WebリンクのAPIのパス
     const WEB_LINK_PATH: &str = "/2.0/web_links/123";
 
-    /// `DELETE /web_links/{web_link_id}`を呼び出し、204を受け取ると成功することを確認
+    /// `DELETE /web_links/{web_link_id}`を呼び出し、`ETag`を指定した場合だけIf-Matchヘッダーを送信することを確認
+    #[rstest]
+    #[case::without_etag(None)]
+    #[case::with_etag(Some("1"))]
     #[tokio::test]
-    async fn test_delete_web_link() -> anyhow::Result<()> {
+    async fn test_delete_web_link(#[case] etag: Option<&str>) -> anyhow::Result<()> {
         let server = MockServer::start().await;
         mount_token(&server).await;
         Mock::given(method("DELETE"))
@@ -1149,9 +1162,38 @@ mod test_delete_web_link {
             .await;
         let client = create_client(&server, short_retry(0)).await?;
 
-        client.delete_web_link(&WebLinkId::new("123")).await?;
+        client
+            .delete_web_link(&WebLinkId::new("123"), &DeleteItemOptions { etag })
+            .await?;
 
-        assert_eq!(count_requests(&server, "DELETE", WEB_LINK_PATH).await, 1);
+        assert_eq!(
+            if_match_headers(&server, "DELETE", WEB_LINK_PATH).await,
+            vec![etag.map(str::to_owned)]
+        );
+
+        Ok(())
+    }
+
+    /// `ETag`に使用できない文字が含まれる場合は、リクエストを送信せずにエラーを返すことを確認
+    #[tokio::test]
+    async fn test_delete_web_link_invalid_etag() -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        let client = create_client(&server, short_retry(0)).await?;
+        let requests_before = request_count(&server).await;
+
+        let result = client
+            .delete_web_link(
+                &WebLinkId::new("123"),
+                &DeleteItemOptions::default().with_etag("1\r\nX-Injected: 1"),
+            )
+            .await;
+
+        assert!(
+            matches!(result, Err(BoxClientError::InvalidHeaderValue(_))),
+            "result: {result:?}"
+        );
+        assert_eq!(request_count(&server).await, requests_before);
 
         Ok(())
     }
@@ -1171,7 +1213,11 @@ mod test_delete_web_link {
             "DELETE",
             WEB_LINK_PATH,
             status,
-            async |client: &BoxClient| client.delete_web_link(&WebLinkId::new("123")).await,
+            async |client: &BoxClient| {
+                client
+                    .delete_web_link(&WebLinkId::new("123"), &DeleteItemOptions::default())
+                    .await
+            },
         )
         .await
     }
@@ -1189,7 +1235,11 @@ mod test_delete_web_link {
             WEB_LINK_PATH,
             first_response,
             ResponseTemplate::new(204),
-            async |client: &BoxClient| client.delete_web_link(&WebLinkId::new("123")).await,
+            async |client: &BoxClient| {
+                client
+                    .delete_web_link(&WebLinkId::new("123"), &DeleteItemOptions::default())
+                    .await
+            },
         )
         .await?;
 

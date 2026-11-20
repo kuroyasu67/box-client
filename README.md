@@ -1,5 +1,58 @@
 # BOXクライアントクレート
 
+このクレートは、BOXのREST APIを呼び出すクライアント`BoxClient`を提供する。
+`BoxClient`は、JWT認証でエンタープライズのサービスアカウントとして認証し、アクセストークンの取得と更新、
+および失敗したリクエストの再試行を自動で行う。
+
+## はじめに
+
+### BOXでの準備
+
+1. BOXの開発者コンソールで、認証方法に「サーバー認証（JWTを使用）」を選んだカスタムアプリを作成する。
+2. アプリの構成で、呼び出すAPIに必要なアプリアクセスレベルとスコープを設定する。
+   例えば、ユーザーを作成、更新または削除するには、「ユーザーを管理する」のスコープが必要である。
+3. アプリの構成で公開鍵と秘密鍵のペアを生成し、BOX設定ファイル（JSONファイル）をダウンロードする。
+4. エンタープライズの管理者が、管理コンソールでアプリを承認する。
+
+BOX設定ファイルは、クライアントシークレットと秘密鍵を含む。
+したがって、利用者はBOX設定ファイルをリポジトリにコミットせず、アクセスできるユーザーを制限する。
+
+### 依存関係の追加
+
+このクレートの非同期メソッドを実行するには、Tokioのランタイムが必要である。
+
+```shell
+cargo add box-client --git https://github.com/kuroyasu67/box-client
+cargo add tokio --features macros,rt-multi-thread
+```
+
+このクレートは、Rust 1.91以上でビルドできる。
+
+### 最小の使用例
+
+次の例は、BOX設定ファイルで認証したクライアントを構築し、ルートフォルダの情報を取得する。
+
+```rust
+use box_client::{BoxClient, BoxClientResult, BoxConfig, FolderId};
+
+#[tokio::main]
+async fn main() -> BoxClientResult<()> {
+    let config = BoxConfig::from_file("config.json")?;
+    let client = BoxClient::builder(config).build().await?;
+
+    let folder = client.folder_information(&FolderId::root()).await?;
+    println!("{}", folder.name);
+
+    Ok(())
+}
+```
+
+`BoxClient`は、サービスアカウントとしてAPIを呼び出す。
+したがって、ルートフォルダはサービスアカウントのルートフォルダであり、サービスアカウントは、
+コラボレーターとして招待された項目と、自身が作成した項目だけにアクセスできる。
+
+その他の使い方は、[サンプル](#サンプル)と各メソッドのドキュメントを参照する。
+
 ## 対応APIリスト
 
 `BoxClient`のメソッドから呼び出せるBOXのREST APIを、リソースごとに示す。
@@ -601,6 +654,7 @@ let client = BoxClient::builder(config)
 | WARN | `failed after reaching max retries` | 再試行回数が上限に達した。 |
 | WARN | `gave up retrying` | `Retry-After`ヘッダーが示す待機時間が上限を超えたため、再試行を中止した。`Retry-After`ヘッダーが示す待機時間`retry_after_ms`と、待機時間の上限`max_delay_ms`を含む。 |
 | WARN | `failed to abort upload session` | 分割アップロードに失敗した後、`BoxClient`がアップロードセッションを中止できなかった。アップロードセッションのID`upload_session_id`と、原因のエラー`error`を含む。 |
+| WARN | `failed to get zip download status after saving zip file` | `BoxClient::download_zip`が、ZIPファイルを保存した後に、ダウンロードの状態を取得できなかった。原因のエラー`error`を含む。ZIPファイルは保存済みである。 |
 
 ### キャンセル
 

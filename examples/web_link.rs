@@ -12,8 +12,8 @@
 mod common;
 
 use box_client::{
-    BoxClient, CreateWebLinkOptions, FolderId, MoveDestination, RestoreItemOptions,
-    SharedLinkAccess, SharedLinkSettings, WebLink, WebLinkId, WebLinkUpdate,
+    BoxClient, CreateWebLinkOptions, DeleteItemOptions, FolderId, MoveDestination,
+    RestoreItemOptions, SharedLinkAccess, SharedLinkSettings, WebLink, WebLinkId, WebLinkUpdate,
 };
 
 /// 使用方法
@@ -112,7 +112,9 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Webリンクを削除し、ゴミ箱にある削除したWebリンクの情報を取得
-    client.delete_web_link(&web_link_id).await?;
+    client
+        .delete_web_link(&web_link_id, &DeleteItemOptions::default())
+        .await?;
     tracing::info!("web link was deleted successfully");
     tokio::time::sleep(common::WAIT_FOR_TRASH).await;
     let web_link = client.trashed_web_link_information(&web_link_id).await?;

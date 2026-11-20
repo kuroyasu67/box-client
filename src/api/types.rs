@@ -308,14 +308,16 @@ impl<'a> UpdateItemOptions<'a> {
     }
 }
 
-/// ファイルまたはファイルのバージョンを削除するAPIのオプション
+/// ファイル、ファイルのバージョンまたはWebリンクを削除するAPIのオプション
 ///
 /// 将来フィールドを追加しても利用者のコードが壊れないように、`#[non_exhaustive]`を付けている。
 /// そのため、クレートの外では構造体リテラルで作成できない。[`Default`]で作成し、`with_*`メソッドで値を設定する。
 ///
 /// BOXは、ファイルの削除とファイルのバージョンの削除で、同じ形式の`If-Match`ヘッダーを受け付けるため、
-/// [`BoxClient::delete_file`](crate::BoxClient::delete_file)および
-/// [`BoxClient::delete_file_version`](crate::BoxClient::delete_file_version)で共有する。
+/// [`BoxClient::delete_file`](crate::BoxClient::delete_file)、
+/// [`BoxClient::delete_file_version`](crate::BoxClient::delete_file_version)および
+/// [`BoxClient::delete_web_link`](crate::BoxClient::delete_web_link)で共有する。
+/// Webリンクの削除が`If-Match`ヘッダーを受け付けることは、BOXのドキュメントに明記されていない。
 /// フォルダの削除は、空でないフォルダを削除するかどうかも指定するため、
 /// [`DeleteFolderOptions`](crate::DeleteFolderOptions)を使用する。
 ///
@@ -330,7 +332,7 @@ impl<'a> UpdateItemOptions<'a> {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct DeleteItemOptions<'a> {
-    /// 最後に取得したファイルの`ETag`
+    /// 最後に取得したファイルまたはWebリンクの`ETag`
     ///
     /// 指定した場合は、`If-Match`ヘッダーで送信する。ファイルが`ETag`の取得後に変更されていると、
     /// BOXはファイルまたはバージョンを削除せずに412を返す。
@@ -338,7 +340,7 @@ pub struct DeleteItemOptions<'a> {
 }
 
 impl<'a> DeleteItemOptions<'a> {
-    /// 最後に取得したファイルの`ETag`を設定する。
+    /// 最後に取得したファイルまたはWebリンクの`ETag`を設定する。
     #[must_use]
     pub fn with_etag(mut self, etag: &'a str) -> Self {
         self.etag = Some(etag);

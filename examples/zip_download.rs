@@ -70,7 +70,11 @@ async fn main() -> anyhow::Result<()> {
             conflict.download_name
         );
     }
-    tracing::info!("zip download status: {:?}", summary.status);
+    match &summary.status {
+        Ok(status) => tracing::info!("zip download status: {status:?}"),
+        // 状態を取得できなくても、ZIPファイルは保存済みである。
+        Err(error) => tracing::warn!("failed to get zip download status: {error}"),
+    }
 
     // ZIPダウンロードを作成
     // ダウンロード用のURLは数秒しか有効でないため、作成したらすぐにダウンロードする。

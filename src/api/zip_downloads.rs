@@ -225,7 +225,9 @@ pub enum ZipDownloadState {
 }
 
 /// [`BoxClient::download_zip`]の結果
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// [`ZipDownloadSummary::status`]は[`BoxClientError`]を含みうるため、`Clone`および`PartialEq`を実装しない。
+#[derive(Debug)]
 #[non_exhaustive]
 pub struct ZipDownloadSummary {
     /// 保存したZIPファイルのバイト数
@@ -234,10 +236,12 @@ pub struct ZipDownloadSummary {
     /// 名前が重複したため、ZIPファイル内で名前を変更した項目
     pub name_conflicts: Vec<Vec<ZipDownloadNameConflict>>,
 
-    /// ダウンロードを終えた後の状態
+    /// ダウンロードを終えた後の状態、または状態の取得で発生したエラー
     ///
     /// スキップしたファイルおよびフォルダの数を確認できる。
-    pub status: ZipDownloadStatus,
+    /// 状態を取得できなくても、ZIPファイルは保存済みであるため、保存したバイト数と名前を変更した項目を返せるように、
+    /// 状態の取得の結果を`Result`で保持する。
+    pub status: BoxClientResult<ZipDownloadStatus>,
 }
 
 /// ZIPダウンロードの作成リクエストのボディ
@@ -457,6 +461,9 @@ impl BoxClient {
     /// BOXは、ZIPダウンロードの作成後に権限が変わった項目などをスキップしてもダウンロードを続ける。
     /// したがって、戻り値の[`ZipDownloadSummary::status`]で、スキップしたファイルおよびフォルダの数を確認する。
     ///
+    /// 状態の取得に失敗しても、ZIPファイルは保存済みであるため、このメソッドはエラーを返さない。
+    /// 状態の取得で発生したエラーは、[`ZipDownloadSummary::status`]に`Err`で格納する。
+    ///
     /// # Arguments
     ///
     /// - `items`: ZIPファイルに含めるファイルおよびフォルダ。1個以上[`MAX_ZIP_DOWNLOAD_ITEMS`]個以下で指定する。
@@ -465,9 +472,8 @@ impl BoxClient {
     ///
     /// # Errors
     ///
-    /// [`BoxClient::create_zip_download`]、[`BoxClient::download_zip_content`]および
-    /// [`BoxClient::zip_download_status`]のエラーを返す。
-    /// 状態の取得でエラーを返した場合も、ZIPファイルは保存されている。
+    /// [`BoxClient::create_zip_download`]および[`BoxClient::download_zip_content`]のエラーを返す。
+    /// [`BoxClient::zip_download_status`]のエラーは返さず、[`ZipDownloadSummary::status`]に格納する。
     pub async fn download_zip(
         &self,
         items: &[ZipDownloadItem<'_>],
@@ -476,7 +482,13 @@ impl BoxClient {
     ) -> BoxClientResult<ZipDownloadSummary> {
         let zip_download = self.create_zip_download(items, options).await?;
         let size = self.download_zip_content(&zip_download, path).await?;
-        let status = self.zip_download_status(&zip_download).await?;
+        let status = self.zip_download_status(&zip_download).await;
+        if let Err(error) = &status {
+            tracing::warn!(
+                error = error as &(dyn std::error::Error + 'static),
+                "failed to get zip download status after saving zip file"
+            );
+        }
 
         Ok(ZipDownloadSummary {
             size,
@@ -859,8 +871,60 @@ mod test_download_zip {
             "name_conflicts: {:?}",
             summary.name_conflicts
         );
-        assert_eq!(summary.status.skipped_file_count, Some(1));
-        assert_eq!(summary.status.state, Some(ZipDownloadState::Succeeded));
+        let status = summary.status?;
+        assert_eq!(status.skipped_file_count, Some(1));
+        assert_eq!(status.state, Some(ZipDownloadState::Succeeded));
+        assert_eq!(tokio::fs::read(&zip_path).await?, ZIP_CONTENT);
+
+        Ok(())
+    }
+
+    /// 状態の取得に失敗した場合も、エラーを返さずに、保存したZIPファイルのバイト数と状態の取得のエラーを返すことを確認
+    #[tokio::test]
+    async fn test_download_zip_status_error() -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        Mock::given(method("POST"))
+            .and(path("/2.0/zip_downloads"))
+            .respond_with(ResponseTemplate::new(202).set_body_json(json!({
+                "download_url": format!("{}{CONTENT_PATH}", server.uri()),
+                "status_url": format!("{}{STATUS_PATH}", server.uri()),
+                "name_conflicts": [],
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(CONTENT_PATH))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(ZIP_CONTENT))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(STATUS_PATH))
+            .respond_with(ResponseTemplate::new(404))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = create_client(&server, short_retry(0)).await?;
+        let dir = tempfile::tempdir()?;
+        let zip_path = dir.path().join("archive.zip");
+        let folder_id = FolderId::new("2");
+
+        let summary = client
+            .download_zip(
+                &[ZipDownloadItem::Folder(&folder_id)],
+                &zip_path,
+                &CreateZipDownloadOptions::default(),
+            )
+            .await?;
+
+        assert_eq!(summary.size, ZIP_CONTENT.len() as u64);
+        assert!(
+            matches!(&summary.status, Err(BoxClientError::Api(e)) if e.status == 404),
+            "status: {:?}",
+            summary.status
+        );
         assert_eq!(tokio::fs::read(&zip_path).await?, ZIP_CONTENT);
 
         Ok(())
