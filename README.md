@@ -152,6 +152,9 @@
 - コラボレーションの作成
   - メソッド: `BoxClient::create_collaboration`
   - BOX API: `POST /collaborations`
+- コラボレーションの更新（役割の変更、所有者の変更、保留中の招待の承認または拒否を含む）
+  - メソッド: `BoxClient::update_collaboration`
+  - BOX API: `PUT /collaborations/{collaboration_id}`
 
 ### ゴミ箱
 

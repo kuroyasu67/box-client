@@ -31,9 +31,10 @@ mod test_support;
 
 pub use api::collaborations::{
     AcceptanceRequirementsStatus, AppItem, Collaboration, CollaborationGrantee, CollaborationItem,
-    CollaborationRole, CollaborationStatus, CollaborationUser, CollaborationsOffsetPage,
-    CollaborationsPage, Collaborator, CreateCollaborationOptions, GroupMini, GroupType,
-    ListFileCollaborationsOptions, ListFolderCollaborationsOptions, ListGroupCollaborationsOptions,
+    CollaborationRole, CollaborationStatus, CollaborationUpdate, CollaborationUpdateOutcome,
+    CollaborationUser, CollaborationsOffsetPage, CollaborationsPage, Collaborator,
+    CreateCollaborationOptions, GroupMini, GroupType, ListFileCollaborationsOptions,
+    ListFolderCollaborationsOptions, ListGroupCollaborationsOptions,
     ListPendingCollaborationsOptions, MAX_COLLABORATIONS_OFFSET, StrongPasswordRequirement,
     TermsOfService, TermsOfServiceRequirement, TwoFactorAuthenticationRequirement,
 };

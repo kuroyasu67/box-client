@@ -2,6 +2,7 @@
 //!
 //! コラボレーションは、ユーザーまたはグループに、フォルダ、ファイルまたはアプリ項目へのアクセス権限を与える。
 
+use reqwest::{Response, StatusCode};
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
@@ -13,6 +14,7 @@ use crate::{
         marker_page_request, validate_limit,
     },
     request::ApiRequest,
+    retry::{AttemptError, Idempotency, read_json},
 };
 
 /// コラボレーション情報
@@ -516,11 +518,10 @@ impl MarkerPage for CollaborationsPage {
 }
 
 impl CollaborationRole {
-    /// コラボレーションの作成で、リクエストボディに指定する文字列を返す。
+    /// リクエストボディに指定する文字列を返す。
     ///
-    /// BOXは、コラボレーションの作成で所有者の役割を受け付けないため、[`CollaborationRole::Owner`]には`None`を返す。
     /// [`CollaborationRole::Unknown`]は、BOXに送信する値を持たないため、`None`を返す。
-    fn as_create_str(self) -> Option<&'static str> {
+    fn as_str(self) -> Option<&'static str> {
         match self {
             Self::Editor => Some("editor"),
             Self::Viewer => Some("viewer"),
@@ -529,8 +530,204 @@ impl CollaborationRole {
             Self::PreviewerUploader => Some("previewer uploader"),
             Self::ViewerUploader => Some("viewer uploader"),
             Self::CoOwner => Some("co-owner"),
-            Self::Owner | Self::Unknown => None,
+            Self::Owner => Some("owner"),
+            Self::Unknown => None,
         }
+    }
+
+    /// コラボレーションの作成で、リクエストボディに指定する文字列を返す。
+    ///
+    /// BOXは、コラボレーションの作成で所有者の役割を受け付けないため、[`CollaborationRole::Owner`]には`None`を返す。
+    fn as_create_str(self) -> Option<&'static str> {
+        match self {
+            Self::Owner => None,
+            role => role.as_str(),
+        }
+    }
+}
+
+impl CollaborationStatus {
+    /// リクエストボディに指定する文字列を返す。
+    ///
+    /// [`CollaborationStatus::Unknown`]は、BOXに送信する値を持たないため、`None`を返す。
+    fn as_str(self) -> Option<&'static str> {
+        match self {
+            Self::Accepted => Some("accepted"),
+            Self::Pending => Some("pending"),
+            Self::Rejected => Some("rejected"),
+            Self::Unknown => None,
+        }
+    }
+}
+
+/// コラボレーションの更新で変更する属性
+///
+/// 将来フィールドを追加しても利用者のコードが壊れないように、`#[non_exhaustive]`を付けている。
+/// そのため、クレートの外では構造体リテラルで作成できない。[`Default`]で作成し、`with_*`メソッドで値を設定する。
+///
+/// 指定した属性だけを送信し、BOXは指定しない属性を変更しない。
+///
+/// # Examples
+///
+/// ```
+/// use box_client::{CollaborationRole, CollaborationStatus, CollaborationUpdate};
+///
+/// // 役割を変更する。
+/// let update = CollaborationUpdate::default().with_role(CollaborationRole::Viewer);
+/// assert_eq!(update.role, Some(CollaborationRole::Viewer));
+///
+/// // 保留中の招待を承認する。
+/// let update = CollaborationUpdate::default().with_status(CollaborationStatus::Accepted);
+/// assert_eq!(update.status, Some(CollaborationStatus::Accepted));
+/// ```
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct CollaborationUpdate {
+    /// 与える役割
+    ///
+    /// [`CollaborationRole::Owner`]を指定すると、項目の所有者を変更する。この場合、BOXは更新したコラボレーションを削除して
+    /// 新しいコラボレーションを作成し、以前の所有者は新しいコラボレーションの共同所有者になる。
+    /// [`CollaborationRole::Unknown`]は指定できない。
+    pub role: Option<CollaborationRole>,
+
+    /// 保留中の招待の状態
+    ///
+    /// 状態が[`CollaborationStatus::Pending`]の招待を、[`CollaborationStatus::Accepted`]にすると承認し、
+    /// [`CollaborationStatus::Rejected`]にすると拒否する。BOXのドキュメントによると、招待を承認する場合は役割を指定しなくてよい。
+    /// [`CollaborationStatus::Unknown`]は指定できない。
+    pub status: Option<CollaborationStatus>,
+
+    /// コラボレーションを自動で削除する日時
+    ///
+    /// BOXのドキュメントによると、管理コンソールのエンタープライズ設定で、招待したコラボレーターを自動で削除する設定のうち、
+    /// フォルダの所有者による有効期限の延長を許可する設定を有効にしている場合だけ指定できる。
+    /// また、その設定を有効にした後に作成したコラボレーションだけに有効期限を設定できる。
+    /// 設定を有効にしていない場合に指定すると、BOXは403を返す。
+    pub expires_at: Option<OffsetDateTime>,
+
+    /// コラボレーターが、フォルダの親フォルダまでのパスをすべて参照できるようにするかどうか
+    ///
+    /// BOXのドキュメントによると、フォルダのコラボレーションだけで指定でき、既存のコラボレーションで変更できるのは所有者だけである。
+    pub can_view_path: Option<bool>,
+}
+
+impl CollaborationUpdate {
+    /// 与える役割を設定する。
+    ///
+    /// [`CollaborationRole::Owner`]を指定すると、項目の所有者を変更する。
+    #[must_use]
+    pub fn with_role(mut self, role: CollaborationRole) -> Self {
+        self.role = Some(role);
+        self
+    }
+
+    /// 保留中の招待の状態を設定する。
+    #[must_use]
+    pub fn with_status(mut self, status: CollaborationStatus) -> Self {
+        self.status = Some(status);
+        self
+    }
+
+    /// コラボレーションを自動で削除する日時を設定する。
+    #[must_use]
+    pub fn with_expires_at(mut self, expires_at: OffsetDateTime) -> Self {
+        self.expires_at = Some(expires_at);
+        self
+    }
+
+    /// コラボレーターが、フォルダの親フォルダまでのパスをすべて参照できるようにするかどうかを設定する。
+    #[must_use]
+    pub fn with_can_view_path(mut self, can_view_path: bool) -> Self {
+        self.can_view_path = Some(can_view_path);
+        self
+    }
+}
+
+/// コラボレーションの更新の結果
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum CollaborationUpdateOutcome {
+    /// コラボレーションを更新した。
+    Updated(Box<Collaboration>),
+
+    /// 項目の所有者を変更した。
+    ///
+    /// BOXは、更新したコラボレーションを削除して新しいコラボレーションを作成し、更新後のコラボレーションを返さない。
+    /// 新しいコラボレーションは、[`BoxClient::list_file_collaborations`]または
+    /// [`BoxClient::list_folder_collaborations`]で確認する。
+    OwnerChanged,
+}
+
+/// コラボレーションの更新リクエストのボディ
+#[derive(Debug, Serialize)]
+struct UpdateCollaborationBody {
+    /// 与える役割
+    #[serde(skip_serializing_if = "Option::is_none")]
+    role: Option<&'static str>,
+
+    /// 保留中の招待の状態
+    #[serde(skip_serializing_if = "Option::is_none")]
+    status: Option<&'static str>,
+
+    /// コラボレーションを自動で削除する日時
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        with = "time::serde::rfc3339::option"
+    )]
+    expires_at: Option<OffsetDateTime>,
+
+    /// コラボレーターが、フォルダの親フォルダまでのパスをすべて参照できるようにするかどうか
+    #[serde(skip_serializing_if = "Option::is_none")]
+    can_view_path: Option<bool>,
+}
+
+/// コラボレーションの更新の成功レスポンスを読み込む。
+///
+/// 所有者を変更した場合、BOXはボディのない204を返すため、[`CollaborationUpdateOutcome::OwnerChanged`]を返す。
+/// それ以外の場合は、更新したコラボレーションを読み込んで[`CollaborationUpdateOutcome::Updated`]を返す。
+async fn read_update_outcome(
+    response: Response,
+    idempotency: Idempotency,
+) -> Result<CollaborationUpdateOutcome, AttemptError> {
+    if response.status() == StatusCode::NO_CONTENT {
+        return Ok(CollaborationUpdateOutcome::OwnerChanged);
+    }
+    read_json(response, idempotency)
+        .await
+        .map(|collaboration| CollaborationUpdateOutcome::Updated(Box::new(collaboration)))
+}
+
+impl UpdateCollaborationBody {
+    /// 変更する属性からボディを作成して検証する。
+    ///
+    /// # Errors
+    ///
+    /// `update.role`が[`CollaborationRole::Unknown`]の場合、または`update.status`が[`CollaborationStatus::Unknown`]の場合は、
+    /// [`BoxClientError::InvalidArgument`]を返す。
+    fn new(update: &CollaborationUpdate) -> BoxClientResult<Self> {
+        let role = update
+            .role
+            .map(|role| {
+                role.as_str().ok_or(BoxClientError::InvalidArgument(
+                    "role of a collaboration must not be unknown",
+                ))
+            })
+            .transpose()?;
+        let status = update
+            .status
+            .map(|status| {
+                status.as_str().ok_or(BoxClientError::InvalidArgument(
+                    "status of a collaboration must not be unknown",
+                ))
+            })
+            .transpose()?;
+
+        Ok(Self {
+            role,
+            status,
+            expires_at: update.expires_at,
+            can_view_path: update.can_view_path,
+        })
     }
 }
 
@@ -1180,6 +1377,60 @@ impl BoxClient {
         );
 
         Ok(collaboration)
+    }
+
+    /// コラボレーションを更新する。
+    ///
+    /// 役割、保留中の招待の状態、有効期限、および親フォルダのパスを参照できるかどうかを変更できる。
+    /// 役割に[`CollaborationRole::Owner`]を指定すると項目の所有者を変更し、
+    /// 状態に[`CollaborationStatus::Accepted`]または[`CollaborationStatus::Rejected`]を指定すると保留中の招待を承認または拒否する。
+    ///
+    /// 所有者を変更する場合は、BOXが更新したコラボレーションを削除するため、冪等でないリクエストとして送信する。
+    /// 5xxまたはタイムアウトの後に再送すると、コラボレーションがすでに存在せず、BOXが404を返すおそれがあるためである。
+    /// それ以外の更新は、同じ値を何度設定しても結果が変わらないため、冪等なリクエストとして送信する。
+    ///
+    /// # Arguments
+    ///
+    /// - `collaboration_id`: 更新するコラボレーションのID
+    /// - `update`: 変更する属性
+    ///
+    /// # Returns
+    ///
+    /// コラボレーションを更新した場合は、更新したコラボレーションを[`CollaborationUpdateOutcome::Updated`]で返す。
+    /// 所有者を変更した場合は、BOXが204を返すため、[`CollaborationUpdateOutcome::OwnerChanged`]を返す。
+    ///
+    /// # Errors
+    ///
+    /// `update.role`が[`CollaborationRole::Unknown`]の場合、または`update.status`が[`CollaborationStatus::Unknown`]の場合は、
+    /// リクエストを送信せずに[`BoxClientError::InvalidArgument`]を返す。
+    /// コラボレーションを更新する権限がない場合、または有効期限を設定できない場合は、BOXが403を返すため、
+    /// [`BoxClientError::Api`](crate::BoxClientError::Api)を返す。
+    ///
+    /// 再試行できないエラーが発生した場合、または再試行回数の上限に達した場合はエラーを返す。
+    /// 所有者の変更が5xxまたはタイムアウトでエラーを返した場合は、BOXが所有者を変更した可能性がある。
+    /// したがって、[`BoxClient::list_file_collaborations`]または[`BoxClient::list_folder_collaborations`]で
+    /// 項目のコラボレーションを確認する。
+    pub async fn update_collaboration(
+        &self,
+        collaboration_id: &CollaborationId,
+        update: &CollaborationUpdate,
+    ) -> BoxClientResult<CollaborationUpdateOutcome> {
+        let body = UpdateCollaborationBody::new(update)?;
+        let mut request = ApiRequest::put(["collaborations", collaboration_id.as_ref()]);
+        if update.role == Some(CollaborationRole::Owner) {
+            request = request.idempotency(Idempotency::NonIdempotent);
+        }
+        let request = request.json(&body)?;
+
+        let outcome = self.send(request, read_update_outcome).await?;
+
+        tracing::debug!(
+            collaboration_id = collaboration_id.as_ref(),
+            owner_changed = matches!(outcome, CollaborationUpdateOutcome::OwnerChanged),
+            "updated collaboration"
+        );
+
+        Ok(outcome)
     }
 }
 
@@ -2531,6 +2782,186 @@ mod test_create_collaboration {
 
         assert_eq!(error.status, 403);
         assert_eq!(error.code.as_deref(), Some("forbidden_by_policy"));
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod test_update_collaboration {
+    use rstest::rstest;
+    use serde_json::json;
+    use time::macros::datetime;
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{body_json, method, path},
+    };
+
+    use super::*;
+    use crate::test_support::{
+        assert_not_retried, assert_retried_after, create_client, mount_token, request_count,
+        short_retry,
+    };
+
+    /// コラボレーションのAPIのパス
+    const COLLABORATION_PATH: &str = "/2.0/collaborations/1234";
+
+    /// 更新したコラボレーションのレスポンスを返す。
+    fn updated_response() -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_json(json!({
+            "type": "collaboration",
+            "id": "1234",
+            "role": "viewer",
+            "status": "accepted",
+        }))
+    }
+
+    /// 指定した属性だけをリクエストボディで送信し、更新したコラボレーションを返すことを確認
+    #[rstest]
+    #[case::role(
+        CollaborationUpdate::default().with_role(CollaborationRole::Viewer),
+        json!({"role": "viewer"})
+    )]
+    #[case::accept(
+        CollaborationUpdate::default().with_status(CollaborationStatus::Accepted),
+        json!({"status": "accepted"})
+    )]
+    #[case::reject(
+        CollaborationUpdate::default().with_status(CollaborationStatus::Rejected),
+        json!({"status": "rejected"})
+    )]
+    #[case::all(
+        CollaborationUpdate::default()
+            .with_role(CollaborationRole::PreviewerUploader)
+            .with_status(CollaborationStatus::Accepted)
+            .with_expires_at(datetime!(2026-12-31 23:59:00 -07:00))
+            .with_can_view_path(false),
+        json!({
+            "role": "previewer uploader",
+            "status": "accepted",
+            "expires_at": "2026-12-31T23:59:00-07:00",
+            "can_view_path": false,
+        })
+    )]
+    #[tokio::test]
+    async fn test_update_collaboration(
+        #[case] update: CollaborationUpdate,
+        #[case] expected_body: serde_json::Value,
+    ) -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        Mock::given(method("PUT"))
+            .and(path(COLLABORATION_PATH))
+            .and(body_json(expected_body))
+            .respond_with(updated_response())
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = create_client(&server, short_retry(0)).await?;
+
+        let outcome = client
+            .update_collaboration(&CollaborationId::new("1234"), &update)
+            .await?;
+
+        let CollaborationUpdateOutcome::Updated(collaboration) = outcome else {
+            anyhow::bail!("unexpected outcome: {outcome:?}");
+        };
+        assert_eq!(collaboration.id, CollaborationId::new("1234"));
+        assert_eq!(collaboration.role, Some(CollaborationRole::Viewer));
+
+        Ok(())
+    }
+
+    /// 所有者を変更し、BOXが204を返した場合は、所有者を変更したことを返すことを確認
+    #[tokio::test]
+    async fn test_update_collaboration_owner_changed() -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        Mock::given(method("PUT"))
+            .and(path(COLLABORATION_PATH))
+            .and(body_json(json!({"role": "owner"})))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = create_client(&server, short_retry(0)).await?;
+
+        let outcome = client
+            .update_collaboration(
+                &CollaborationId::new("1234"),
+                &CollaborationUpdate::default().with_role(CollaborationRole::Owner),
+            )
+            .await?;
+
+        assert_eq!(outcome, CollaborationUpdateOutcome::OwnerChanged);
+
+        Ok(())
+    }
+
+    /// 役割または状態に`Unknown`を指定した場合は、リクエストを送信せずにエラーを返すことを確認
+    #[rstest]
+    #[case::unknown_role(CollaborationUpdate::default().with_role(CollaborationRole::Unknown))]
+    #[case::unknown_status(CollaborationUpdate::default().with_status(CollaborationStatus::Unknown))]
+    #[tokio::test]
+    async fn test_update_collaboration_rejects_without_request(
+        #[case] update: CollaborationUpdate,
+    ) -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        let client = create_client(&server, short_retry(0)).await?;
+        let requests_before = request_count(&server).await;
+
+        let result = client
+            .update_collaboration(&CollaborationId::new("1234"), &update)
+            .await;
+
+        assert!(
+            matches!(result, Err(BoxClientError::InvalidArgument(_))),
+            "result: {result:?}"
+        );
+        assert_eq!(request_count(&server).await, requests_before);
+
+        Ok(())
+    }
+
+    /// 所有者の変更は冪等でないため、5xxを再試行せずにそのまま返すことを確認
+    #[tokio::test]
+    async fn test_update_collaboration_owner_change_is_not_retried() -> anyhow::Result<()> {
+        assert_not_retried(
+            "PUT",
+            COLLABORATION_PATH,
+            500,
+            async |client: &BoxClient| {
+                client
+                    .update_collaboration(
+                        &CollaborationId::new("1234"),
+                        &CollaborationUpdate::default().with_role(CollaborationRole::Owner),
+                    )
+                    .await
+            },
+        )
+        .await
+    }
+
+    /// 所有者の変更以外は冪等であるため、5xxの後に再試行することを確認
+    #[tokio::test]
+    async fn test_update_collaboration_role_change_is_retried() -> anyhow::Result<()> {
+        // `assert_retried_after`は、リクエストを2回送信したことも確認する。
+        assert_retried_after(
+            "PUT",
+            COLLABORATION_PATH,
+            ResponseTemplate::new(500),
+            updated_response(),
+            async |client: &BoxClient| {
+                client
+                    .update_collaboration(
+                        &CollaborationId::new("1234"),
+                        &CollaborationUpdate::default().with_role(CollaborationRole::Viewer),
+                    )
+                    .await
+            },
+        )
+        .await?;
 
         Ok(())
     }
