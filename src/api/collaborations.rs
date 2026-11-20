@@ -501,7 +501,9 @@ pub struct CollaborationsPage {
     pub entries: Vec<Collaboration>,
 
     /// このページの取得に使用したコラボレーション数の上限
-    pub limit: u32,
+    ///
+    /// BOXのドキュメントには記載があるが、実際のBOXはレスポンスに含めない場合があるため、その場合は`None`になる。
+    pub limit: Option<u32>,
 
     /// 次のページを取得するためのマーカー
     ///
@@ -1702,7 +1704,7 @@ mod test_list_folder_collaborations {
         let ids: Vec<_> = page.entries.iter().map(|c| c.id.as_ref()).collect();
         assert_eq!(ids, vec!["1", "2"]);
         assert_eq!(page.entries[1].status, Some(CollaborationStatus::Pending));
-        assert_eq!(page.limit, 100);
+        assert_eq!(page.limit, Some(100));
         assert_eq!(page.next_marker.as_deref(), Some("m2"));
         assert_eq!(
             request_queries(&server, COLLABORATIONS_PATH).await,
@@ -1737,6 +1739,38 @@ mod test_list_folder_collaborations {
             .await?;
 
         assert_eq!(page.entries, Vec::new());
+        assert_eq!(page.next_marker, None);
+
+        Ok(())
+    }
+
+    /// BOXが`limit`を含めずに返したレスポンスでも、`limit`を`None`としてページをデシリアライズすることを確認
+    #[tokio::test]
+    async fn test_list_folder_collaborations_without_limit() -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        Mock::given(method("GET"))
+            .and(path(COLLABORATIONS_PATH))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "entries": [
+                    {"type": "collaboration", "id": "1", "role": "editor", "status": "accepted"},
+                ],
+                "next_marker": null,
+            })))
+            .mount(&server)
+            .await;
+        let client = create_client(&server, short_retry(0)).await?;
+
+        let page = client
+            .list_folder_collaborations(
+                &FolderId::new("123"),
+                None,
+                &ListFolderCollaborationsOptions::default(),
+            )
+            .await?;
+
+        assert_eq!(page.entries.len(), 1);
+        assert_eq!(page.limit, None);
         assert_eq!(page.next_marker, None);
 
         Ok(())
