@@ -149,6 +149,9 @@
 - 保留中のコラボレーションの招待のリスト
   - メソッド: `BoxClient::list_pending_collaborations`, `BoxClient::list_all_pending_collaborations`
   - BOX API: `GET /collaborations`
+- コラボレーションの作成
+  - メソッド: `BoxClient::create_collaboration`
+  - BOX API: `POST /collaborations`
 
 ### ゴミ箱
 

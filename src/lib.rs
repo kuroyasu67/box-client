@@ -30,12 +30,12 @@ mod retry;
 mod test_support;
 
 pub use api::collaborations::{
-    AcceptanceRequirementsStatus, AppItem, Collaboration, CollaborationGrantee, CollaborationRole,
-    CollaborationStatus, CollaborationUser, CollaborationsOffsetPage, CollaborationsPage,
-    GroupMini, GroupType, ListFileCollaborationsOptions, ListFolderCollaborationsOptions,
-    ListGroupCollaborationsOptions, ListPendingCollaborationsOptions, MAX_COLLABORATIONS_OFFSET,
-    StrongPasswordRequirement, TermsOfService, TermsOfServiceRequirement,
-    TwoFactorAuthenticationRequirement,
+    AcceptanceRequirementsStatus, AppItem, Collaboration, CollaborationGrantee, CollaborationItem,
+    CollaborationRole, CollaborationStatus, CollaborationUser, CollaborationsOffsetPage,
+    CollaborationsPage, Collaborator, CreateCollaborationOptions, GroupMini, GroupType,
+    ListFileCollaborationsOptions, ListFolderCollaborationsOptions, ListGroupCollaborationsOptions,
+    ListPendingCollaborationsOptions, MAX_COLLABORATIONS_OFFSET, StrongPasswordRequirement,
+    TermsOfService, TermsOfServiceRequirement, TwoFactorAuthenticationRequirement,
 };
 pub use api::downloads::DownloadFileOptions;
 pub use api::files::{CopyFileOptions, File, FileDownloadPermission, FileLock, FileUpdate};

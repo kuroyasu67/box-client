@@ -2,7 +2,7 @@
 //!
 //! コラボレーションは、ユーザーまたはグループに、フォルダ、ファイルまたはアプリ項目へのアクセス権限を与える。
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
 use crate::{
@@ -515,6 +515,263 @@ impl MarkerPage for CollaborationsPage {
     }
 }
 
+impl CollaborationRole {
+    /// コラボレーションの作成で、リクエストボディに指定する文字列を返す。
+    ///
+    /// BOXは、コラボレーションの作成で所有者の役割を受け付けないため、[`CollaborationRole::Owner`]には`None`を返す。
+    /// [`CollaborationRole::Unknown`]は、BOXに送信する値を持たないため、`None`を返す。
+    fn as_create_str(self) -> Option<&'static str> {
+        match self {
+            Self::Editor => Some("editor"),
+            Self::Viewer => Some("viewer"),
+            Self::Previewer => Some("previewer"),
+            Self::Uploader => Some("uploader"),
+            Self::PreviewerUploader => Some("previewer uploader"),
+            Self::ViewerUploader => Some("viewer uploader"),
+            Self::CoOwner => Some("co-owner"),
+            Self::Owner | Self::Unknown => None,
+        }
+    }
+}
+
+/// コラボレーションの対象にするファイルまたはフォルダ
+///
+/// BOXは、コラボレーションの作成で、ファイルとフォルダだけを対象として受け付ける。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum CollaborationItem<'a> {
+    /// ファイル
+    File(&'a FileId),
+
+    /// フォルダ
+    Folder(&'a FolderId),
+}
+
+/// コラボレーションでアクセス権限を与えるユーザーまたはグループ
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Collaborator<'a> {
+    /// ユーザーIDで指定したユーザー
+    User(&'a UserId),
+
+    /// メールアドレスで指定したユーザー
+    ///
+    /// BOXに登録していないメールアドレスを指定した場合、BOXはそのメールアドレスに招待を送信し、
+    /// 作成したコラボレーションの[`Collaboration::invite_email`]にメールアドレスを設定する。
+    UserLogin(&'a str),
+
+    /// グループIDで指定したグループ
+    ///
+    /// BOXのドキュメントによると、グループを招待できるかどうかは、グループの設定による。
+    Group(&'a GroupId),
+}
+
+/// コラボレーションの作成のオプション
+///
+/// 将来フィールドを追加しても利用者のコードが壊れないように、`#[non_exhaustive]`を付けている。
+/// そのため、クレートの外では構造体リテラルで作成できない。[`Default`]で作成し、`with_*`メソッドで値を設定する。
+///
+/// # Examples
+///
+/// ```
+/// use box_client::CreateCollaborationOptions;
+///
+/// let options = CreateCollaborationOptions::default()
+///     .with_can_view_path(true)
+///     .with_notify(false);
+/// assert_eq!(options.can_view_path, Some(true));
+/// assert_eq!(options.notify, Some(false));
+/// ```
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct CreateCollaborationOptions {
+    /// コラボレーターが、「すべてのファイル」に表示されない項目にアクセスできるようにするかどうか
+    ///
+    /// `true`の場合、共有した項目は「すべてのファイル」に表示されず、コラボレーターはルートフォルダからのパスを参照できない。
+    /// `None`の場合はBOXの既定値を使用する。
+    pub is_access_only: Option<bool>,
+
+    /// コラボレーターが、フォルダの親フォルダまでのパスをすべて参照できるようにするかどうか
+    ///
+    /// コラボレーターは、パスを参照できても、親フォルダの権限を得ない。
+    /// BOXのドキュメントによると、フォルダのコラボレーションだけで指定でき、
+    /// `true`を指定できるのは所有者または共同所有者だけである。
+    /// また、BOXは、この値を`true`にしたコラボレーションを、1人のユーザーあたり1,000件までにすることを推奨している。
+    /// `None`の場合はBOXの既定値を使用する。
+    pub can_view_path: Option<bool>,
+
+    /// コラボレーションを自動で削除する日時
+    ///
+    /// BOXのドキュメントによると、管理コンソールのエンタープライズ設定で、招待したコラボレーターを自動で削除する設定のうち、
+    /// フォルダの所有者による有効期限の延長を許可する設定を有効にしている場合だけ指定できる。
+    /// 設定を有効にしていない場合に指定すると、BOXはエラーを返す。`None`の場合は有効期限を設定しない。
+    pub expires_at: Option<OffsetDateTime>,
+
+    /// コラボレーターに電子メールで通知するかどうか
+    ///
+    /// `None`の場合はBOXの既定値を使用する。
+    pub notify: Option<bool>,
+}
+
+impl CreateCollaborationOptions {
+    /// コラボレーターが、「すべてのファイル」に表示されない項目にアクセスできるようにするかどうかを設定する。
+    #[must_use]
+    pub fn with_is_access_only(mut self, is_access_only: bool) -> Self {
+        self.is_access_only = Some(is_access_only);
+        self
+    }
+
+    /// コラボレーターが、フォルダの親フォルダまでのパスをすべて参照できるようにするかどうかを設定する。
+    ///
+    /// フォルダのコラボレーションだけで指定できる。ファイルのコラボレーションで指定した場合は、APIを呼び出したときにエラーになる。
+    #[must_use]
+    pub fn with_can_view_path(mut self, can_view_path: bool) -> Self {
+        self.can_view_path = Some(can_view_path);
+        self
+    }
+
+    /// コラボレーションを自動で削除する日時を設定する。
+    #[must_use]
+    pub fn with_expires_at(mut self, expires_at: OffsetDateTime) -> Self {
+        self.expires_at = Some(expires_at);
+        self
+    }
+
+    /// コラボレーターに電子メールで通知するかどうかを設定する。
+    #[must_use]
+    pub fn with_notify(mut self, notify: bool) -> Self {
+        self.notify = Some(notify);
+        self
+    }
+}
+
+/// コラボレーションの作成リクエストのボディ
+#[derive(Debug, Serialize)]
+struct CreateCollaborationBody<'a> {
+    /// コラボレーションの対象の項目
+    item: CollaborationItemBody<'a>,
+
+    /// アクセス権限を与えるユーザーまたはグループ
+    accessible_by: CollaboratorBody<'a>,
+
+    /// 与える役割
+    role: &'static str,
+
+    /// コラボレーターが、「すべてのファイル」に表示されない項目にアクセスできるようにするかどうか
+    #[serde(skip_serializing_if = "Option::is_none")]
+    is_access_only: Option<bool>,
+
+    /// コラボレーターが、フォルダの親フォルダまでのパスをすべて参照できるようにするかどうか
+    #[serde(skip_serializing_if = "Option::is_none")]
+    can_view_path: Option<bool>,
+
+    /// コラボレーションを自動で削除する日時
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        with = "time::serde::rfc3339::option"
+    )]
+    expires_at: Option<OffsetDateTime>,
+}
+
+/// コラボレーションの対象の項目のリクエストボディ
+#[derive(Debug, Serialize)]
+struct CollaborationItemBody<'a> {
+    /// 項目の種類
+    #[serde(rename = "type")]
+    item_type: &'static str,
+
+    /// 項目のID
+    id: &'a str,
+}
+
+/// アクセス権限を与えるユーザーまたはグループのリクエストボディ
+///
+/// BOXは、ユーザーをユーザーIDまたはメールアドレスのどちらかで受け付けるため、指定した方だけを送信する。
+#[derive(Debug, Serialize)]
+struct CollaboratorBody<'a> {
+    /// コラボレーターの種類
+    #[serde(rename = "type")]
+    collaborator_type: &'static str,
+
+    /// ユーザーまたはグループのID
+    #[serde(skip_serializing_if = "Option::is_none")]
+    id: Option<&'a str>,
+
+    /// ユーザーのメールアドレス
+    #[serde(skip_serializing_if = "Option::is_none")]
+    login: Option<&'a str>,
+}
+
+impl<'a> CreateCollaborationBody<'a> {
+    /// 引数とオプションからボディを作成して検証する。
+    ///
+    /// # Errors
+    ///
+    /// `role`が[`CollaborationRole::Owner`]または[`CollaborationRole::Unknown`]の場合、
+    /// [`Collaborator::UserLogin`]のメールアドレスが空文字列または空白だけの場合、
+    /// またはファイルのコラボレーションで`can_view_path`を指定した場合は、[`BoxClientError::InvalidArgument`]を返す。
+    fn new(
+        item: CollaborationItem<'a>,
+        collaborator: Collaborator<'a>,
+        role: CollaborationRole,
+        options: &CreateCollaborationOptions,
+    ) -> BoxClientResult<Self> {
+        let role = role.as_create_str().ok_or(BoxClientError::InvalidArgument(
+            "role of a new collaboration must not be owner or unknown",
+        ))?;
+        let item = match item {
+            CollaborationItem::File(id) => {
+                if options.can_view_path.is_some() {
+                    return Err(BoxClientError::InvalidArgument(
+                        "can_view_path can only be used for folder collaborations",
+                    ));
+                }
+                CollaborationItemBody {
+                    item_type: "file",
+                    id: id.as_ref(),
+                }
+            }
+            CollaborationItem::Folder(id) => CollaborationItemBody {
+                item_type: "folder",
+                id: id.as_ref(),
+            },
+        };
+        let accessible_by = match collaborator {
+            Collaborator::User(id) => CollaboratorBody {
+                collaborator_type: "user",
+                id: Some(id.as_ref()),
+                login: None,
+            },
+            Collaborator::UserLogin(login) => {
+                if login.trim().is_empty() {
+                    return Err(BoxClientError::InvalidArgument(
+                        "login of a collaborator must not be empty",
+                    ));
+                }
+                CollaboratorBody {
+                    collaborator_type: "user",
+                    id: None,
+                    login: Some(login),
+                }
+            }
+            Collaborator::Group(id) => CollaboratorBody {
+                collaborator_type: "group",
+                id: Some(id.as_ref()),
+                login: None,
+            },
+        };
+
+        Ok(Self {
+            item,
+            accessible_by,
+            role,
+            is_access_only: options.is_access_only,
+            can_view_path: options.can_view_path,
+            expires_at: options.expires_at,
+        })
+    }
+}
+
 impl BoxClient {
     /// コラボレーション情報を取得する。
     ///
@@ -870,6 +1127,59 @@ impl BoxClient {
         );
 
         Ok(collaborations)
+    }
+
+    /// ファイルまたはフォルダに、ユーザーまたはグループのコラボレーションを作成する。
+    ///
+    /// HTTPメソッドがPOSTであるため、冪等でないリクエストとして送信する。
+    /// 5xxまたはタイムアウトの後に再送すると、同じコラボレーションを重複して作成するおそれがあるためである。
+    ///
+    /// # Arguments
+    ///
+    /// - `item`: コラボレーションの対象にするファイルまたはフォルダ
+    /// - `collaborator`: アクセス権限を与えるユーザーまたはグループ
+    /// - `role`: 与える役割。[`CollaborationRole::Owner`]および[`CollaborationRole::Unknown`]は指定できない。
+    /// - `options`: 「すべてのファイル」への表示、親フォルダのパスの参照、有効期限および通知のオプション
+    ///
+    /// # Errors
+    ///
+    /// `role`が[`CollaborationRole::Owner`]もしくは[`CollaborationRole::Unknown`]の場合、
+    /// [`Collaborator::UserLogin`]のメールアドレスが空文字列もしくは空白だけの場合、
+    /// またはファイルのコラボレーションで`options.can_view_path`を指定した場合は、
+    /// リクエストを送信せずに[`BoxClientError::InvalidArgument`]を返す。
+    /// BOXがエラーレスポンスを返した場合は、[`BoxClientError::Api`](crate::BoxClientError::Api)を返す。
+    /// 例えば、情報バリアによってコラボレーションの作成を禁止している場合は、BOXはエラーコードが
+    /// `forbidden_by_policy`の403を返す。
+    ///
+    /// 再試行できないエラーが発生した場合、または再試行回数の上限に達した場合はエラーを返す。
+    /// 5xxまたはタイムアウトでエラーを返した場合は、BOXがコラボレーションを作成した可能性がある。
+    /// したがって、[`BoxClient::list_file_collaborations`]または[`BoxClient::list_folder_collaborations`]で
+    /// 項目のコラボレーションを確認する。
+    pub async fn create_collaboration(
+        &self,
+        item: CollaborationItem<'_>,
+        collaborator: Collaborator<'_>,
+        role: CollaborationRole,
+        options: &CreateCollaborationOptions,
+    ) -> BoxClientResult<Collaboration> {
+        let body = CreateCollaborationBody::new(item, collaborator, role, options)?;
+        let mut request = ApiRequest::post(["collaborations"]);
+        if let Some(notify) = options.notify {
+            request = request.query("notify", if notify { "true" } else { "false" });
+        }
+        let request = request.json(&body)?;
+
+        let collaboration: Collaboration = self.send_json(request).await?;
+
+        // メールアドレスは個人情報であるため、ログに記録しない。
+        tracing::debug!(
+            collaboration_id = collaboration.id.as_ref(),
+            item_type = body.item.item_type,
+            item_id = body.item.id,
+            "created collaboration"
+        );
+
+        Ok(collaboration)
     }
 }
 
@@ -1977,6 +2287,250 @@ mod test_list_pending_collaborations {
             matches!(result, Err(BoxClientError::UnexpectedResponse(_))),
             "result: {result:?}"
         );
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod test_create_collaboration {
+    use rstest::rstest;
+    use serde_json::json;
+    use time::macros::datetime;
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{body_json, method, path},
+    };
+
+    use super::*;
+    use crate::test_support::{
+        assert_not_retried, assert_not_retried_with_response, create_client, mount_token,
+        request_count, request_queries, short_retry,
+    };
+
+    /// コラボレーションのAPIのパス
+    const COLLABORATIONS_PATH: &str = "/2.0/collaborations";
+
+    /// テストで使用するファイルID
+    fn file_id() -> FileId {
+        FileId::new("11446498")
+    }
+
+    /// テストで使用するフォルダID
+    fn folder_id() -> FolderId {
+        FolderId::new("12345")
+    }
+
+    /// テストで使用するユーザーID
+    fn user_id() -> UserId {
+        UserId::new("33224412")
+    }
+
+    /// テストで使用するグループID
+    fn group_id() -> GroupId {
+        GroupId::new("57645")
+    }
+
+    /// 作成したコラボレーションのレスポンスを返す。
+    fn created_response() -> ResponseTemplate {
+        ResponseTemplate::new(201).set_body_json(json!({
+            "type": "collaboration",
+            "id": "999",
+            "role": "editor",
+            "status": "pending",
+        }))
+    }
+
+    /// 項目、コラボレーター、役割およびオプションをリクエストボディとクエリパラメーターに変換し、
+    /// 作成したコラボレーションを返すことを確認
+    #[rstest]
+    // ファイルをメールアドレスで指定したユーザーと共有する最小限の指定
+    #[case::file_login(
+        "file",
+        "login",
+        CollaborationRole::Editor,
+        CreateCollaborationOptions::default(),
+        json!({
+            "item": {"type": "file", "id": "11446498"},
+            "accessible_by": {"type": "user", "login": "user@example.com"},
+            "role": "editor",
+        }),
+        ""
+    )]
+    // フォルダをユーザーIDで指定したユーザーと共有し、すべてのオプションを指定する
+    #[case::folder_user_all_options(
+        "folder",
+        "user",
+        CollaborationRole::ViewerUploader,
+        CreateCollaborationOptions::default()
+            .with_is_access_only(true)
+            .with_can_view_path(true)
+            .with_expires_at(datetime!(2026-12-31 23:59:00 -07:00))
+            .with_notify(false),
+        json!({
+            "item": {"type": "folder", "id": "12345"},
+            "accessible_by": {"type": "user", "id": "33224412"},
+            "role": "viewer uploader",
+            "is_access_only": true,
+            "can_view_path": true,
+            "expires_at": "2026-12-31T23:59:00-07:00",
+        }),
+        "notify=false"
+    )]
+    // フォルダをグループと共有する
+    #[case::folder_group(
+        "folder",
+        "group",
+        CollaborationRole::CoOwner,
+        CreateCollaborationOptions::default().with_notify(true),
+        json!({
+            "item": {"type": "folder", "id": "12345"},
+            "accessible_by": {"type": "group", "id": "57645"},
+            "role": "co-owner",
+        }),
+        "notify=true"
+    )]
+    #[tokio::test]
+    async fn test_create_collaboration(
+        #[case] item_kind: &str,
+        #[case] collaborator_kind: &str,
+        #[case] role: CollaborationRole,
+        #[case] options: CreateCollaborationOptions,
+        #[case] expected_body: serde_json::Value,
+        #[case] expected_query: &str,
+    ) -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        Mock::given(method("POST"))
+            .and(path(COLLABORATIONS_PATH))
+            .and(body_json(expected_body))
+            .respond_with(created_response())
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = create_client(&server, short_retry(0)).await?;
+        let (file_id, folder_id, user_id, group_id) =
+            (file_id(), folder_id(), user_id(), group_id());
+        let item = match item_kind {
+            "file" => CollaborationItem::File(&file_id),
+            _ => CollaborationItem::Folder(&folder_id),
+        };
+        let collaborator = match collaborator_kind {
+            "user" => Collaborator::User(&user_id),
+            "group" => Collaborator::Group(&group_id),
+            _ => Collaborator::UserLogin("user@example.com"),
+        };
+
+        let collaboration = client
+            .create_collaboration(item, collaborator, role, &options)
+            .await?;
+
+        assert_eq!(collaboration.id, CollaborationId::new("999"));
+        assert_eq!(collaboration.status, Some(CollaborationStatus::Pending));
+        assert_eq!(
+            request_queries(&server, COLLABORATIONS_PATH).await,
+            vec![expected_query]
+        );
+
+        Ok(())
+    }
+
+    /// BOXが受け付けない役割、空のメールアドレス、またはファイルでの`can_view_path`を指定した場合は、
+    /// リクエストを送信せずにエラーを返すことを確認
+    #[rstest]
+    #[case::owner("folder", Some("user@example.com"), CollaborationRole::Owner, None)]
+    #[case::unknown("folder", Some("user@example.com"), CollaborationRole::Unknown, None)]
+    #[case::empty_login("folder", Some(""), CollaborationRole::Editor, None)]
+    #[case::blank_login("folder", Some("  "), CollaborationRole::Editor, None)]
+    #[case::can_view_path_on_file("file", None, CollaborationRole::Editor, Some(true))]
+    #[case::can_view_path_false_on_file("file", None, CollaborationRole::Editor, Some(false))]
+    #[tokio::test]
+    async fn test_create_collaboration_rejects_without_request(
+        #[case] item_kind: &str,
+        #[case] login: Option<&str>,
+        #[case] role: CollaborationRole,
+        #[case] can_view_path: Option<bool>,
+    ) -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        let client = create_client(&server, short_retry(0)).await?;
+        let requests_before = request_count(&server).await;
+        let (file_id, folder_id, user_id) = (file_id(), folder_id(), user_id());
+        let item = match item_kind {
+            "file" => CollaborationItem::File(&file_id),
+            _ => CollaborationItem::Folder(&folder_id),
+        };
+        let collaborator = login.map_or(Collaborator::User(&user_id), Collaborator::UserLogin);
+        let options = CreateCollaborationOptions {
+            can_view_path,
+            ..CreateCollaborationOptions::default()
+        };
+
+        let result = client
+            .create_collaboration(item, collaborator, role, &options)
+            .await;
+
+        assert!(
+            matches!(result, Err(BoxClientError::InvalidArgument(_))),
+            "result: {result:?}"
+        );
+        assert_eq!(request_count(&server).await, requests_before);
+
+        Ok(())
+    }
+
+    /// 作成は冪等でないため、5xxを再試行せずにそのまま返すことを確認
+    #[tokio::test]
+    async fn test_create_collaboration_error_is_not_retried() -> anyhow::Result<()> {
+        let folder_id = folder_id();
+        let user_id = user_id();
+        assert_not_retried(
+            "POST",
+            COLLABORATIONS_PATH,
+            500,
+            async |client: &BoxClient| {
+                client
+                    .create_collaboration(
+                        CollaborationItem::Folder(&folder_id),
+                        Collaborator::User(&user_id),
+                        CollaborationRole::Editor,
+                        &CreateCollaborationOptions::default(),
+                    )
+                    .await
+            },
+        )
+        .await
+    }
+
+    /// 情報バリアによって作成を禁止している場合は、BOXのエラーコードを含むエラーを返すことを確認
+    #[tokio::test]
+    async fn test_create_collaboration_forbidden_by_policy() -> anyhow::Result<()> {
+        let folder_id = folder_id();
+        let user_id = user_id();
+        let error = assert_not_retried_with_response(
+            "POST",
+            COLLABORATIONS_PATH,
+            ResponseTemplate::new(403).set_body_json(json!({
+                "type": "error",
+                "status": 403,
+                "code": "forbidden_by_policy",
+                "message": "Creating a collaboration is forbidden due to information barrier restrictions.",
+            })),
+            async |client: &BoxClient| {
+                client
+                    .create_collaboration(
+                        CollaborationItem::Folder(&folder_id),
+                        Collaborator::User(&user_id),
+                        CollaborationRole::Editor,
+                        &CreateCollaborationOptions::default(),
+                    )
+                    .await
+            },
+        )
+        .await?;
+
+        assert_eq!(error.status, 403);
+        assert_eq!(error.code.as_deref(), Some("forbidden_by_policy"));
 
         Ok(())
     }
