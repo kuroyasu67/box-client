@@ -6,6 +6,7 @@ pub mod collaborations;
 pub mod downloads;
 pub mod files;
 pub mod folders;
+pub mod groups;
 pub mod pagination;
 pub mod trash;
 pub mod types;

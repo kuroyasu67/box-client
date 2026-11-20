@@ -9,6 +9,7 @@ use time::OffsetDateTime;
 use crate::{
     AppItemId, BoxClient, BoxClientError, BoxClientResult, BoxItem, CollaborationId, FileId,
     FolderId, GroupId, TermsOfServiceId, UserId,
+    api::groups::GroupMini,
     api::pagination::{
         MAX_ITEMS_LIMIT, MarkerPage, OffsetPage, collect_all_offset_pages, collect_all_pages,
         marker_page_request, validate_limit,
@@ -190,38 +191,6 @@ pub struct CollaborationUser {
     ///
     /// ユーザーを無効にした場合、または削除した場合は`false`となる。
     pub is_active: Option<bool>,
-}
-
-/// 最小限のグループ情報
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[non_exhaustive]
-pub struct GroupMini {
-    /// グループID
-    pub id: GroupId,
-
-    /// グループ名
-    pub name: Option<String>,
-
-    /// グループの種類
-    pub group_type: Option<GroupType>,
-}
-
-/// グループの種類
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case")]
-#[non_exhaustive]
-pub enum GroupType {
-    /// 管理者が管理するグループ
-    ManagedGroup,
-
-    /// エンタープライズのすべてのユーザーを含むグループ
-    AllUsersGroup,
-
-    /// BOXクライアントが知らない種類
-    ///
-    /// BOXが種類を追加しても、コラボレーション情報の取得を失敗させないために受け入れる。
-    #[serde(other)]
-    Unknown,
 }
 
 /// アプリ項目
@@ -3141,6 +3110,7 @@ mod test_deserialize_collaboration {
     use serde_json::json;
 
     use super::*;
+    use crate::GroupType;
 
     /// `id`と`type`だけのコラボレーションを、ほかの属性を`None`としてデシリアライズすることを確認
     #[test]

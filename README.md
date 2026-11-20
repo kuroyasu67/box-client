@@ -26,6 +26,24 @@
   - メソッド: `BoxClient::delete_user`
   - BOX API: `DELETE /users/{user_id}`
 
+### グループ
+
+- グループ情報の取得
+  - メソッド: `BoxClient::group_information`
+  - BOX API: `GET /groups/{group_id}`
+- エンタープライズのグループのリスト
+  - メソッド: `BoxClient::list_enterprise_groups`, `BoxClient::list_all_enterprise_groups`
+  - BOX API: `GET /groups`
+- グループの作成
+  - メソッド: `BoxClient::create_group`
+  - BOX API: `POST /groups`
+- グループの更新
+  - メソッド: `BoxClient::update_group`
+  - BOX API: `PUT /groups/{group_id}`
+- グループの削除
+  - メソッド: `BoxClient::delete_group`
+  - BOX API: `DELETE /groups/{group_id}`
+
 ### フォルダ
 
 - フォルダ情報の取得
@@ -439,6 +457,10 @@ BOXがアクセストークンを拒否して401を返した場合、`BoxClient`
   - HTTPメソッド: DELETE
   - 冪等性: 冪等でない
   - 理由: BOXが削除した後に再送すると、削除済みのユーザーに対する削除となり、エラーを受け取りうる。その結果、削除の結果を誤って判断するおそれがある。
+- グループの削除（`BoxClient::delete_group`）
+  - HTTPメソッド: DELETE
+  - 冪等性: 冪等でない
+  - 理由: BOXが削除した後に再送すると、削除済みのグループに対する削除となり、エラーを受け取りうる。その結果、削除の結果を誤って判断するおそれがある。
 
 フォルダの削除で503を受け取った場合は、`BoxClient::folder_information`でフォルダの状態を確認する。
 フォルダの移動で5xxを受け取った場合、またはタイムアウトした場合は、`BoxClient::folder_information`でフォルダの親フォルダを確認する。
@@ -450,6 +472,7 @@ Webリンクの削除で5xxを受け取った場合、またはタイムアウ�
 コラボレーションの削除で5xxを受け取った場合、またはタイムアウトした場合は、`BoxClient::collaboration_information`でコラボレーションが存在するか確認する。
 ユーザーのエンタープライズからの除外で5xxを受け取った場合、またはタイムアウトした場合は、`BoxClient::user_information`でユーザーを確認する。
 ユーザーの削除で5xxを受け取った場合、またはタイムアウトした場合は、`BoxClient::user_information`でユーザーが存在するか確認する。
+グループの削除で5xxを受け取った場合、またはタイムアウトした場合は、`BoxClient::group_information`でグループが存在するか確認する。
 
 ### 待機時間の決定
 

@@ -275,6 +275,52 @@ where
     Ok((entries, pages))
 }
 
+/// オフセット方式のページ送りで、先頭から`max_entries`件までのエントリーを取得する。
+///
+/// エンタープライズのグループのリストで使用する。[`collect_all_offset_pages`]と異なり、エントリーが`max_entries`件より多くても
+/// エラーにせず、先頭から`max_entries`件を返す。BOXがオフセットに上限を設けているAPIで、上限までの結果を返すために使用する。
+/// `fetch_page`には取得するページの最初のエントリーのオフセットを渡す。最初のページでは`0`を渡す。
+/// 取得したエントリーの数が`total_count`もしくは`max_entries`に達した場合、またはBOXが空のページを返した場合に終了する。
+/// 戻り値は、取得したエントリーと取得したページ数である。
+///
+/// # Arguments
+///
+/// - `max_entries`: 取得するエントリーの最大数
+/// - `fetch_page`: 指定したオフセットから1ページ分を取得するクロージャー
+///
+/// # Errors
+///
+/// `fetch_page`がエラーを返した場合、この関数は取得済みのエントリーを破棄してそのエラーを返す。
+pub(crate) async fn collect_offset_pages_up_to<P, F>(
+    max_entries: u64,
+    mut fetch_page: F,
+) -> BoxClientResult<(Vec<P::Entry>, u32)>
+where
+    P: OffsetPage,
+    F: AsyncFnMut(u64) -> BoxClientResult<P>,
+{
+    let mut entries = Vec::new();
+    let mut offset = 0;
+    let mut pages: u32 = 0;
+    while offset < max_entries {
+        let (mut page_entries, total_count) = fetch_page(offset).await?.into_parts();
+        pages += 1;
+        // 最後のページの、上限を超えるエントリーを取り除く。
+        page_entries.truncate(usize::try_from(max_entries - offset).unwrap_or(usize::MAX));
+        let count = page_entries.len() as u64;
+        entries.extend(page_entries);
+        // BOXが返す`offset`ではなく、要求した`offset`から次のページの位置を求める。
+        // BOXが`offset`を無視して同じページを返し続けても、位置を進めて必ずループを終える。
+        offset += count;
+
+        if count == 0 || total_count <= offset {
+            break;
+        }
+    }
+
+    Ok((entries, pages))
+}
+
 #[cfg(test)]
 mod test_items_page {
     use serde_json::json;
