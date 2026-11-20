@@ -459,110 +459,25 @@ BOXがアクセストークンを拒否して401を返した場合、`BoxClient`
 ただし、HTTPメソッドの意味とAPIの実際の振る舞いが一致しない場合がある。
 したがって、`ApiRequest::idempotency()`で冪等性を上書きできる。
 このクレートでは、次のリクエストで冪等性を上書きしている。
+上書きする理由は、各メソッドのドキュメントコメントに記述している。
 
-- ファイルの更新（`BoxClient::update_file`）
-  - HTTPメソッド: PUT
-  - 冪等性: 冪等でない
-  - 理由: ETagを指定した場合、BOXが更新した後に再送すると、ETagが変わっているため412を受け取る。その結果、更新の結果を誤って判断するおそれがある。
-- ファイル名の変更（`BoxClient::rename_file`）
-  - HTTPメソッド: PUT
-  - 冪等性: 冪等でない
-  - 理由: ETagを指定した場合、BOXが名前を変更した後に再送すると、ETagが変わっているため412を受け取る。その結果、変更の結果を誤って判断するおそれがある。
-- ファイルの説明の設定（`BoxClient::set_file_description`）
-  - HTTPメソッド: PUT
-  - 冪等性: 冪等でない
-  - 理由: ETagを指定した場合、BOXが説明を設定した後に再送すると、ETagが変わっているため412を受け取る。その結果、設定の結果を誤って判断するおそれがある。
-- ファイルの移動（`BoxClient::move_file`）
-  - HTTPメソッド: PUT
-  - 冪等性: 冪等でない
-  - 理由: ETagを指定した場合、BOXがファイルを移動した後に再送すると、ETagが変わっているため412を受け取る。その結果、移動の結果を誤って判断するおそれがある。
-- ファイルの削除（`BoxClient::delete_file`）
-  - HTTPメソッド: DELETE
-  - 冪等性: 冪等でない
-  - 理由: BOXは削除済みのファイルに対して404を返す。BOXが削除した後に再送すると404を受け取り、削除の結果を誤って判断するおそれがある。
-- フォルダの更新（`BoxClient::update_folder`）
-  - HTTPメソッド: PUT
-  - 冪等性: 冪等でない
-  - 理由: ETagを指定した場合、BOXが更新した後に再送すると、ETagが変わっているため412を受け取る。その結果、更新の結果を誤って判断するおそれがある。
-- フォルダ名の変更（`BoxClient::rename_folder`）
-  - HTTPメソッド: PUT
-  - 冪等性: 冪等でない
-  - 理由: ETagを指定した場合、BOXが名前を変更した後に再送すると、ETagが変わっているため412を受け取る。その結果、変更の結果を誤って判断するおそれがある。
-- フォルダの説明の設定（`BoxClient::set_folder_description`）
-  - HTTPメソッド: PUT
-  - 冪等性: 冪等でない
-  - 理由: ETagを指定した場合、BOXが説明を設定した後に再送すると、ETagが変わっているため412を受け取る。その結果、設定の結果を誤って判断するおそれがある。
-- フォルダの移動（`BoxClient::move_folder`）
-  - HTTPメソッド: PUT
-  - 冪等性: 冪等でない
-  - 理由: BOXは移動に600秒以上かかると503を返すが、移動処理はその後も継続する。再送すると409を受け取り、ETagを指定した場合は412を受け取るため、移動の結果を誤って判断するおそれがある。
-- フォルダの削除（`BoxClient::delete_folder`）
-  - HTTPメソッド: DELETE
-  - 冪等性: 冪等でない
-  - 理由: BOXは削除に600秒以上かかると503を返すが、削除処理はその後も継続する。再送すると409や404を受け取り、削除の結果を誤って判断するおそれがある。
-- ファイルのバージョンの削除（`BoxClient::delete_file_version`）
-  - HTTPメソッド: DELETE
-  - 冪等性: 冪等でない
-  - 理由: BOXが削除した後に再送すると、削除済みのバージョンに対する削除となり、エラーを受け取りうる。その結果、削除の結果を誤って判断するおそれがある。
-- ZIPファイルのダウンロード（`BoxClient::download_zip_content`）
-  - HTTPメソッド: GET
-  - 冪等性: 冪等でない
-  - 理由: ダウンロード用のURLは一度しか使用できず、BOXは2回目以降のリクエストに404を返す。
-- ZIPダウンロードの作成（`BoxClient::create_zip_download`）
-  - HTTPメソッド: POST
-  - 冪等性: 冪等
-  - 理由: ZIPダウンロードを重複して作成しても、BOXに項目は作成されず、使用しなかったZIPダウンロードは期限が切れて無効になる。
-- Webリンクの更新（`BoxClient::update_web_link`、`BoxClient::rename_web_link`など）
-  - HTTPメソッド: PUT
-  - 冪等性: 冪等でない
-  - 理由: ETagを指定した場合、BOXが更新した後に再送すると、ETagが変わっているため412を受け取る。その結果、更新の結果を誤って判断するおそれがある。
-- Webリンクの削除（`BoxClient::delete_web_link`）
-  - HTTPメソッド: DELETE
-  - 冪等性: 冪等でない
-  - 理由: BOXが削除した後に再送すると、削除済みのWebリンクに対する削除となり、エラーを受け取りうる。その結果、削除の結果を誤って判断するおそれがある。
-- アクセストークンの取得
-  - HTTPメソッド: POST
-  - 冪等性: 冪等
-  - 理由: アクセストークンを二重に発行しても害はない。また、JWTアサーションは試行ごとに作り直す。
-- ユーザーの更新で、ユーザーをエンタープライズから除外する場合（`BoxClient::update_user`）
-  - HTTPメソッド: PUT
-  - 冪等性: 冪等でない
-  - 理由: BOXがユーザーを除外した後に再送すると、エンタープライズに属さないユーザーに対する更新となり、エラーを受け取りうる。その結果、除外の結果を誤って判断するおそれがある。除外以外の更新は、HTTPメソッドのとおり冪等とする。
-- ユーザーの削除（`BoxClient::delete_user`）
-  - HTTPメソッド: DELETE
-  - 冪等性: 冪等でない
-  - 理由: BOXが削除した後に再送すると、削除済みのユーザーに対する削除となり、エラーを受け取りうる。その結果、削除の結果を誤って判断するおそれがある。
-- グループの削除（`BoxClient::delete_group`）
-  - HTTPメソッド: DELETE
-  - 冪等性: 冪等でない
-  - 理由: BOXが削除した後に再送すると、削除済みのグループに対する削除となり、エラーを受け取りうる。その結果、削除の結果を誤って判断するおそれがある。
-- グループメンバーシップの削除（`BoxClient::delete_group_membership`）
-  - HTTPメソッド: DELETE
-  - 冪等性: 冪等でない
-  - 理由: BOXが削除した後に再送すると、削除済みのメンバーシップに対する削除となり、エラーを受け取りうる。その結果、削除の結果を誤って判断するおそれがある。
-- コラボレーションの更新で、役割を所有者にする場合（`BoxClient::update_collaboration`）
-  - HTTPメソッド: PUT
-  - 冪等性: 冪等でない
-  - 理由: 所有者を変更すると、BOXは更新したコラボレーションを削除して新しいコラボレーションを作成する。BOXが所有者を変更した後に再送すると、削除済みのコラボレーションに対する更新となり、404を受け取りうる。その結果、所有者の変更の結果を誤って判断するおそれがある。所有者の変更以外の更新は、HTTPメソッドのとおり冪等とする。
-- コラボレーションの削除（`BoxClient::delete_collaboration`）
-  - HTTPメソッド: DELETE
-  - 冪等性: 冪等でない
-  - 理由: BOXが削除した後に再送すると、削除済みのコラボレーションに対する削除となり、エラーを受け取りうる。その結果、削除の結果を誤って判断するおそれがある。
+- 冪等でないリクエストとして送信する
+  - ファイル: `BoxClient::update_file`、`BoxClient::rename_file`、`BoxClient::set_file_description`、`BoxClient::move_file`および`BoxClient::delete_file`
+  - フォルダ: `BoxClient::update_folder`、`BoxClient::rename_folder`、`BoxClient::set_folder_description`、`BoxClient::move_folder`および`BoxClient::delete_folder`
+  - ファイルのバージョン: `BoxClient::delete_file_version`
+  - ZIPダウンロード: `BoxClient::download_zip_content`
+  - Webリンク: `BoxClient::update_web_link`、`BoxClient::rename_web_link`、`BoxClient::set_web_link_description`、`BoxClient::move_web_link`、`BoxClient::update_web_link_url`および`BoxClient::delete_web_link`
+  - ユーザー: ユーザーをエンタープライズから除外する場合の`BoxClient::update_user`、および`BoxClient::delete_user`
+  - グループ: `BoxClient::delete_group`
+  - グループメンバーシップ: `BoxClient::delete_group_membership`
+  - コラボレーション: 役割を所有者にする場合の`BoxClient::update_collaboration`、および`BoxClient::delete_collaboration`
+- 冪等なリクエストとして送信する
+  - ZIPダウンロードの作成: `BoxClient::create_zip_download`
+  - アクセストークンの取得
 
 冪等でないリクエストで5xxを受け取った場合、またはタイムアウトした場合は、BOXが処理を完了した可能性がある。
-BOXクライアントは再送しないため、利用者は次のメソッドで結果を確認する。
-
-- ファイルの更新、名前の変更、説明の設定、移動および削除: `BoxClient::file_information`でファイルの状態を確認する。
-- フォルダの更新、名前の変更、説明の設定、移動および削除: `BoxClient::folder_information`でフォルダの状態を確認する。
-  フォルダの移動および削除では、BOXが処理を継続している可能性もある。
-- ファイルのバージョンの削除: `BoxClient::file_version`でバージョンの`trashed_at`を確認する。
-- Webリンクの更新、名前の変更、説明の設定、移動、URLの変更および削除: `BoxClient::web_link_information`でWebリンクの状態を確認する。
-- ユーザーのエンタープライズからの除外: `BoxClient::user_information`でユーザーを確認する。
-- ユーザーの削除: `BoxClient::user_information`でユーザーが存在するか確認する。
-- グループの削除: `BoxClient::group_information`でグループが存在するか確認する。
-- グループメンバーシップの削除: `BoxClient::group_membership_information`でメンバーシップが存在するか確認する。
-- コラボレーションの所有者の変更: `BoxClient::list_file_collaborations`または`BoxClient::list_folder_collaborations`で項目のコラボレーションを確認する。
-- コラボレーションの削除: `BoxClient::collaboration_information`でコラボレーションが存在するか確認する。
+BOXクライアントは再送しないため、利用者は結果を確認する必要がある。
+結果を確認するメソッドは、各メソッドのドキュメントコメントに記述している。
 
 ### 待機時間の決定
 
