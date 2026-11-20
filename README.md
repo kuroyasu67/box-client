@@ -19,17 +19,14 @@
 - フォルダ内の項目のリスト
   - メソッド: `BoxClient::list_items_in_folder`, `BoxClient::list_all_items_in_folder`
   - BOX API: `GET /folders/{folder_id}/items`
+- フォルダのコピー
+  - メソッド: `BoxClient::copy_folder`
+  - BOX API: `POST /folders/{folder_id}/copy`
 - フォルダの作成
   - メソッド: `BoxClient::create_folder`
   - BOX API: `POST /folders`
-- フォルダの削除
-  - メソッド: `BoxClient::delete_folder`
-  - BOX API: `DELETE /folders/{folder_id}`
 - フォルダの更新
   - メソッド: `BoxClient::update_folder`
-  - BOX API: `PUT /folders/{folder_id}`
-- フォルダの移動
-  - メソッド: `BoxClient::move_folder`
   - BOX API: `PUT /folders/{folder_id}`
 - フォルダ名の変更
   - メソッド: `BoxClient::rename_folder`
@@ -37,15 +34,36 @@
 - フォルダの説明の設定
   - メソッド: `BoxClient::set_folder_description`
   - BOX API: `PUT /folders/{folder_id}`
-- フォルダのコピー
-  - メソッド: `BoxClient::copy_folder`
-  - BOX API: `POST /folders/{folder_id}/copy`
+- フォルダの移動
+  - メソッド: `BoxClient::move_folder`
+  - BOX API: `PUT /folders/{folder_id}`
+- フォルダの削除
+  - メソッド: `BoxClient::delete_folder`
+  - BOX API: `DELETE /folders/{folder_id}`
 
 ### ファイル
 
 - ファイル情報の取得
   - メソッド: `BoxClient::file_information`
   - BOX API: `GET /files/{file_id}`
+- ファイルのコピー
+  - メソッド: `BoxClient::copy_file`
+  - BOX API: `POST /files/{file_id}/copy`
+- ファイルの更新
+  - メソッド: `BoxClient::update_file`
+  - BOX API: `PUT /files/{file_id}`
+- ファイル名の変更
+  - メソッド: `BoxClient::rename_file`
+  - BOX API: `PUT /files/{file_id}`
+- ファイルの説明の設定
+  - メソッド: `BoxClient::set_file_description`
+  - BOX API: `PUT /files/{file_id}`
+- ファイルの移動
+  - メソッド: `BoxClient::move_file`
+  - BOX API: `PUT /files/{file_id}`
+- ファイルの削除
+  - メソッド: `BoxClient::delete_file`
+  - BOX API: `DELETE /files/{file_id}`
 - ファイルのバージョン情報の取得
   - メソッド: `BoxClient::file_version`
   - BOX API: `GET /files/{file_id}/versions/{file_version_id}`
@@ -55,35 +73,25 @@
 - ファイルのバージョンの昇格
   - メソッド: `BoxClient::promote_file_version`
   - BOX API: `POST /files/{file_id}/versions/current`
-- ファイルのバージョンの削除
-  - メソッド: `BoxClient::delete_file_version`
-  - BOX API: `DELETE /files/{file_id}/versions/{file_version_id}`
 - 削除したファイルのバージョンの復元
   - メソッド: `BoxClient::restore_file_version`
   - BOX API: `PUT /files/{file_id}/versions/{file_version_id}`
-- ファイルの更新
-  - メソッド: `BoxClient::update_file`
-  - BOX API: `PUT /files/{file_id}`
-- ファイル名の変更
-  - メソッド: `BoxClient::rename_file`
-  - BOX API: `PUT /files/{file_id}`
-- ファイルの移動
-  - メソッド: `BoxClient::move_file`
-  - BOX API: `PUT /files/{file_id}`
-- ファイルのコピー
-  - メソッド: `BoxClient::copy_file`
-  - BOX API: `POST /files/{file_id}/copy`
-- ファイルの説明の設定
-  - メソッド: `BoxClient::set_file_description`
-  - BOX API: `PUT /files/{file_id}`
-- ファイルの削除
-  - メソッド: `BoxClient::delete_file`
-  - BOX API: `DELETE /files/{file_id}`
+- ファイルのバージョンの削除
+  - メソッド: `BoxClient::delete_file_version`
+  - BOX API: `DELETE /files/{file_id}/versions/{file_version_id}`
 - ファイルのアップロード
   - メソッド: `BoxClient::upload_file`
   - BOX API
     - `POST /files/content`
     - `POST /files/upload_sessions`
+    - `PUT /files/upload_sessions/{upload_session_id}`
+    - `POST /files/upload_sessions/{upload_session_id}/commit`
+    - `DELETE /files/upload_sessions/{upload_session_id}`
+- ファイルの内容の更新
+  - メソッド: `BoxClient::update_file_content`
+  - BOX API
+    - `POST /files/{file_id}/content`
+    - `POST /files/{file_id}/upload_sessions`
     - `PUT /files/upload_sessions/{upload_session_id}`
     - `POST /files/upload_sessions/{upload_session_id}/commit`
     - `DELETE /files/upload_sessions/{upload_session_id}`
@@ -93,14 +101,6 @@
 - ファイルの内容の更新のプリフライトチェック
   - メソッド: `BoxClient::preflight_update_file_content`
   - BOX API: `OPTIONS /files/{file_id}/content`
-- ファイルの内容の更新
-  - メソッド: `BoxClient::update_file_content`
-  - BOX API
-    - `POST /files/{file_id}/content`
-    - `POST /files/{file_id}/upload_sessions`
-    - `PUT /files/upload_sessions/{upload_session_id}`
-    - `POST /files/upload_sessions/{upload_session_id}/commit`
-    - `DELETE /files/upload_sessions/{upload_session_id}`
 - ファイルのダウンロード
   - メソッド: `BoxClient::download_file`
   - BOX API: `GET /files/{file_id}/content`
@@ -137,18 +137,6 @@
 - コラボレーション情報の取得
   - メソッド: `BoxClient::collaboration_information`
   - BOX API: `GET /collaborations/{collaboration_id}`
-- フォルダのコラボレーションのリスト
-  - メソッド: `BoxClient::list_folder_collaborations`, `BoxClient::list_all_folder_collaborations`
-  - BOX API: `GET /folders/{folder_id}/collaborations`
-- ファイルのコラボレーションのリスト
-  - メソッド: `BoxClient::list_file_collaborations`, `BoxClient::list_all_file_collaborations`
-  - BOX API: `GET /files/{file_id}/collaborations`
-- グループのコラボレーションのリスト
-  - メソッド: `BoxClient::list_group_collaborations`, `BoxClient::list_all_group_collaborations`
-  - BOX API: `GET /groups/{group_id}/collaborations`
-- 保留中のコラボレーションの招待のリスト
-  - メソッド: `BoxClient::list_pending_collaborations`, `BoxClient::list_all_pending_collaborations`
-  - BOX API: `GET /collaborations`
 - コラボレーションの作成
   - メソッド: `BoxClient::create_collaboration`
   - BOX API: `POST /collaborations`
@@ -158,48 +146,60 @@
 - コラボレーションの削除
   - メソッド: `BoxClient::delete_collaboration`
   - BOX API: `DELETE /collaborations/{collaboration_id}`
+- ファイルのコラボレーションのリスト
+  - メソッド: `BoxClient::list_file_collaborations`, `BoxClient::list_all_file_collaborations`
+  - BOX API: `GET /files/{file_id}/collaborations`
+- フォルダのコラボレーションのリスト
+  - メソッド: `BoxClient::list_folder_collaborations`, `BoxClient::list_all_folder_collaborations`
+  - BOX API: `GET /folders/{folder_id}/collaborations`
+- グループのコラボレーションのリスト
+  - メソッド: `BoxClient::list_group_collaborations`, `BoxClient::list_all_group_collaborations`
+  - BOX API: `GET /groups/{group_id}/collaborations`
+- 保留中のコラボレーションの招待のリスト
+  - メソッド: `BoxClient::list_pending_collaborations`, `BoxClient::list_all_pending_collaborations`
+  - BOX API: `GET /collaborations`
 
 ### ゴミ箱
 
-- ゴミ箱内の項目のリスト
-  - メソッド: `BoxClient::list_trashed_items`, `BoxClient::list_all_trashed_items`
-  - BOX API: `GET /folders/trash/items`
-- ゴミ箱内のフォルダ情報の取得
-  - メソッド: `BoxClient::trashed_folder_information`
-  - BOX API: `GET /folders/{folder_id}/trash`
 - ゴミ箱内のファイル情報の取得
   - メソッド: `BoxClient::trashed_file_information`
   - BOX API: `GET /files/{file_id}/trash`
-- ゴミ箱内のWebリンク情報の取得
-  - メソッド: `BoxClient::trashed_web_link_information`
-  - BOX API: `GET /web_links/{web_link_id}/trash`
-- ゴミ箱内のフォルダの復元
-  - メソッド: `BoxClient::restore_folder`
-  - BOX API: `POST /folders/{folder_id}`
 - ゴミ箱内のファイルの復元
   - メソッド: `BoxClient::restore_file`
   - BOX API: `POST /files/{file_id}`
+- ゴミ箱内のフォルダ情報の取得
+  - メソッド: `BoxClient::trashed_folder_information`
+  - BOX API: `GET /folders/{folder_id}/trash`
+- ゴミ箱内のフォルダの復元
+  - メソッド: `BoxClient::restore_folder`
+  - BOX API: `POST /folders/{folder_id}`
+- ゴミ箱内の項目のリスト
+  - メソッド: `BoxClient::list_trashed_items`, `BoxClient::list_all_trashed_items`
+  - BOX API: `GET /folders/trash/items`
+- ゴミ箱内のWebリンク情報の取得
+  - メソッド: `BoxClient::trashed_web_link_information`
+  - BOX API: `GET /web_links/{web_link_id}/trash`
 - ゴミ箱内のWebリンクの復元
   - メソッド: `BoxClient::restore_web_link`
   - BOX API: `POST /web_links/{web_link_id}`
 
 ### ZIPダウンロード
 
-- ZIPファイルのダウンロード（作成、ダウンロードおよび状態の取得をまとめて実行）
-  - メソッド: `BoxClient::download_zip`
-  - BOX API
-    - `POST /zip_downloads`
-    - `GET /zip_downloads/{zip_download_id}/content`
-    - `GET /zip_downloads/{zip_download_id}/status`
-- ZIPダウンロードの作成
-  - メソッド: `BoxClient::create_zip_download`
-  - BOX API: `POST /zip_downloads`
 - ZIPファイルのダウンロード
   - メソッド: `BoxClient::download_zip_content`
   - BOX API: `GET /zip_downloads/{zip_download_id}/content`
 - ZIPダウンロードの状態の取得
   - メソッド: `BoxClient::zip_download_status`
   - BOX API: `GET /zip_downloads/{zip_download_id}/status`
+- ZIPダウンロードの作成
+  - メソッド: `BoxClient::create_zip_download`
+  - BOX API: `POST /zip_downloads`
+- ZIPファイルのダウンロード（作成、ダウンロードおよび状態の取得をまとめて実行）
+  - メソッド: `BoxClient::download_zip`
+  - BOX API
+    - `POST /zip_downloads`
+    - `GET /zip_downloads/{zip_download_id}/content`
+    - `GET /zip_downloads/{zip_download_id}/status`
 
 ## アクセストークンの管理
 

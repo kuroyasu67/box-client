@@ -590,6 +590,84 @@ impl BoxClient {
             .await
     }
 
+    /// ファイルの内容を更新する。
+    ///
+    /// BOXは、ファイルの新しいバージョンとして内容を保存し、以前の内容をバージョン履歴に残す。
+    ///
+    /// ファイルサイズが[`BoxClient::chunked_upload_threshold`]以下の場合は、ファイル全体をメモリに読み込み、
+    /// 1回のリクエストでアップロードする（`POST /files/{file_id}/content`）。
+    /// [`BoxClient::chunked_upload_threshold`]を超える場合は、分割アップロードのAPIを使用する
+    /// （`POST /files/{file_id}/upload_sessions`で作成したアップロードセッションに部分をアップロードしてコミットする）。
+    /// 分割アップロードの進め方、冪等性および失敗した場合の扱いは、[`BoxClient::upload_file`]と同じである。
+    ///
+    /// `options.etag`を指定した場合は、1回のリクエストでのアップロード、または分割アップロードのコミットで、
+    /// `If-Match`ヘッダーとして送信する。
+    ///
+    /// # Arguments
+    ///
+    /// - `file_id`: 内容を更新するファイルのID
+    /// - `path`: 新しい内容のファイルのパス
+    /// - `options`: 新しいファイル名および`ETag`のオプション
+    ///
+    /// # Errors
+    ///
+    /// `options.name`をBOXが拒否する場合は、リクエストを送信せずに[`BoxClientError::InvalidRequestBody`]を返す。
+    /// `options.etag`に使用できない文字が含まれる場合は、アップロードを始める前に[`BoxClientError::InvalidHeaderValue`]を返す。
+    /// ファイルを読み込めない場合は、[`BoxClientError::ReadFile`]を返す。
+    /// BOXがエラーレスポンスを返した場合は、[`BoxClientError::Api`]を返す。主なステータスは次のとおり。
+    ///
+    /// - 404: ファイルが存在しない、またはアクセスする権限がない。
+    /// - 409: `options.name`と同じ名前の項目が親フォルダに存在する、またはストレージの空き容量がない。
+    /// - 412: `options.etag`がファイルの現在の`ETag`と一致しない。
+    ///
+    /// 分割アップロードのコミットで、BOXが部分の処理を終えないまま、コミットの再送の上限に達した場合は、
+    /// [`BoxClientError::UnexpectedResponse`]を返す。
+    ///
+    /// 再試行できないエラーが発生した場合、または再試行回数の上限に達した場合はエラーを返す。
+    /// 5xxまたはタイムアウトでエラーを返した場合は、BOXがファイルの内容を更新した可能性がある。
+    /// したがって、[`BoxClient::file_information`]でファイルのバージョンを確認する。
+    pub async fn update_file_content(
+        &self,
+        file_id: &FileId,
+        path: impl AsRef<Path>,
+        options: &UpdateFileContentOptions<'_>,
+    ) -> BoxClientResult<File> {
+        self.update_file_content_with_threshold(
+            file_id,
+            path.as_ref(),
+            options,
+            self.chunked_upload_threshold(),
+        )
+        .await
+    }
+
+    /// 分割アップロードに切り替えるファイルサイズを指定して、ファイルの内容を更新する。
+    ///
+    /// テストで大きなファイルを作成せずに分割アップロードを確認できるように、分割アップロードに切り替えるファイルサイズを引数で受け取る。
+    async fn update_file_content_with_threshold(
+        &self,
+        file_id: &FileId,
+        path: &Path,
+        options: &UpdateFileContentOptions<'_>,
+        threshold: u64,
+    ) -> BoxClientResult<File> {
+        if let Some(name) = options.name {
+            validate_file_name(name)?;
+        }
+        // 分割アップロードでは、`ETag`をコミットで初めて送信する。
+        // すべての部分をアップロードした後に`ETag`の不正に気づかないように、アップロードを始める前に検証する。
+        if let Some(etag) = options.etag {
+            HeaderValue::from_str(etag).map_err(BoxClientError::InvalidHeaderValue)?;
+        }
+
+        let target = UploadTarget::NewVersion {
+            file_id,
+            name: options.name,
+            etag: options.etag,
+        };
+        self.upload(path, target, threshold).await
+    }
+
     /// ファイルをアップロードする前に、BOXがファイルを受け付けるかを確認する（プリフライトチェック）。
     ///
     /// ファイルの内容を送信せずに、ファイル名、ファイルサイズおよびアップロード先の親フォルダだけをBOXに送信し、
@@ -718,84 +796,6 @@ impl BoxClient {
         );
 
         Ok(upload_url)
-    }
-
-    /// ファイルの内容を更新する。
-    ///
-    /// BOXは、ファイルの新しいバージョンとして内容を保存し、以前の内容をバージョン履歴に残す。
-    ///
-    /// ファイルサイズが[`BoxClient::chunked_upload_threshold`]以下の場合は、ファイル全体をメモリに読み込み、
-    /// 1回のリクエストでアップロードする（`POST /files/{file_id}/content`）。
-    /// [`BoxClient::chunked_upload_threshold`]を超える場合は、分割アップロードのAPIを使用する
-    /// （`POST /files/{file_id}/upload_sessions`で作成したアップロードセッションに部分をアップロードしてコミットする）。
-    /// 分割アップロードの進め方、冪等性および失敗した場合の扱いは、[`BoxClient::upload_file`]と同じである。
-    ///
-    /// `options.etag`を指定した場合は、1回のリクエストでのアップロード、または分割アップロードのコミットで、
-    /// `If-Match`ヘッダーとして送信する。
-    ///
-    /// # Arguments
-    ///
-    /// - `file_id`: 内容を更新するファイルのID
-    /// - `path`: 新しい内容のファイルのパス
-    /// - `options`: 新しいファイル名および`ETag`のオプション
-    ///
-    /// # Errors
-    ///
-    /// `options.name`をBOXが拒否する場合は、リクエストを送信せずに[`BoxClientError::InvalidRequestBody`]を返す。
-    /// `options.etag`に使用できない文字が含まれる場合は、アップロードを始める前に[`BoxClientError::InvalidHeaderValue`]を返す。
-    /// ファイルを読み込めない場合は、[`BoxClientError::ReadFile`]を返す。
-    /// BOXがエラーレスポンスを返した場合は、[`BoxClientError::Api`]を返す。主なステータスは次のとおり。
-    ///
-    /// - 404: ファイルが存在しない、またはアクセスする権限がない。
-    /// - 409: `options.name`と同じ名前の項目が親フォルダに存在する、またはストレージの空き容量がない。
-    /// - 412: `options.etag`がファイルの現在の`ETag`と一致しない。
-    ///
-    /// 分割アップロードのコミットで、BOXが部分の処理を終えないまま、コミットの再送の上限に達した場合は、
-    /// [`BoxClientError::UnexpectedResponse`]を返す。
-    ///
-    /// 再試行できないエラーが発生した場合、または再試行回数の上限に達した場合はエラーを返す。
-    /// 5xxまたはタイムアウトでエラーを返した場合は、BOXがファイルの内容を更新した可能性がある。
-    /// したがって、[`BoxClient::file_information`]でファイルのバージョンを確認する。
-    pub async fn update_file_content(
-        &self,
-        file_id: &FileId,
-        path: impl AsRef<Path>,
-        options: &UpdateFileContentOptions<'_>,
-    ) -> BoxClientResult<File> {
-        self.update_file_content_with_threshold(
-            file_id,
-            path.as_ref(),
-            options,
-            self.chunked_upload_threshold(),
-        )
-        .await
-    }
-
-    /// 分割アップロードに切り替えるファイルサイズを指定して、ファイルの内容を更新する。
-    ///
-    /// テストで大きなファイルを作成せずに分割アップロードを確認できるように、分割アップロードに切り替えるファイルサイズを引数で受け取る。
-    async fn update_file_content_with_threshold(
-        &self,
-        file_id: &FileId,
-        path: &Path,
-        options: &UpdateFileContentOptions<'_>,
-        threshold: u64,
-    ) -> BoxClientResult<File> {
-        if let Some(name) = options.name {
-            validate_file_name(name)?;
-        }
-        // 分割アップロードでは、`ETag`をコミットで初めて送信する。
-        // すべての部分をアップロードした後に`ETag`の不正に気づかないように、アップロードを始める前に検証する。
-        if let Some(etag) = options.etag {
-            HeaderValue::from_str(etag).map_err(BoxClientError::InvalidHeaderValue)?;
-        }
-
-        let target = UploadTarget::NewVersion {
-            file_id,
-            name: options.name,
-            etag: options.etag,
-        };
-        self.upload(path, target, threshold).await
     }
 
     /// ファイルサイズに応じて、1回のリクエストまたは分割アップロードのAPIでアップロードする。

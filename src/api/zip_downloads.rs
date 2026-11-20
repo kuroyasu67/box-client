@@ -298,53 +298,6 @@ impl<'a> CreateZipDownloadBody<'a> {
 }
 
 impl BoxClient {
-    /// ZIPダウンロードを作成する。
-    ///
-    /// BOXは、ZIPファイルをこの時点では作成せず、ダウンロード用のURLと状態を確認するURLを返す。
-    /// ダウンロード用のURLは数秒しか有効でないため、作成したらすぐに[`BoxClient::download_zip_content`]でダウンロードする。
-    /// 作成からダウンロードまでをまとめて行う場合は、[`BoxClient::download_zip`]を使用する。
-    ///
-    /// HTTPメソッドはPOSTだが、冪等なリクエストとして送信する。
-    /// ZIPダウンロードを重複して作成しても、BOXに項目は作成されず、使用しなかったZIPダウンロードは期限が切れて無効になるためである。
-    ///
-    /// # Arguments
-    ///
-    /// - `items`: ZIPファイルに含めるファイルおよびフォルダ。1個以上[`MAX_ZIP_DOWNLOAD_ITEMS`]個以下で指定する。
-    /// - `options`: ZIPファイルの名前のオプション
-    ///
-    /// # Errors
-    ///
-    /// `items`が空の場合、`items`が[`MAX_ZIP_DOWNLOAD_ITEMS`]個より多い場合、または`items`にルートフォルダを含む場合は、
-    /// リクエストを送信せずに[`BoxClientError::InvalidArgument`]を返す。
-    /// BOXがエラーレスポンスを返した場合は、[`BoxClientError::Api`]を返す。主なステータスは次のとおり。
-    ///
-    /// - 400: 項目が不正である。または、ZIPファイルに含めるファイルが10,000個を超える
-    ///   （`zip_download_file_count_exceeded_limit`）、もしくは合計のサイズが上限を超える
-    ///   （`zip_download_pre_compressed_bytes_exceeded_limit`）。後者の場合は、項目を分けて作成する。
-    /// - 403: 項目にアクセスする権限がない。
-    ///
-    /// 再試行できないエラーが発生した場合、または再試行回数の上限に達した場合はエラーを返す。
-    pub async fn create_zip_download(
-        &self,
-        items: &[ZipDownloadItem<'_>],
-        options: &CreateZipDownloadOptions<'_>,
-    ) -> BoxClientResult<ZipDownload> {
-        let body = CreateZipDownloadBody::new(items, options)?;
-        let request = ApiRequest::post(["zip_downloads"])
-            .idempotency(Idempotency::Idempotent)
-            .json(&body)?;
-
-        let zip_download: ZipDownload = self.send_json(request).await?;
-
-        tracing::debug!(
-            items = items.len(),
-            name_conflicts = zip_download.name_conflicts.len(),
-            "created zip download"
-        );
-
-        Ok(zip_download)
-    }
-
     /// ZIPダウンロードのZIPファイルをダウンロードし、ローカルのファイルに保存する。
     ///
     /// `zip_download.download_url`へ、アクセストークンを送信せずにリクエストする。
@@ -443,6 +396,53 @@ impl BoxClient {
         let id = zip_download.id()?;
         self.send_json(ApiRequest::get(["zip_downloads", &id, "status"]))
             .await
+    }
+
+    /// ZIPダウンロードを作成する。
+    ///
+    /// BOXは、ZIPファイルをこの時点では作成せず、ダウンロード用のURLと状態を確認するURLを返す。
+    /// ダウンロード用のURLは数秒しか有効でないため、作成したらすぐに[`BoxClient::download_zip_content`]でダウンロードする。
+    /// 作成からダウンロードまでをまとめて行う場合は、[`BoxClient::download_zip`]を使用する。
+    ///
+    /// HTTPメソッドはPOSTだが、冪等なリクエストとして送信する。
+    /// ZIPダウンロードを重複して作成しても、BOXに項目は作成されず、使用しなかったZIPダウンロードは期限が切れて無効になるためである。
+    ///
+    /// # Arguments
+    ///
+    /// - `items`: ZIPファイルに含めるファイルおよびフォルダ。1個以上[`MAX_ZIP_DOWNLOAD_ITEMS`]個以下で指定する。
+    /// - `options`: ZIPファイルの名前のオプション
+    ///
+    /// # Errors
+    ///
+    /// `items`が空の場合、`items`が[`MAX_ZIP_DOWNLOAD_ITEMS`]個より多い場合、または`items`にルートフォルダを含む場合は、
+    /// リクエストを送信せずに[`BoxClientError::InvalidArgument`]を返す。
+    /// BOXがエラーレスポンスを返した場合は、[`BoxClientError::Api`]を返す。主なステータスは次のとおり。
+    ///
+    /// - 400: 項目が不正である。または、ZIPファイルに含めるファイルが10,000個を超える
+    ///   （`zip_download_file_count_exceeded_limit`）、もしくは合計のサイズが上限を超える
+    ///   （`zip_download_pre_compressed_bytes_exceeded_limit`）。後者の場合は、項目を分けて作成する。
+    /// - 403: 項目にアクセスする権限がない。
+    ///
+    /// 再試行できないエラーが発生した場合、または再試行回数の上限に達した場合はエラーを返す。
+    pub async fn create_zip_download(
+        &self,
+        items: &[ZipDownloadItem<'_>],
+        options: &CreateZipDownloadOptions<'_>,
+    ) -> BoxClientResult<ZipDownload> {
+        let body = CreateZipDownloadBody::new(items, options)?;
+        let request = ApiRequest::post(["zip_downloads"])
+            .idempotency(Idempotency::Idempotent)
+            .json(&body)?;
+
+        let zip_download: ZipDownload = self.send_json(request).await?;
+
+        tracing::debug!(
+            items = items.len(),
+            name_conflicts = zip_download.name_conflicts.len(),
+            "created zip download"
+        );
+
+        Ok(zip_download)
     }
 
     /// ファイルおよびフォルダを1つのZIPファイルにまとめてダウンロードし、ローカルのファイルに保存する。

@@ -732,35 +732,6 @@ impl BoxClient {
         Ok(items)
     }
 
-    /// フォルダを作成する。
-    ///
-    /// HTTPメソッドがPOSTであるため、冪等でないリクエストとして送信する。
-    ///
-    /// # Arguments
-    ///
-    /// - `name`: 作成するフォルダの名前
-    /// - `parent_id`: 作成するフォルダの親フォルダのID
-    ///
-    /// # Errors
-    ///
-    /// フォルダ名をBOXが拒否する場合は、リクエストを送信せずに[`BoxClientError::InvalidRequestBody`]を返す。
-    /// 同じ名前の項目が親フォルダに存在する場合は、[`BoxClientError::Api`]を返す。
-    /// 再試行できないエラーが発生した場合、または再試行回数の上限に達した場合はエラーを返す。
-    pub async fn create_folder(&self, name: &str, parent_id: &FolderId) -> BoxClientResult<Folder> {
-        let body = CreateFolderBody::new(name, parent_id)?;
-        let folder: Folder = self
-            .send_json(ApiRequest::post(["folders"]).json(&body)?)
-            .await?;
-
-        tracing::debug!(
-            folder_id = folder.id.as_ref(),
-            parent_id = parent_id.as_ref(),
-            "created folder"
-        );
-
-        Ok(folder)
-    }
-
     /// フォルダを、フォルダ内のすべての項目とともに別のフォルダへコピーする。
     ///
     /// BOXは、項目数が500以下のフォルダを同期的にコピーし、作成したフォルダを返す。
@@ -817,6 +788,35 @@ impl BoxClient {
             parent_id = parent_id.as_ref(),
             copied_folder_id = folder.id.as_ref(),
             "copied folder"
+        );
+
+        Ok(folder)
+    }
+
+    /// フォルダを作成する。
+    ///
+    /// HTTPメソッドがPOSTであるため、冪等でないリクエストとして送信する。
+    ///
+    /// # Arguments
+    ///
+    /// - `name`: 作成するフォルダの名前
+    /// - `parent_id`: 作成するフォルダの親フォルダのID
+    ///
+    /// # Errors
+    ///
+    /// フォルダ名をBOXが拒否する場合は、リクエストを送信せずに[`BoxClientError::InvalidRequestBody`]を返す。
+    /// 同じ名前の項目が親フォルダに存在する場合は、[`BoxClientError::Api`]を返す。
+    /// 再試行できないエラーが発生した場合、または再試行回数の上限に達した場合はエラーを返す。
+    pub async fn create_folder(&self, name: &str, parent_id: &FolderId) -> BoxClientResult<Folder> {
+        let body = CreateFolderBody::new(name, parent_id)?;
+        let folder: Folder = self
+            .send_json(ApiRequest::post(["folders"]).json(&body)?)
+            .await?;
+
+        tracing::debug!(
+            folder_id = folder.id.as_ref(),
+            parent_id = parent_id.as_ref(),
+            "created folder"
         );
 
         Ok(folder)
@@ -1580,6 +1580,126 @@ mod test_list_all_items_in_folder {
 }
 
 #[cfg(test)]
+mod test_copy_folder {
+    use rstest::rstest;
+    use serde_json::json;
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{body_json, method, path},
+    };
+
+    use super::*;
+    use crate::test_support::{
+        assert_not_retried, create_client, mount_token, request_count, short_retry,
+    };
+
+    /// フォルダのコピーのAPIのパス
+    const COPY_PATH: &str = "/2.0/folders/123/copy";
+
+    /// コピー先の親フォルダと、指定した場合だけ名前を送信し、コピーしたフォルダをデシリアライズすることを確認
+    #[rstest]
+    #[case::without_name(
+        CopyFolderOptions::default(),
+        json!({"parent": {"id": "456"}}),
+        "Contracts"
+    )]
+    #[case::with_name(
+        CopyFolderOptions::default().with_name("Contracts (copy)"),
+        json!({"parent": {"id": "456"}, "name": "Contracts (copy)"}),
+        "Contracts (copy)"
+    )]
+    #[tokio::test]
+    async fn test_copy_folder(
+        #[case] options: CopyFolderOptions<'static>,
+        #[case] expected_body: serde_json::Value,
+        #[case] copied_name: &str,
+    ) -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        Mock::given(method("POST"))
+            .and(path(COPY_PATH))
+            .and(body_json(expected_body))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+                "type": "folder",
+                "id": "789",
+                "etag": "0",
+                "name": copied_name,
+                "parent": {"type": "folder", "id": "456", "etag": "0", "name": "Archive"},
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = create_client(&server, short_retry(0)).await?;
+
+        let folder = client
+            .copy_folder(&FolderId::new("123"), &FolderId::new("456"), &options)
+            .await?;
+
+        assert_eq!(folder.id, FolderId::new("789"));
+        assert_eq!(folder.name, copied_name);
+        assert_eq!(folder.parent.map(|p| p.id), Some(FolderId::new("456")));
+
+        Ok(())
+    }
+
+    /// ルートフォルダ、またはBOXが拒否する名前を指定した場合は、リクエストを送信せずにエラーを返すことを確認
+    ///
+    /// 使用できない文字の詳細な検証は、`validate_item_name`のテストで確認する。
+    /// ここでは、名前を指定した場合に長さと`validate_item_name`の検証を適用していることを確認する。
+    #[rstest]
+    #[case::root(FolderId::root(), None, "InvalidArgument")]
+    #[case::empty_name(FolderId::new("123"), Some(""), "InvalidRequestBody")]
+    #[case::too_long_name(FolderId::new("123"), Some(&*"あ".repeat(256)), "InvalidRequestBody")]
+    #[case::invalid_char(FolderId::new("123"), Some("a/b"), "InvalidRequestBody")]
+    #[tokio::test]
+    async fn test_copy_folder_rejects_without_request(
+        #[case] folder_id: FolderId,
+        #[case] name: Option<&str>,
+        #[case] expected: &str,
+    ) -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        let client = create_client(&server, short_retry(0)).await?;
+        let requests_before = request_count(&server).await;
+        let options = CopyFolderOptions { name };
+
+        let result = client
+            .copy_folder(&folder_id, &FolderId::new("456"), &options)
+            .await;
+
+        let matched = match expected {
+            "InvalidArgument" => matches!(result, Err(BoxClientError::InvalidArgument(_))),
+            _ => matches!(result, Err(BoxClientError::InvalidRequestBody(_))),
+        };
+        assert!(matched, "result: {result:?}");
+        assert_eq!(request_count(&server).await, requests_before);
+
+        Ok(())
+    }
+
+    /// BOXのエラーレスポンスを、再試行せずにそのまま返すことを確認
+    ///
+    /// コピーは冪等でないため、5xxの後に再送すると、フォルダを重複してコピーするおそれがある。
+    #[rstest]
+    #[case::name_in_use(409)]
+    #[case::internal_server_error(500)]
+    #[case::service_unavailable(503)]
+    #[tokio::test]
+    async fn test_copy_folder_error_is_not_retried(#[case] status: u16) -> anyhow::Result<()> {
+        assert_not_retried("POST", COPY_PATH, status, async |client: &BoxClient| {
+            client
+                .copy_folder(
+                    &FolderId::new("123"),
+                    &FolderId::new("456"),
+                    &CopyFolderOptions::default(),
+                )
+                .await
+        })
+        .await
+    }
+}
+
+#[cfg(test)]
 mod test_create_folder_body {
     use rstest::rstest;
 
@@ -1727,126 +1847,6 @@ mod test_create_folder {
     async fn test_create_folder_error_is_not_retried(#[case] status: u16) -> anyhow::Result<()> {
         assert_not_retried("POST", FOLDERS_PATH, status, async |client: &BoxClient| {
             client.create_folder("Contracts", &FolderId::root()).await
-        })
-        .await
-    }
-}
-
-#[cfg(test)]
-mod test_copy_folder {
-    use rstest::rstest;
-    use serde_json::json;
-    use wiremock::{
-        Mock, MockServer, ResponseTemplate,
-        matchers::{body_json, method, path},
-    };
-
-    use super::*;
-    use crate::test_support::{
-        assert_not_retried, create_client, mount_token, request_count, short_retry,
-    };
-
-    /// フォルダのコピーのAPIのパス
-    const COPY_PATH: &str = "/2.0/folders/123/copy";
-
-    /// コピー先の親フォルダと、指定した場合だけ名前を送信し、コピーしたフォルダをデシリアライズすることを確認
-    #[rstest]
-    #[case::without_name(
-        CopyFolderOptions::default(),
-        json!({"parent": {"id": "456"}}),
-        "Contracts"
-    )]
-    #[case::with_name(
-        CopyFolderOptions::default().with_name("Contracts (copy)"),
-        json!({"parent": {"id": "456"}, "name": "Contracts (copy)"}),
-        "Contracts (copy)"
-    )]
-    #[tokio::test]
-    async fn test_copy_folder(
-        #[case] options: CopyFolderOptions<'static>,
-        #[case] expected_body: serde_json::Value,
-        #[case] copied_name: &str,
-    ) -> anyhow::Result<()> {
-        let server = MockServer::start().await;
-        mount_token(&server).await;
-        Mock::given(method("POST"))
-            .and(path(COPY_PATH))
-            .and(body_json(expected_body))
-            .respond_with(ResponseTemplate::new(201).set_body_json(json!({
-                "type": "folder",
-                "id": "789",
-                "etag": "0",
-                "name": copied_name,
-                "parent": {"type": "folder", "id": "456", "etag": "0", "name": "Archive"},
-            })))
-            .expect(1)
-            .mount(&server)
-            .await;
-        let client = create_client(&server, short_retry(0)).await?;
-
-        let folder = client
-            .copy_folder(&FolderId::new("123"), &FolderId::new("456"), &options)
-            .await?;
-
-        assert_eq!(folder.id, FolderId::new("789"));
-        assert_eq!(folder.name, copied_name);
-        assert_eq!(folder.parent.map(|p| p.id), Some(FolderId::new("456")));
-
-        Ok(())
-    }
-
-    /// ルートフォルダ、またはBOXが拒否する名前を指定した場合は、リクエストを送信せずにエラーを返すことを確認
-    ///
-    /// 使用できない文字の詳細な検証は、`validate_item_name`のテストで確認する。
-    /// ここでは、名前を指定した場合に長さと`validate_item_name`の検証を適用していることを確認する。
-    #[rstest]
-    #[case::root(FolderId::root(), None, "InvalidArgument")]
-    #[case::empty_name(FolderId::new("123"), Some(""), "InvalidRequestBody")]
-    #[case::too_long_name(FolderId::new("123"), Some(&*"あ".repeat(256)), "InvalidRequestBody")]
-    #[case::invalid_char(FolderId::new("123"), Some("a/b"), "InvalidRequestBody")]
-    #[tokio::test]
-    async fn test_copy_folder_rejects_without_request(
-        #[case] folder_id: FolderId,
-        #[case] name: Option<&str>,
-        #[case] expected: &str,
-    ) -> anyhow::Result<()> {
-        let server = MockServer::start().await;
-        mount_token(&server).await;
-        let client = create_client(&server, short_retry(0)).await?;
-        let requests_before = request_count(&server).await;
-        let options = CopyFolderOptions { name };
-
-        let result = client
-            .copy_folder(&folder_id, &FolderId::new("456"), &options)
-            .await;
-
-        let matched = match expected {
-            "InvalidArgument" => matches!(result, Err(BoxClientError::InvalidArgument(_))),
-            _ => matches!(result, Err(BoxClientError::InvalidRequestBody(_))),
-        };
-        assert!(matched, "result: {result:?}");
-        assert_eq!(request_count(&server).await, requests_before);
-
-        Ok(())
-    }
-
-    /// BOXのエラーレスポンスを、再試行せずにそのまま返すことを確認
-    ///
-    /// コピーは冪等でないため、5xxの後に再送すると、フォルダを重複してコピーするおそれがある。
-    #[rstest]
-    #[case::name_in_use(409)]
-    #[case::internal_server_error(500)]
-    #[case::service_unavailable(503)]
-    #[tokio::test]
-    async fn test_copy_folder_error_is_not_retried(#[case] status: u16) -> anyhow::Result<()> {
-        assert_not_retried("POST", COPY_PATH, status, async |client: &BoxClient| {
-            client
-                .copy_folder(
-                    &FolderId::new("123"),
-                    &FolderId::new("456"),
-                    &CopyFolderOptions::default(),
-                )
-                .await
         })
         .await
     }
