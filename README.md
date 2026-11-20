@@ -10,6 +10,21 @@
 - 認証中のユーザーの取得
   - メソッド: `BoxClient::me`
   - BOX API: `GET /users/me`
+- ユーザー情報の取得
+  - メソッド: `BoxClient::user_information`
+  - BOX API: `GET /users/{user_id}`
+- エンタープライズのユーザーのリスト
+  - メソッド: `BoxClient::list_enterprise_users`, `BoxClient::list_all_enterprise_users`
+  - BOX API: `GET /users`
+- ユーザーの作成
+  - メソッド: `BoxClient::create_user`
+  - BOX API: `POST /users`
+- ユーザーの更新（エンタープライズからの除外を含む）
+  - メソッド: `BoxClient::update_user`
+  - BOX API: `PUT /users/{user_id}`
+- ユーザーの削除
+  - メソッド: `BoxClient::delete_user`
+  - BOX API: `DELETE /users/{user_id}`
 
 ### フォルダ
 
@@ -416,6 +431,14 @@ BOXがアクセストークンを拒否して401を返した場合、`BoxClient`
   - HTTPメソッド: DELETE
   - 冪等性: 冪等でない
   - 理由: BOXが削除した後に再送すると、削除済みのコラボレーションに対する削除となり、エラーを受け取りうる。その結果、削除の結果を誤って判断するおそれがある。
+- ユーザーの更新で、ユーザーをエンタープライズから除外する場合（`BoxClient::update_user`）
+  - HTTPメソッド: PUT
+  - 冪等性: 冪等でない
+  - 理由: BOXがユーザーを除外した後に再送すると、エンタープライズに属さないユーザーに対する更新となり、エラーを受け取りうる。その結果、除外の結果を誤って判断するおそれがある。除外以外の更新は、HTTPメソッドのとおり冪等とする。
+- ユーザーの削除（`BoxClient::delete_user`）
+  - HTTPメソッド: DELETE
+  - 冪等性: 冪等でない
+  - 理由: BOXが削除した後に再送すると、削除済みのユーザーに対する削除となり、エラーを受け取りうる。その結果、削除の結果を誤って判断するおそれがある。
 
 フォルダの削除で503を受け取った場合は、`BoxClient::folder_information`でフォルダの状態を確認する。
 フォルダの移動で5xxを受け取った場合、またはタイムアウトした場合は、`BoxClient::folder_information`でフォルダの親フォルダを確認する。
@@ -425,6 +448,8 @@ BOXがアクセストークンを拒否して401を返した場合、`BoxClient`
 Webリンクの削除で5xxを受け取った場合、またはタイムアウトした場合は、`BoxClient::web_link_information`でWebリンクの状態を確認する。
 コラボレーションの所有者の変更で5xxを受け取った場合、またはタイムアウトした場合は、`BoxClient::list_file_collaborations`または`BoxClient::list_folder_collaborations`で項目のコラボレーションを確認する。
 コラボレーションの削除で5xxを受け取った場合、またはタイムアウトした場合は、`BoxClient::collaboration_information`でコラボレーションが存在するか確認する。
+ユーザーのエンタープライズからの除外で5xxを受け取った場合、またはタイムアウトした場合は、`BoxClient::user_information`でユーザーを確認する。
+ユーザーの削除で5xxを受け取った場合、またはタイムアウトした場合は、`BoxClient::user_information`でユーザーが存在するか確認する。
 
 ### 待機時間の決定
 

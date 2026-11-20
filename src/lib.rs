@@ -56,7 +56,12 @@ pub use api::updates::{
     MAX_TAGS, Nullable, OneTimePasscode, OtpAllowlistEntry, SharedLinkAccess, SharedLinkSettings,
 };
 pub use api::uploads::{UpdateFileContentOptions, UploadFileOptions, UploadUrl};
-pub use api::users::{User, UserMini};
+pub use api::users::{
+    CreateUserOptions, DeleteUserOptions, ListEnterpriseUsersOptions, MAX_FILTERED_USERS,
+    MAX_USER_ADDRESS_CHARS, MAX_USER_JOB_TITLE_CHARS, MAX_USER_NAME_CHARS, MAX_USER_PHONE_CHARS,
+    NewUserAccount, NotificationEmail, TrackingCode, UNLIMITED_SPACE_AMOUNT, User, UserMini,
+    UserRole, UserStatus, UserTypeFilter, UserUpdate, UsersPage,
+};
 pub use api::versions::{
     FileVersion, FileVersionsPage, ListFileVersionsOptions, MAX_FILE_VERSIONS_OFFSET,
 };
