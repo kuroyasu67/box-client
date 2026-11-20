@@ -1,6 +1,6 @@
 //! ページ送りに関する共通の実装
 //!
-//! フォルダ内の項目のリスト、ゴミ箱内の項目のリストおよびファイルのバージョンのリストで共有する。
+//! フォルダ内の項目のリスト、ゴミ箱内の項目のリスト、ファイルのバージョンのリストおよびフォルダのコラボレーションのリストで共有する。
 
 use std::collections::HashSet;
 
@@ -92,6 +92,25 @@ pub struct ItemsPage {
     pub next_marker: Option<String>,
 }
 
+/// マーカー方式のページ送りで取得する1ページ
+///
+/// [`collect_all_pages`]が、ページの種類によらず、エントリーと次のページのマーカーを取り出すために使用する。
+pub(crate) trait MarkerPage {
+    /// ページに含まれるエントリーの型
+    type Entry;
+
+    /// ページを、エントリーと次のページを取得するためのマーカーに分解する。
+    fn into_parts(self) -> (Vec<Self::Entry>, Option<String>);
+}
+
+impl MarkerPage for ItemsPage {
+    type Entry = BoxItem;
+
+    fn into_parts(self) -> (Vec<BoxItem>, Option<String>) {
+        (self.entries, self.next_marker)
+    }
+}
+
 /// 1ページで取得する項目数の上限が、BOXが受け付ける範囲内であることを検証する。
 ///
 /// # Errors
@@ -110,7 +129,7 @@ pub(crate) fn validate_limit(limit: u32) -> BoxClientResult<u32> {
 
 /// マーカー方式のページ送りで、1ページ分の項目を取得するリクエストを作成する。
 ///
-/// フォルダ内の項目のリストとゴミ箱内の項目のリストで共有する。
+/// フォルダ内の項目のリスト、ゴミ箱内の項目のリストおよびフォルダのコラボレーションのリストで共有する。
 /// 指定した引数だけを、同じ名前のクエリパラメーター（`limit`、`marker`、`sort`および`direction`）で送信する。
 ///
 /// # Arguments
@@ -147,18 +166,22 @@ pub(crate) fn marker_page_request<'a>(
     Ok(request)
 }
 
-/// マーカー方式のページ送りで、すべてのページの項目を取得する。
+/// マーカー方式のページ送りで、すべてのページのエントリーを取得する。
 ///
+/// フォルダ内の項目、ゴミ箱内の項目およびフォルダのコラボレーションのリストで共有する。
 /// `fetch_page`には前のページの`next_marker`を渡す。最初のページでは`None`を渡す。
-/// 戻り値は、すべての項目と取得したページ数である。
+/// 戻り値は、すべてのエントリーと取得したページ数である。
 ///
 /// # Errors
 ///
 /// BOXが以前に返したマーカーを再び返した場合、この関数は無限ループを避けるため[`BoxClientError::UnexpectedResponse`]を返す。
-/// `fetch_page`がエラーを返した場合、この関数は取得済みの項目を破棄してそのエラーを返す。
-pub(crate) async fn collect_all_pages<F>(mut fetch_page: F) -> BoxClientResult<(Vec<BoxItem>, u32)>
+/// `fetch_page`がエラーを返した場合、この関数は取得済みのエントリーを破棄してそのエラーを返す。
+pub(crate) async fn collect_all_pages<P, F>(
+    mut fetch_page: F,
+) -> BoxClientResult<(Vec<P::Entry>, u32)>
 where
-    F: AsyncFnMut(Option<&str>) -> BoxClientResult<ItemsPage>,
+    P: MarkerPage,
+    F: AsyncFnMut(Option<&str>) -> BoxClientResult<P>,
 {
     let mut items = Vec::new();
     let mut marker: Option<String> = None;
@@ -168,12 +191,12 @@ where
     let mut pages: u32 = 0;
 
     loop {
-        let page = fetch_page(marker.as_deref()).await?;
+        let (entries, next_marker) = fetch_page(marker.as_deref()).await?.into_parts();
         pages += 1;
-        items.extend(page.entries);
+        items.extend(entries);
 
         // BOXは最終ページで`next_marker`をnullにするが、空文字列を返す場合もあるため、どちらも終端として扱う。
-        match page.next_marker {
+        match next_marker {
             Some(next) if !next.is_empty() => {
                 if marker.as_deref() == Some(next.as_str()) || used_markers.contains(&next) {
                     return Err(BoxClientError::UnexpectedResponse(

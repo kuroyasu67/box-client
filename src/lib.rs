@@ -31,8 +31,9 @@ mod test_support;
 
 pub use api::collaborations::{
     AcceptanceRequirementsStatus, AppItem, Collaboration, CollaborationGrantee, CollaborationRole,
-    CollaborationStatus, CollaborationUser, GroupMini, GroupType, StrongPasswordRequirement,
-    TermsOfService, TermsOfServiceRequirement, TwoFactorAuthenticationRequirement,
+    CollaborationStatus, CollaborationUser, CollaborationsPage, GroupMini, GroupType,
+    ListFolderCollaborationsOptions, StrongPasswordRequirement, TermsOfService,
+    TermsOfServiceRequirement, TwoFactorAuthenticationRequirement,
 };
 pub use api::downloads::DownloadFileOptions;
 pub use api::files::{CopyFileOptions, File, FileDownloadPermission, FileLock, FileUpdate};

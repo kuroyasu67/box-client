@@ -137,6 +137,9 @@
 - コラボレーション情報の取得
   - メソッド: `BoxClient::collaboration_information`
   - BOX API: `GET /collaborations/{collaboration_id}`
+- フォルダのコラボレーションのリスト
+  - メソッド: `BoxClient::list_folder_collaborations`, `BoxClient::list_all_folder_collaborations`
+  - BOX API: `GET /folders/{folder_id}/collaborations`
 
 ### ゴミ箱
 
