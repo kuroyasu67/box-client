@@ -5,6 +5,178 @@
 `BoxClient`のメソッドから呼び出せるBOXのREST APIを、リソースごとに示す。
 各メソッドの詳細は、メソッドのドキュメントを参照する。
 
+### ファイル
+
+- ファイル情報の取得
+  - メソッド: `BoxClient::file_information`
+  - BOX API: `GET /files/{file_id}`
+- ファイルのコピー
+  - メソッド: `BoxClient::copy_file`
+  - BOX API: `POST /files/{file_id}/copy`
+- ファイルの更新
+  - メソッド: `BoxClient::update_file`
+  - BOX API: `PUT /files/{file_id}`
+- ファイル名の変更
+  - メソッド: `BoxClient::rename_file`
+  - BOX API: `PUT /files/{file_id}`
+- ファイルの説明の設定
+  - メソッド: `BoxClient::set_file_description`
+  - BOX API: `PUT /files/{file_id}`
+- ファイルの移動
+  - メソッド: `BoxClient::move_file`
+  - BOX API: `PUT /files/{file_id}`
+- ファイルの削除
+  - メソッド: `BoxClient::delete_file`
+  - BOX API: `DELETE /files/{file_id}`
+
+### フォルダ
+
+- フォルダ情報の取得
+  - メソッド: `BoxClient::folder_information`
+  - BOX API: `GET /folders/{folder_id}`
+- フォルダ内の項目のリスト
+  - メソッド: `BoxClient::list_items_in_folder`, `BoxClient::list_all_items_in_folder`
+  - BOX API: `GET /folders/{folder_id}/items`
+- フォルダのコピー
+  - メソッド: `BoxClient::copy_folder`
+  - BOX API: `POST /folders/{folder_id}/copy`
+- フォルダの作成
+  - メソッド: `BoxClient::create_folder`
+  - BOX API: `POST /folders`
+- フォルダの更新
+  - メソッド: `BoxClient::update_folder`
+  - BOX API: `PUT /folders/{folder_id}`
+- フォルダ名の変更
+  - メソッド: `BoxClient::rename_folder`
+  - BOX API: `PUT /folders/{folder_id}`
+- フォルダの説明の設定
+  - メソッド: `BoxClient::set_folder_description`
+  - BOX API: `PUT /folders/{folder_id}`
+- フォルダの移動
+  - メソッド: `BoxClient::move_folder`
+  - BOX API: `PUT /folders/{folder_id}`
+- フォルダの削除
+  - メソッド: `BoxClient::delete_folder`
+  - BOX API: `DELETE /folders/{folder_id}`
+
+### ファイルのバージョン
+
+- ファイルのバージョン情報の取得
+  - メソッド: `BoxClient::file_version`
+  - BOX API: `GET /files/{file_id}/versions/{file_version_id}`
+- ファイルのバージョンのリスト
+  - メソッド: `BoxClient::list_file_versions`, `BoxClient::list_all_file_versions`
+  - BOX API: `GET /files/{file_id}/versions`
+- ファイルのバージョンの昇格
+  - メソッド: `BoxClient::promote_file_version`
+  - BOX API: `POST /files/{file_id}/versions/current`
+- 削除したファイルのバージョンの復元
+  - メソッド: `BoxClient::restore_file_version`
+  - BOX API: `PUT /files/{file_id}/versions/{file_version_id}`
+- ファイルのバージョンの削除
+  - メソッド: `BoxClient::delete_file_version`
+  - BOX API: `DELETE /files/{file_id}/versions/{file_version_id}`
+
+### アップロード
+
+- ファイルのアップロード
+  - メソッド: `BoxClient::upload_file`
+  - BOX API
+    - `POST /files/content`
+    - `POST /files/upload_sessions`
+    - `PUT /files/upload_sessions/{upload_session_id}`
+    - `POST /files/upload_sessions/{upload_session_id}/commit`
+    - `DELETE /files/upload_sessions/{upload_session_id}`
+- ファイルの内容の更新
+  - メソッド: `BoxClient::update_file_content`
+  - BOX API
+    - `POST /files/{file_id}/content`
+    - `POST /files/{file_id}/upload_sessions`
+    - `PUT /files/upload_sessions/{upload_session_id}`
+    - `POST /files/upload_sessions/{upload_session_id}/commit`
+    - `DELETE /files/upload_sessions/{upload_session_id}`
+- アップロードのプリフライトチェック
+  - メソッド: `BoxClient::preflight_upload_file`
+  - BOX API: `OPTIONS /files/content`
+- ファイルの内容の更新のプリフライトチェック
+  - メソッド: `BoxClient::preflight_update_file_content`
+  - BOX API: `OPTIONS /files/{file_id}/content`
+
+### ダウンロード
+
+- ファイルのダウンロード
+  - メソッド: `BoxClient::download_file`
+  - BOX API: `GET /files/{file_id}/content`
+
+### ZIPダウンロード
+
+- ZIPファイルのダウンロード
+  - メソッド: `BoxClient::download_zip_content`
+  - BOX API: `GET /zip_downloads/{zip_download_id}/content`
+- ZIPダウンロードの状態の取得
+  - メソッド: `BoxClient::zip_download_status`
+  - BOX API: `GET /zip_downloads/{zip_download_id}/status`
+- ZIPダウンロードの作成
+  - メソッド: `BoxClient::create_zip_download`
+  - BOX API: `POST /zip_downloads`
+- ZIPファイルのダウンロード（作成、ダウンロードおよび状態の取得をまとめて実行）
+  - メソッド: `BoxClient::download_zip`
+  - BOX API
+    - `POST /zip_downloads`
+    - `GET /zip_downloads/{zip_download_id}/content`
+    - `GET /zip_downloads/{zip_download_id}/status`
+
+### Webリンク
+
+- Webリンク情報の取得
+  - メソッド: `BoxClient::web_link_information`
+  - BOX API: `GET /web_links/{web_link_id}`
+- Webリンクの作成
+  - メソッド: `BoxClient::create_web_link`
+  - BOX API: `POST /web_links`
+- Webリンクの更新
+  - メソッド: `BoxClient::update_web_link`
+  - BOX API: `PUT /web_links/{web_link_id}`
+- Webリンク名の変更
+  - メソッド: `BoxClient::rename_web_link`
+  - BOX API: `PUT /web_links/{web_link_id}`
+- Webリンクの説明の設定
+  - メソッド: `BoxClient::set_web_link_description`
+  - BOX API: `PUT /web_links/{web_link_id}`
+- Webリンクの移動
+  - メソッド: `BoxClient::move_web_link`
+  - BOX API: `PUT /web_links/{web_link_id}`
+- WebリンクのURLの変更
+  - メソッド: `BoxClient::update_web_link_url`
+  - BOX API: `PUT /web_links/{web_link_id}`
+- Webリンクの削除
+  - メソッド: `BoxClient::delete_web_link`
+  - BOX API: `DELETE /web_links/{web_link_id}`
+
+### ゴミ箱
+
+- ゴミ箱内のファイル情報の取得
+  - メソッド: `BoxClient::trashed_file_information`
+  - BOX API: `GET /files/{file_id}/trash`
+- ゴミ箱内のファイルの復元
+  - メソッド: `BoxClient::restore_file`
+  - BOX API: `POST /files/{file_id}`
+- ゴミ箱内のフォルダ情報の取得
+  - メソッド: `BoxClient::trashed_folder_information`
+  - BOX API: `GET /folders/{folder_id}/trash`
+- ゴミ箱内のフォルダの復元
+  - メソッド: `BoxClient::restore_folder`
+  - BOX API: `POST /folders/{folder_id}`
+- ゴミ箱内の項目のリスト
+  - メソッド: `BoxClient::list_trashed_items`, `BoxClient::list_all_trashed_items`
+  - BOX API: `GET /folders/trash/items`
+- ゴミ箱内のWebリンク情報の取得
+  - メソッド: `BoxClient::trashed_web_link_information`
+  - BOX API: `GET /web_links/{web_link_id}/trash`
+- ゴミ箱内のWebリンクの復元
+  - メソッド: `BoxClient::restore_web_link`
+  - BOX API: `POST /web_links/{web_link_id}`
+
 ### ユーザー
 
 - 認証中のユーザーの取得
@@ -65,127 +237,6 @@
   - メソッド: `BoxClient::delete_group_membership`
   - BOX API: `DELETE /group_memberships/{group_membership_id}`
 
-### フォルダ
-
-- フォルダ情報の取得
-  - メソッド: `BoxClient::folder_information`
-  - BOX API: `GET /folders/{folder_id}`
-- フォルダ内の項目のリスト
-  - メソッド: `BoxClient::list_items_in_folder`, `BoxClient::list_all_items_in_folder`
-  - BOX API: `GET /folders/{folder_id}/items`
-- フォルダのコピー
-  - メソッド: `BoxClient::copy_folder`
-  - BOX API: `POST /folders/{folder_id}/copy`
-- フォルダの作成
-  - メソッド: `BoxClient::create_folder`
-  - BOX API: `POST /folders`
-- フォルダの更新
-  - メソッド: `BoxClient::update_folder`
-  - BOX API: `PUT /folders/{folder_id}`
-- フォルダ名の変更
-  - メソッド: `BoxClient::rename_folder`
-  - BOX API: `PUT /folders/{folder_id}`
-- フォルダの説明の設定
-  - メソッド: `BoxClient::set_folder_description`
-  - BOX API: `PUT /folders/{folder_id}`
-- フォルダの移動
-  - メソッド: `BoxClient::move_folder`
-  - BOX API: `PUT /folders/{folder_id}`
-- フォルダの削除
-  - メソッド: `BoxClient::delete_folder`
-  - BOX API: `DELETE /folders/{folder_id}`
-
-### ファイル
-
-- ファイル情報の取得
-  - メソッド: `BoxClient::file_information`
-  - BOX API: `GET /files/{file_id}`
-- ファイルのコピー
-  - メソッド: `BoxClient::copy_file`
-  - BOX API: `POST /files/{file_id}/copy`
-- ファイルの更新
-  - メソッド: `BoxClient::update_file`
-  - BOX API: `PUT /files/{file_id}`
-- ファイル名の変更
-  - メソッド: `BoxClient::rename_file`
-  - BOX API: `PUT /files/{file_id}`
-- ファイルの説明の設定
-  - メソッド: `BoxClient::set_file_description`
-  - BOX API: `PUT /files/{file_id}`
-- ファイルの移動
-  - メソッド: `BoxClient::move_file`
-  - BOX API: `PUT /files/{file_id}`
-- ファイルの削除
-  - メソッド: `BoxClient::delete_file`
-  - BOX API: `DELETE /files/{file_id}`
-- ファイルのバージョン情報の取得
-  - メソッド: `BoxClient::file_version`
-  - BOX API: `GET /files/{file_id}/versions/{file_version_id}`
-- ファイルのバージョンのリスト
-  - メソッド: `BoxClient::list_file_versions`, `BoxClient::list_all_file_versions`
-  - BOX API: `GET /files/{file_id}/versions`
-- ファイルのバージョンの昇格
-  - メソッド: `BoxClient::promote_file_version`
-  - BOX API: `POST /files/{file_id}/versions/current`
-- 削除したファイルのバージョンの復元
-  - メソッド: `BoxClient::restore_file_version`
-  - BOX API: `PUT /files/{file_id}/versions/{file_version_id}`
-- ファイルのバージョンの削除
-  - メソッド: `BoxClient::delete_file_version`
-  - BOX API: `DELETE /files/{file_id}/versions/{file_version_id}`
-- ファイルのアップロード
-  - メソッド: `BoxClient::upload_file`
-  - BOX API
-    - `POST /files/content`
-    - `POST /files/upload_sessions`
-    - `PUT /files/upload_sessions/{upload_session_id}`
-    - `POST /files/upload_sessions/{upload_session_id}/commit`
-    - `DELETE /files/upload_sessions/{upload_session_id}`
-- ファイルの内容の更新
-  - メソッド: `BoxClient::update_file_content`
-  - BOX API
-    - `POST /files/{file_id}/content`
-    - `POST /files/{file_id}/upload_sessions`
-    - `PUT /files/upload_sessions/{upload_session_id}`
-    - `POST /files/upload_sessions/{upload_session_id}/commit`
-    - `DELETE /files/upload_sessions/{upload_session_id}`
-- アップロードのプリフライトチェック
-  - メソッド: `BoxClient::preflight_upload_file`
-  - BOX API: `OPTIONS /files/content`
-- ファイルの内容の更新のプリフライトチェック
-  - メソッド: `BoxClient::preflight_update_file_content`
-  - BOX API: `OPTIONS /files/{file_id}/content`
-- ファイルのダウンロード
-  - メソッド: `BoxClient::download_file`
-  - BOX API: `GET /files/{file_id}/content`
-
-### Webリンク
-
-- Webリンク情報の取得
-  - メソッド: `BoxClient::web_link_information`
-  - BOX API: `GET /web_links/{web_link_id}`
-- Webリンクの作成
-  - メソッド: `BoxClient::create_web_link`
-  - BOX API: `POST /web_links`
-- Webリンクの更新
-  - メソッド: `BoxClient::update_web_link`
-  - BOX API: `PUT /web_links/{web_link_id}`
-- Webリンク名の変更
-  - メソッド: `BoxClient::rename_web_link`
-  - BOX API: `PUT /web_links/{web_link_id}`
-- Webリンクの説明の設定
-  - メソッド: `BoxClient::set_web_link_description`
-  - BOX API: `PUT /web_links/{web_link_id}`
-- Webリンクの移動
-  - メソッド: `BoxClient::move_web_link`
-  - BOX API: `PUT /web_links/{web_link_id}`
-- WebリンクのURLの変更
-  - メソッド: `BoxClient::update_web_link_url`
-  - BOX API: `PUT /web_links/{web_link_id}`
-- Webリンクの削除
-  - メソッド: `BoxClient::delete_web_link`
-  - BOX API: `DELETE /web_links/{web_link_id}`
-
 ### コラボレーション
 
 - コラボレーション情報の取得
@@ -212,48 +263,6 @@
 - 保留中のコラボレーションの招待のリスト
   - メソッド: `BoxClient::list_pending_collaborations`, `BoxClient::list_all_pending_collaborations`
   - BOX API: `GET /collaborations`
-
-### ゴミ箱
-
-- ゴミ箱内のファイル情報の取得
-  - メソッド: `BoxClient::trashed_file_information`
-  - BOX API: `GET /files/{file_id}/trash`
-- ゴミ箱内のファイルの復元
-  - メソッド: `BoxClient::restore_file`
-  - BOX API: `POST /files/{file_id}`
-- ゴミ箱内のフォルダ情報の取得
-  - メソッド: `BoxClient::trashed_folder_information`
-  - BOX API: `GET /folders/{folder_id}/trash`
-- ゴミ箱内のフォルダの復元
-  - メソッド: `BoxClient::restore_folder`
-  - BOX API: `POST /folders/{folder_id}`
-- ゴミ箱内の項目のリスト
-  - メソッド: `BoxClient::list_trashed_items`, `BoxClient::list_all_trashed_items`
-  - BOX API: `GET /folders/trash/items`
-- ゴミ箱内のWebリンク情報の取得
-  - メソッド: `BoxClient::trashed_web_link_information`
-  - BOX API: `GET /web_links/{web_link_id}/trash`
-- ゴミ箱内のWebリンクの復元
-  - メソッド: `BoxClient::restore_web_link`
-  - BOX API: `POST /web_links/{web_link_id}`
-
-### ZIPダウンロード
-
-- ZIPファイルのダウンロード
-  - メソッド: `BoxClient::download_zip_content`
-  - BOX API: `GET /zip_downloads/{zip_download_id}/content`
-- ZIPダウンロードの状態の取得
-  - メソッド: `BoxClient::zip_download_status`
-  - BOX API: `GET /zip_downloads/{zip_download_id}/status`
-- ZIPダウンロードの作成
-  - メソッド: `BoxClient::create_zip_download`
-  - BOX API: `POST /zip_downloads`
-- ZIPファイルのダウンロード（作成、ダウンロードおよび状態の取得をまとめて実行）
-  - メソッド: `BoxClient::download_zip`
-  - BOX API
-    - `POST /zip_downloads`
-    - `GET /zip_downloads/{zip_download_id}/content`
-    - `GET /zip_downloads/{zip_download_id}/status`
 
 ## アクセストークンの管理
 
@@ -398,42 +407,6 @@ BOXがアクセストークンを拒否して401を返した場合、`BoxClient`
 したがって、`ApiRequest::idempotency()`で冪等性を上書きできる。
 このクレートでは、次のリクエストで冪等性を上書きしている。
 
-- アクセストークンの取得
-  - HTTPメソッド: POST
-  - 冪等性: 冪等
-  - 理由: アクセストークンを二重に発行しても害はない。また、JWTアサーションは試行ごとに作り直す。
-- ZIPダウンロードの作成（`BoxClient::create_zip_download`）
-  - HTTPメソッド: POST
-  - 冪等性: 冪等
-  - 理由: ZIPダウンロードを重複して作成しても、BOXに項目は作成されず、使用しなかったZIPダウンロードは期限が切れて無効になる。
-- ZIPファイルのダウンロード（`BoxClient::download_zip_content`）
-  - HTTPメソッド: GET
-  - 冪等性: 冪等でない
-  - 理由: ダウンロード用のURLは一度しか使用できず、BOXは2回目以降のリクエストに404を返す。
-- フォルダの削除（`BoxClient::delete_folder`）
-  - HTTPメソッド: DELETE
-  - 冪等性: 冪等でない
-  - 理由: BOXは削除に600秒以上かかると503を返すが、削除処理はその後も継続する。再送すると409や404を受け取り、削除の結果を誤って判断するおそれがある。
-- フォルダの更新（`BoxClient::update_folder`）
-  - HTTPメソッド: PUT
-  - 冪等性: 冪等でない
-  - 理由: ETagを指定した場合、BOXが更新した後に再送すると、ETagが変わっているため412を受け取る。その結果、更新の結果を誤って判断するおそれがある。
-- フォルダの移動（`BoxClient::move_folder`）
-  - HTTPメソッド: PUT
-  - 冪等性: 冪等でない
-  - 理由: BOXは移動に600秒以上かかると503を返すが、移動処理はその後も継続する。再送すると409を受け取り、ETagを指定した場合は412を受け取るため、移動の結果を誤って判断するおそれがある。
-- フォルダ名の変更（`BoxClient::rename_folder`）
-  - HTTPメソッド: PUT
-  - 冪等性: 冪等でない
-  - 理由: ETagを指定した場合、BOXが名前を変更した後に再送すると、ETagが変わっているため412を受け取る。その結果、変更の結果を誤って判断するおそれがある。
-- フォルダの説明の設定（`BoxClient::set_folder_description`）
-  - HTTPメソッド: PUT
-  - 冪等性: 冪等でない
-  - 理由: ETagを指定した場合、BOXが説明を設定した後に再送すると、ETagが変わっているため412を受け取る。その結果、設定の結果を誤って判断するおそれがある。
-- ファイルのバージョンの削除（`BoxClient::delete_file_version`）
-  - HTTPメソッド: DELETE
-  - 冪等性: 冪等でない
-  - 理由: BOXが削除した後に再送すると、削除済みのバージョンに対する削除となり、エラーを受け取りうる。その結果、削除の結果を誤って判断するおそれがある。
 - ファイルの更新（`BoxClient::update_file`）
   - HTTPメソッド: PUT
   - 冪等性: 冪等でない
@@ -442,18 +415,50 @@ BOXがアクセストークンを拒否して401を返した場合、`BoxClient`
   - HTTPメソッド: PUT
   - 冪等性: 冪等でない
   - 理由: ETagを指定した場合、BOXが名前を変更した後に再送すると、ETagが変わっているため412を受け取る。その結果、変更の結果を誤って判断するおそれがある。
-- ファイルの移動（`BoxClient::move_file`）
-  - HTTPメソッド: PUT
-  - 冪等性: 冪等でない
-  - 理由: ETagを指定した場合、BOXがファイルを移動した後に再送すると、ETagが変わっているため412を受け取る。その結果、移動の結果を誤って判断するおそれがある。
 - ファイルの説明の設定（`BoxClient::set_file_description`）
   - HTTPメソッド: PUT
   - 冪等性: 冪等でない
   - 理由: ETagを指定した場合、BOXが説明を設定した後に再送すると、ETagが変わっているため412を受け取る。その結果、設定の結果を誤って判断するおそれがある。
+- ファイルの移動（`BoxClient::move_file`）
+  - HTTPメソッド: PUT
+  - 冪等性: 冪等でない
+  - 理由: ETagを指定した場合、BOXがファイルを移動した後に再送すると、ETagが変わっているため412を受け取る。その結果、移動の結果を誤って判断するおそれがある。
 - ファイルの削除（`BoxClient::delete_file`）
   - HTTPメソッド: DELETE
   - 冪等性: 冪等でない
   - 理由: BOXは削除済みのファイルに対して404を返す。BOXが削除した後に再送すると404を受け取り、削除の結果を誤って判断するおそれがある。
+- フォルダの更新（`BoxClient::update_folder`）
+  - HTTPメソッド: PUT
+  - 冪等性: 冪等でない
+  - 理由: ETagを指定した場合、BOXが更新した後に再送すると、ETagが変わっているため412を受け取る。その結果、更新の結果を誤って判断するおそれがある。
+- フォルダ名の変更（`BoxClient::rename_folder`）
+  - HTTPメソッド: PUT
+  - 冪等性: 冪等でない
+  - 理由: ETagを指定した場合、BOXが名前を変更した後に再送すると、ETagが変わっているため412を受け取る。その結果、変更の結果を誤って判断するおそれがある。
+- フォルダの説明の設定（`BoxClient::set_folder_description`）
+  - HTTPメソッド: PUT
+  - 冪等性: 冪等でない
+  - 理由: ETagを指定した場合、BOXが説明を設定した後に再送すると、ETagが変わっているため412を受け取る。その結果、設定の結果を誤って判断するおそれがある。
+- フォルダの移動（`BoxClient::move_folder`）
+  - HTTPメソッド: PUT
+  - 冪等性: 冪等でない
+  - 理由: BOXは移動に600秒以上かかると503を返すが、移動処理はその後も継続する。再送すると409を受け取り、ETagを指定した場合は412を受け取るため、移動の結果を誤って判断するおそれがある。
+- フォルダの削除（`BoxClient::delete_folder`）
+  - HTTPメソッド: DELETE
+  - 冪等性: 冪等でない
+  - 理由: BOXは削除に600秒以上かかると503を返すが、削除処理はその後も継続する。再送すると409や404を受け取り、削除の結果を誤って判断するおそれがある。
+- ファイルのバージョンの削除（`BoxClient::delete_file_version`）
+  - HTTPメソッド: DELETE
+  - 冪等性: 冪等でない
+  - 理由: BOXが削除した後に再送すると、削除済みのバージョンに対する削除となり、エラーを受け取りうる。その結果、削除の結果を誤って判断するおそれがある。
+- ZIPファイルのダウンロード（`BoxClient::download_zip_content`）
+  - HTTPメソッド: GET
+  - 冪等性: 冪等でない
+  - 理由: ダウンロード用のURLは一度しか使用できず、BOXは2回目以降のリクエストに404を返す。
+- ZIPダウンロードの作成（`BoxClient::create_zip_download`）
+  - HTTPメソッド: POST
+  - 冪等性: 冪等
+  - 理由: ZIPダウンロードを重複して作成しても、BOXに項目は作成されず、使用しなかったZIPダウンロードは期限が切れて無効になる。
 - Webリンクの更新（`BoxClient::update_web_link`、`BoxClient::rename_web_link`など）
   - HTTPメソッド: PUT
   - 冪等性: 冪等でない
@@ -462,14 +467,10 @@ BOXがアクセストークンを拒否して401を返した場合、`BoxClient`
   - HTTPメソッド: DELETE
   - 冪等性: 冪等でない
   - 理由: BOXが削除した後に再送すると、削除済みのWebリンクに対する削除となり、エラーを受け取りうる。その結果、削除の結果を誤って判断するおそれがある。
-- コラボレーションの更新で、役割を所有者にする場合（`BoxClient::update_collaboration`）
-  - HTTPメソッド: PUT
-  - 冪等性: 冪等でない
-  - 理由: 所有者を変更すると、BOXは更新したコラボレーションを削除して新しいコラボレーションを作成する。BOXが所有者を変更した後に再送すると、削除済みのコラボレーションに対する更新となり、404を受け取りうる。その結果、所有者の変更の結果を誤って判断するおそれがある。所有者の変更以外の更新は、HTTPメソッドのとおり冪等とする。
-- コラボレーションの削除（`BoxClient::delete_collaboration`）
-  - HTTPメソッド: DELETE
-  - 冪等性: 冪等でない
-  - 理由: BOXが削除した後に再送すると、削除済みのコラボレーションに対する削除となり、エラーを受け取りうる。その結果、削除の結果を誤って判断するおそれがある。
+- アクセストークンの取得
+  - HTTPメソッド: POST
+  - 冪等性: 冪等
+  - 理由: アクセストークンを二重に発行しても害はない。また、JWTアサーションは試行ごとに作り直す。
 - ユーザーの更新で、ユーザーをエンタープライズから除外する場合（`BoxClient::update_user`）
   - HTTPメソッド: PUT
   - 冪等性: 冪等でない
@@ -486,19 +487,27 @@ BOXがアクセストークンを拒否して401を返した場合、`BoxClient`
   - HTTPメソッド: DELETE
   - 冪等性: 冪等でない
   - 理由: BOXが削除した後に再送すると、削除済みのメンバーシップに対する削除となり、エラーを受け取りうる。その結果、削除の結果を誤って判断するおそれがある。
+- コラボレーションの更新で、役割を所有者にする場合（`BoxClient::update_collaboration`）
+  - HTTPメソッド: PUT
+  - 冪等性: 冪等でない
+  - 理由: 所有者を変更すると、BOXは更新したコラボレーションを削除して新しいコラボレーションを作成する。BOXが所有者を変更した後に再送すると、削除済みのコラボレーションに対する更新となり、404を受け取りうる。その結果、所有者の変更の結果を誤って判断するおそれがある。所有者の変更以外の更新は、HTTPメソッドのとおり冪等とする。
+- コラボレーションの削除（`BoxClient::delete_collaboration`）
+  - HTTPメソッド: DELETE
+  - 冪等性: 冪等でない
+  - 理由: BOXが削除した後に再送すると、削除済みのコラボレーションに対する削除となり、エラーを受け取りうる。その結果、削除の結果を誤って判断するおそれがある。
 
-フォルダの削除で503を受け取った場合は、`BoxClient::folder_information`でフォルダの状態を確認する。
-フォルダの移動で5xxを受け取った場合、またはタイムアウトした場合は、`BoxClient::folder_information`でフォルダの親フォルダを確認する。
+ファイルの削除で5xxを受け取った場合、またはタイムアウトした場合は、`BoxClient::file_information`でファイルの状態を確認する。
 フォルダ名の変更で5xxを受け取った場合、またはタイムアウトした場合は、`BoxClient::folder_information`でフォルダ名を確認する。
 フォルダの説明の設定で5xxを受け取った場合、またはタイムアウトした場合は、`BoxClient::folder_information`でフォルダの説明を確認する。
-ファイルの削除で5xxを受け取った場合、またはタイムアウトした場合は、`BoxClient::file_information`でファイルの状態を確認する。
+フォルダの移動で5xxを受け取った場合、またはタイムアウトした場合は、`BoxClient::folder_information`でフォルダの親フォルダを確認する。
+フォルダの削除で503を受け取った場合は、`BoxClient::folder_information`でフォルダの状態を確認する。
 Webリンクの削除で5xxを受け取った場合、またはタイムアウトした場合は、`BoxClient::web_link_information`でWebリンクの状態を確認する。
-コラボレーションの所有者の変更で5xxを受け取った場合、またはタイムアウトした場合は、`BoxClient::list_file_collaborations`または`BoxClient::list_folder_collaborations`で項目のコラボレーションを確認する。
-コラボレーションの削除で5xxを受け取った場合、またはタイムアウトした場合は、`BoxClient::collaboration_information`でコラボレーションが存在するか確認する。
 ユーザーのエンタープライズからの除外で5xxを受け取った場合、またはタイムアウトした場合は、`BoxClient::user_information`でユーザーを確認する。
 ユーザーの削除で5xxを受け取った場合、またはタイムアウトした場合は、`BoxClient::user_information`でユーザーが存在するか確認する。
 グループの削除で5xxを受け取った場合、またはタイムアウトした場合は、`BoxClient::group_information`でグループが存在するか確認する。
 グループメンバーシップの削除で5xxを受け取った場合、またはタイムアウトした場合は、`BoxClient::group_membership_information`でメンバーシップが存在するか確認する。
+コラボレーションの所有者の変更で5xxを受け取った場合、またはタイムアウトした場合は、`BoxClient::list_file_collaborations`または`BoxClient::list_folder_collaborations`で項目のコラボレーションを確認する。
+コラボレーションの削除で5xxを受け取った場合、またはタイムアウトした場合は、`BoxClient::collaboration_information`でコラボレーションが存在するか確認する。
 
 ### 待機時間の決定
 
