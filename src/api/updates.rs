@@ -1,7 +1,8 @@
-//! ファイル、フォルダおよびWebリンクの情報の更新で共有する型
+//! 項目の情報の更新で共有する型
 //!
 //! BOXは、ファイルの更新（`PUT /files/{file_id}`）、フォルダの更新（`PUT /folders/{folder_id}`）および
 //! Webリンクの更新（`PUT /web_links/{web_link_id}`）で、共有リンクなどの属性を同じ形式で受け付ける。
+//! また、値またはnullを送信する[`Nullable`]は、ユーザーおよびグループメンバーシップの更新でも共有する。
 
 use serde::Serialize;
 use time::OffsetDateTime;
@@ -11,10 +12,20 @@ use crate::{
     api::types::{RenameBody, SetDescriptionBody},
 };
 
+/// 1つの項目に設定できるタグの最大数を表す整数リテラルに展開する。
+///
+/// `concat!`は定数を受け付けないため、[`MAX_TAGS`]とエラーのメッセージで、このマクロを共有する。
+/// これにより、最大数を変更したときに、メッセージの値も追随させる。
+macro_rules! max_tags {
+    () => {
+        100
+    };
+}
+
 /// 1つの項目に設定できるタグの最大数
 ///
 /// BOXは、ファイルおよびフォルダのタグを1個以上100個以下で受け付ける。
-pub const MAX_TAGS: usize = 100;
+pub const MAX_TAGS: usize = max_tags!();
 
 /// 更新する属性に指定する値、またはnull
 ///
@@ -392,9 +403,11 @@ pub(crate) fn validate_common_attributes(
     if let Some(tags) = tags
         && !(1..=MAX_TAGS).contains(&tags.len())
     {
-        return Err(BoxClientError::InvalidArgument(
-            "tags must contain between 1 and 100 tags",
-        ));
+        return Err(BoxClientError::InvalidArgument(concat!(
+            "tags must contain between 1 and ",
+            max_tags!(),
+            " tags"
+        )));
     }
     Ok(())
 }

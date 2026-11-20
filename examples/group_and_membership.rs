@@ -25,12 +25,12 @@ use box_client::{
 };
 
 /// 使用方法
-const USAGE: &str = "usage: RUST_LOG=info cargo run --quiet --example=group_membership -- <user-login> [<filter-term>]";
+const USAGE: &str = "usage: RUST_LOG=info cargo run --quiet --example=group_and_membership -- <user-login> [<filter-term>]";
 
 /// グループとグループメンバーシップを操作するメソッドを順に呼び出す。
 ///
 /// ```shell
-/// RUST_LOG=info cargo run --quiet --example=group_membership -- <user-login> [<filter-term>]
+/// RUST_LOG=info cargo run --quiet --example=group_and_membership -- <user-login> [<filter-term>]
 /// ```
 ///
 /// `<user-login>`には、グループに追加する管理対象ユーザーのメールアドレスを指定する。

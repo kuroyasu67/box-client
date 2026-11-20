@@ -425,3 +425,31 @@ pub(crate) fn is_invalid_argument(error: &BoxClientError) -> bool {
 pub(crate) fn is_invalid_request_body(error: &BoxClientError) -> bool {
     matches!(error, BoxClientError::InvalidRequestBody(_))
 }
+
+/// オフセット方式のページ送りで、`offset`から`limit`件のエントリーを、全体が`total`件として返すレスポンスを作成する。
+///
+/// `offset`と`limit`は、リクエストのクエリパラメーターから取り出す。省略された場合は、`offset`を0、`limit`を1000とする。
+/// `entry`は、エントリーのオフセットからエントリーのJSONを作成する。
+pub(crate) fn offset_page_response(
+    request: &Request,
+    total: u64,
+    entry: impl Fn(u64) -> serde_json::Value,
+) -> ResponseTemplate {
+    let param = |name: &str| {
+        request
+            .url
+            .query_pairs()
+            .find(|(key, _)| key == name)
+            .and_then(|(_, value)| value.parse::<u64>().ok())
+    };
+    let offset = param("offset").unwrap_or(0);
+    let limit = param("limit").unwrap_or(1000);
+    let end = total.min(offset + limit);
+    let entries: Vec<_> = (offset..end).map(entry).collect();
+    ResponseTemplate::new(200).set_body_json(json!({
+        "total_count": total,
+        "limit": limit,
+        "offset": offset,
+        "entries": entries,
+    }))
+}

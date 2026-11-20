@@ -10,29 +10,22 @@ use crate::{
     BoxClient, BoxClientError, BoxClientResult, GroupId, GroupMembershipId, GroupMini, Nullable,
     UserId, UserMini,
     api::{
-        pagination::{MAX_ITEMS_LIMIT, OffsetPage, collect_offset_pages_up_to, validate_limit},
+        pagination::{
+            MAX_ITEMS_LIMIT, MAX_OFFSET, OffsetPage, collect_offset_pages_up_to,
+            offset_page_request, truncate_to_max_entries, validate_listed_offset,
+        },
         updates::NullableBody,
     },
     request::ApiRequest,
     retry::Idempotency,
 };
 
-/// グループメンバーシップをリストするときに取得できるメンバーシップ数の上限を表す整数リテラルに展開する。
-///
-/// `concat!`は定数を受け付けないため、[`MAX_LISTED_GROUP_MEMBERSHIPS`]とエラーのメッセージで、このマクロを共有する。
-/// これにより、上限を変更したときに、メッセージの値も追随させる。
-macro_rules! max_listed_group_memberships {
-    () => {
-        10_000
-    };
-}
-
 /// グループメンバーシップをリストするときに取得できるメンバーシップ数の上限
 ///
 /// BOXは、グループのメンバーのリストおよびユーザーが所属するグループのリストをオフセット方式でだけページ送りし、
 /// オフセットが10,000を超えるリクエストを400で拒否する。そのため、BOXクライアントは、
 /// メンバーシップのうち、先頭からこの件数までしか返さない。
-pub const MAX_LISTED_GROUP_MEMBERSHIPS: u64 = max_listed_group_memberships!();
+pub const MAX_LISTED_GROUP_MEMBERSHIPS: u64 = MAX_OFFSET;
 
 /// グループメンバーシップ
 ///
@@ -414,23 +407,6 @@ impl OffsetPage for GroupMembershipsPage {
     }
 }
 
-/// オフセットが、取得できるメンバーシップ数の上限より小さいことを検証する。
-///
-/// BOXクライアントは、先頭から[`MAX_LISTED_GROUP_MEMBERSHIPS`]件までしか返さないため、それ以降のオフセットを受け付けない。
-///
-/// # Errors
-///
-/// `offset`が[`MAX_LISTED_GROUP_MEMBERSHIPS`]以上の場合は、[`BoxClientError::InvalidArgument`]を返す。
-fn validate_memberships_offset(offset: u64) -> BoxClientResult<u64> {
-    if MAX_LISTED_GROUP_MEMBERSHIPS <= offset {
-        return Err(BoxClientError::InvalidArgument(concat!(
-            "offset must be less than ",
-            max_listed_group_memberships!()
-        )));
-    }
-    Ok(offset)
-}
-
 impl BoxClient {
     /// グループメンバーシップの情報を取得する。
     ///
@@ -443,7 +419,7 @@ impl BoxClient {
     /// # Errors
     ///
     /// グループメンバーシップが存在しない場合、またはグループメンバーシップを参照する権限がない場合は、
-    /// [`BoxClientError::Api`](crate::BoxClientError::Api)を返す。
+    /// [`BoxClientError::Api`]を返す。
     /// 公式ドキュメントは、このAPIが返すエラーのステータスを個別に記載していない。
     ///
     /// 再試行できないエラーが発生した場合、または再試行回数の上限に達した場合はエラーを返す。
@@ -482,9 +458,9 @@ impl BoxClient {
     /// # Errors
     ///
     /// `offset`が[`MAX_LISTED_GROUP_MEMBERSHIPS`]以上の場合、または`options.limit`が範囲外の場合は、
-    /// リクエストを送信せずに[`BoxClientError::InvalidArgument`](crate::BoxClientError::InvalidArgument)を返す。
+    /// リクエストを送信せずに[`BoxClientError::InvalidArgument`]を返す。
     /// グループが存在しない場合、またはグループのメンバーを参照する権限がない場合は、
-    /// [`BoxClientError::Api`](crate::BoxClientError::Api)を返す。
+    /// [`BoxClientError::Api`]を返す。
     /// 公式ドキュメントは、このAPIが返すエラーのステータスを個別に記載していない。
     ///
     /// 再試行できないエラーが発生した場合、または再試行回数の上限に達した場合はエラーを返す。
@@ -520,7 +496,7 @@ impl BoxClient {
     ///
     /// # Errors
     ///
-    /// `options.limit`が範囲外の場合は、リクエストを送信せずに[`BoxClientError::InvalidArgument`](crate::BoxClientError::InvalidArgument)を返す。
+    /// `options.limit`が範囲外の場合は、リクエストを送信せずに[`BoxClientError::InvalidArgument`]を返す。
     /// いずれかのページの取得に失敗した場合は、取得済みのメンバーシップを破棄してエラーを返す。
     pub async fn list_all_group_memberships(
         &self,
@@ -565,9 +541,9 @@ impl BoxClient {
     /// # Errors
     ///
     /// `offset`が[`MAX_LISTED_GROUP_MEMBERSHIPS`]以上の場合、または`options.limit`が範囲外の場合は、
-    /// リクエストを送信せずに[`BoxClientError::InvalidArgument`](crate::BoxClientError::InvalidArgument)を返す。
+    /// リクエストを送信せずに[`BoxClientError::InvalidArgument`]を返す。
     /// ユーザーが存在しない場合、またはユーザーが所属するグループを参照する権限がない場合は、
-    /// [`BoxClientError::Api`](crate::BoxClientError::Api)を返す。
+    /// [`BoxClientError::Api`]を返す。
     /// 公式ドキュメントは、このAPIが返すエラーのステータスを個別に記載していない。
     ///
     /// 再試行できないエラーが発生した場合、または再試行回数の上限に達した場合はエラーを返す。
@@ -593,7 +569,7 @@ impl BoxClient {
     ///
     /// # Errors
     ///
-    /// `options.limit`が範囲外の場合は、リクエストを送信せずに[`BoxClientError::InvalidArgument`](crate::BoxClientError::InvalidArgument)を返す。
+    /// `options.limit`が範囲外の場合は、リクエストを送信せずに[`BoxClientError::InvalidArgument`]を返す。
     /// いずれかのページの取得に失敗した場合は、取得済みのメンバーシップを破棄してエラーを返す。
     pub async fn list_all_user_memberships(
         &self,
@@ -637,7 +613,7 @@ impl BoxClient {
     /// `options.role`が[`GroupMembershipRole::Unknown`]の場合、
     /// または権限の名前が空文字列、空白だけもしくは重複している場合は、
     /// リクエストを送信せずに[`BoxClientError::InvalidArgument`]を返す。
-    /// BOXがエラーレスポンスを返した場合は、[`BoxClientError::Api`](crate::BoxClientError::Api)を返す。
+    /// BOXがエラーレスポンスを返した場合は、[`BoxClientError::Api`]を返す。
     /// 例えば、情報バリアによってユーザーをグループに追加することを禁止している場合は、BOXはエラーコードが
     /// `forbidden_by_policy`の403を返す。
     ///
@@ -681,7 +657,7 @@ impl BoxClient {
     /// `update.role`が[`GroupMembershipRole::Unknown`]の場合、
     /// または権限の名前が空文字列、空白だけもしくは重複している場合は、
     /// リクエストを送信せずに[`BoxClientError::InvalidArgument`]を返す。
-    /// BOXがエラーレスポンスを返した場合は、[`BoxClientError::Api`](crate::BoxClientError::Api)を返す。
+    /// BOXがエラーレスポンスを返した場合は、[`BoxClientError::Api`]を返す。
     /// 公式ドキュメントは、このAPIが返すエラーのステータスを個別に記載していない。
     ///
     /// 再試行できないエラーが発生した場合、または再試行回数の上限に達した場合はエラーを返す。
@@ -722,7 +698,7 @@ impl BoxClient {
     ///
     /// # Errors
     ///
-    /// BOXがエラーレスポンスを返した場合は、[`BoxClientError::Api`](crate::BoxClientError::Api)を返す。
+    /// BOXがエラーレスポンスを返した場合は、[`BoxClientError::Api`]を返す。
     /// 公式ドキュメントは、このAPIが返すエラーのステータスを個別に記載していない。
     ///
     /// 再試行できないエラーが発生した場合、または再試行回数の上限に達した場合はエラーを返す。
@@ -759,15 +735,10 @@ impl BoxClient {
         offset: u64,
         options: &ListGroupMembershipsOptions,
     ) -> BoxClientResult<GroupMembershipsPage> {
-        let mut request =
-            ApiRequest::get(path).query("offset", validate_memberships_offset(offset)?.to_string());
-        if let Some(limit) = options.limit {
-            request = request.query("limit", validate_limit(limit)?.to_string());
-        }
+        let request = offset_page_request(path, validate_listed_offset(offset)?, options.limit)?;
 
         let mut page: GroupMembershipsPage = self.send_json(request).await?;
-        page.entries
-            .truncate(usize::try_from(MAX_LISTED_GROUP_MEMBERSHIPS - offset).unwrap_or(usize::MAX));
+        truncate_to_max_entries(&mut page.entries, offset, MAX_LISTED_GROUP_MEMBERSHIPS);
         Ok(page)
     }
 }

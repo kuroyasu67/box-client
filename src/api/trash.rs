@@ -55,8 +55,9 @@ pub struct RestoreItemOptions<'a> {
 ///
 /// BOXのAPIリファレンスは、マーカー方式のページ送りで並び替えに使用する属性または並び替えの方向を指定すると、
 /// 400（`invalid_parameter`）を返すと記載している。しかし、2026年11月18日に確認したところ、
-/// BOXは400を返さずに、並び替えに使用する属性と並び替えの方向を反映した。
+/// BOXは、名前およびサイズによる並び替えと並び替えの方向では400を返さずに、指定を反映した。
 /// したがって、BOXクライアントは、常にマーカー方式でページを送るが、並び替えに使用する属性と並び替えの方向を指定できるようにする。
+/// ただし、日時による並び替えは、BOXが400を返したため指定できない（[`ListTrashedItemsOptions::sort`]を参照）。
 /// BOXがAPIリファレンスのとおりに拒否するように変更した場合は、APIを呼び出したときに[`BoxClientError::Api`]になる。
 ///
 /// 将来フィールドを追加しても利用者のコードが壊れないように、`#[non_exhaustive]`を付けている。
@@ -1122,7 +1123,7 @@ mod test_list_trashed_items {
     /// 項目数の上限が範囲外の場合は、リクエストを送信せずにエラーを返すことを確認
     #[rstest]
     #[case::zero(0)]
-    #[case::over_max(1001)]
+    #[case::over_max(MAX_ITEMS_LIMIT + 1)]
     #[tokio::test]
     async fn test_list_trashed_items_invalid_limit(#[case] limit: u32) -> anyhow::Result<()> {
         let server = MockServer::start().await;

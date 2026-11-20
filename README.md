@@ -496,18 +496,20 @@ BOXがアクセストークンを拒否して401を返した場合、`BoxClient`
   - 冪等性: 冪等でない
   - 理由: BOXが削除した後に再送すると、削除済みのコラボレーションに対する削除となり、エラーを受け取りうる。その結果、削除の結果を誤って判断するおそれがある。
 
-ファイルの削除で5xxを受け取った場合、またはタイムアウトした場合は、`BoxClient::file_information`でファイルの状態を確認する。
-フォルダ名の変更で5xxを受け取った場合、またはタイムアウトした場合は、`BoxClient::folder_information`でフォルダ名を確認する。
-フォルダの説明の設定で5xxを受け取った場合、またはタイムアウトした場合は、`BoxClient::folder_information`でフォルダの説明を確認する。
-フォルダの移動で5xxを受け取った場合、またはタイムアウトした場合は、`BoxClient::folder_information`でフォルダの親フォルダを確認する。
-フォルダの削除で503を受け取った場合は、`BoxClient::folder_information`でフォルダの状態を確認する。
-Webリンクの削除で5xxを受け取った場合、またはタイムアウトした場合は、`BoxClient::web_link_information`でWebリンクの状態を確認する。
-ユーザーのエンタープライズからの除外で5xxを受け取った場合、またはタイムアウトした場合は、`BoxClient::user_information`でユーザーを確認する。
-ユーザーの削除で5xxを受け取った場合、またはタイムアウトした場合は、`BoxClient::user_information`でユーザーが存在するか確認する。
-グループの削除で5xxを受け取った場合、またはタイムアウトした場合は、`BoxClient::group_information`でグループが存在するか確認する。
-グループメンバーシップの削除で5xxを受け取った場合、またはタイムアウトした場合は、`BoxClient::group_membership_information`でメンバーシップが存在するか確認する。
-コラボレーションの所有者の変更で5xxを受け取った場合、またはタイムアウトした場合は、`BoxClient::list_file_collaborations`または`BoxClient::list_folder_collaborations`で項目のコラボレーションを確認する。
-コラボレーションの削除で5xxを受け取った場合、またはタイムアウトした場合は、`BoxClient::collaboration_information`でコラボレーションが存在するか確認する。
+冪等でないリクエストで5xxを受け取った場合、またはタイムアウトした場合は、BOXが処理を完了した可能性がある。
+BOXクライアントは再送しないため、利用者は次のメソッドで結果を確認する。
+
+- ファイルの更新、名前の変更、説明の設定、移動および削除: `BoxClient::file_information`でファイルの状態を確認する。
+- フォルダの更新、名前の変更、説明の設定、移動および削除: `BoxClient::folder_information`でフォルダの状態を確認する。
+  フォルダの移動および削除では、BOXが処理を継続している可能性もある。
+- ファイルのバージョンの削除: `BoxClient::file_version`でバージョンの`trashed_at`を確認する。
+- Webリンクの更新、名前の変更、説明の設定、移動、URLの変更および削除: `BoxClient::web_link_information`でWebリンクの状態を確認する。
+- ユーザーのエンタープライズからの除外: `BoxClient::user_information`でユーザーを確認する。
+- ユーザーの削除: `BoxClient::user_information`でユーザーが存在するか確認する。
+- グループの削除: `BoxClient::group_information`でグループが存在するか確認する。
+- グループメンバーシップの削除: `BoxClient::group_membership_information`でメンバーシップが存在するか確認する。
+- コラボレーションの所有者の変更: `BoxClient::list_file_collaborations`または`BoxClient::list_folder_collaborations`で項目のコラボレーションを確認する。
+- コラボレーションの削除: `BoxClient::collaboration_information`でコラボレーションが存在するか確認する。
 
 ### 待機時間の決定
 
@@ -696,10 +698,11 @@ BOX_CONFIG_FILE=path/to/config.json RUST_LOG=info cargo run --quiet --example=me
 ### prek
 
 Gitフックを導入する。
-Gitフックは`cargo deny check`を実行するため、`cargo-deny`もインストールする。
+Gitフックは`cargo deny check`および`taplo fmt`を実行するため、`cargo-deny`および`taplo-cli`もインストールする。
 
 ```shell
 cargo install cargo-deny
+cargo install taplo-cli --locked
 cargo install prek
 prek install
 ```

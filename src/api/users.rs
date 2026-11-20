@@ -11,7 +11,8 @@ use crate::{
     BoxClient, BoxClientError, BoxClientResult, UserId,
     api::{
         pagination::{
-            MAX_ITEMS_LIMIT, MarkerPage, collect_all_pages, marker_page_request, validate_limit,
+            MAX_ITEMS_LIMIT, MAX_OFFSET, MarkerPage, collect_all_pages, marker_page_request,
+            offset_page_request, truncate_to_max_entries,
         },
         types::validated,
         updates::{Nullable, NullableBody},
@@ -1246,7 +1247,7 @@ impl<'a> ListEnterpriseUsersOptions<'a> {
 /// BOXクライアントは、検索語またはアプリユーザーの外部識別子を指定した場合、オフセット方式でページを送る。
 /// BOXはオフセットが10,000を超えるリクエストを400で拒否するため、BOXクライアントは、条件に一致するユーザーのうち、
 /// 先頭からこの件数までしか返さない。
-pub const MAX_FILTERED_USERS: u64 = 10_000;
+pub const MAX_FILTERED_USERS: u64 = MAX_OFFSET;
 
 /// オフセット方式でページを送るときに、マーカーからオフセットを取り出して検証する。
 ///
@@ -1318,9 +1319,7 @@ impl UsersOffsetPage {
     /// 次のページの位置が上限に達した場合も、後続のユーザーがないとする。
     fn into_users_page(self, offset: u64) -> UsersPage {
         let mut entries = self.entries;
-        let remaining =
-            usize::try_from(MAX_FILTERED_USERS.saturating_sub(offset)).unwrap_or(usize::MAX);
-        entries.truncate(remaining);
+        truncate_to_max_entries(&mut entries, offset, MAX_FILTERED_USERS);
         let next_offset = offset + entries.len() as u64;
         let next_marker = (!entries.is_empty()
             && next_offset < self.total_count
@@ -1367,7 +1366,7 @@ impl BoxClient {
     /// # Errors
     ///
     /// ユーザーが存在しない場合、またはユーザーを参照する権限がない場合は、
-    /// [`BoxClientError::Api`](crate::BoxClientError::Api)を返す。
+    /// [`BoxClientError::Api`]を返す。
     /// 公式ドキュメントは、このAPIが返すエラーのステータスを個別に記載していない。
     ///
     /// 再試行できないエラーが発生した場合、または再試行回数の上限に達した場合はエラーを返す。
@@ -1409,10 +1408,10 @@ impl BoxClient {
     ///
     /// # Errors
     ///
-    /// `options.limit`が範囲外の場合は、リクエストを送信せずに[`BoxClientError::InvalidArgument`](crate::BoxClientError::InvalidArgument)を返す。
+    /// `options.limit`が範囲外の場合は、リクエストを送信せずに[`BoxClientError::InvalidArgument`]を返す。
     /// 検索語またはアプリユーザーの外部識別子を指定した場合に、`marker`が同じオプションで取得したマーカーでないときも、
-    /// リクエストを送信せずに[`BoxClientError::InvalidArgument`](crate::BoxClientError::InvalidArgument)を返す。
-    /// エンタープライズのユーザーを参照する権限がない場合は、[`BoxClientError::Api`](crate::BoxClientError::Api)を返す。
+    /// リクエストを送信せずに[`BoxClientError::InvalidArgument`]を返す。
+    /// エンタープライズのユーザーを参照する権限がない場合は、[`BoxClientError::Api`]を返す。
     /// 公式ドキュメントは、このAPIが返すエラーのステータスを個別に記載していない。
     ///
     /// 再試行できないエラーが発生した場合、または再試行回数の上限に達した場合はエラーを返す。
@@ -1430,10 +1429,7 @@ impl BoxClient {
         }
 
         let offset = users_offset(marker)?;
-        let mut request = ApiRequest::get(["users"]).query("offset", offset.to_string());
-        if let Some(limit) = options.limit {
-            request = request.query("limit", validate_limit(limit)?.to_string());
-        }
+        let mut request = offset_page_request(["users"], offset, options.limit)?;
         if let Some(filter_term) = options.filter_term {
             request = request.query("filter_term", filter_term);
         }
@@ -1464,9 +1460,9 @@ impl BoxClient {
     ///
     /// # Errors
     ///
-    /// `options.limit`が範囲外の場合は、リクエストを送信せずに[`BoxClientError::InvalidArgument`](crate::BoxClientError::InvalidArgument)を返す。
+    /// `options.limit`が範囲外の場合は、リクエストを送信せずに[`BoxClientError::InvalidArgument`]を返す。
     /// BOXが以前に返したマーカーを再び返した場合、このメソッドは無限ループを避けるため
-    /// [`BoxClientError::UnexpectedResponse`](crate::BoxClientError::UnexpectedResponse)を返す。
+    /// [`BoxClientError::UnexpectedResponse`]を返す。
     /// いずれかのページの取得に失敗した場合は、取得済みのユーザーを破棄してエラーを返す。
     pub async fn list_all_enterprise_users(
         &self,
@@ -1505,7 +1501,7 @@ impl BoxClient {
     /// リクエストを送信せずに[`BoxClientError::InvalidArgument`]を返す。
     /// ユーザー名、役職、電話番号、住所またはストレージの容量をBOXが拒否する場合は、
     /// リクエストを送信せずに[`BoxClientError::InvalidRequestBody`]を返す。
-    /// BOXがエラーレスポンスを返した場合は、[`BoxClientError::Api`](crate::BoxClientError::Api)を返す。
+    /// BOXがエラーレスポンスを返した場合は、[`BoxClientError::Api`]を返す。
     ///
     /// 再試行できないエラーが発生した場合、または再試行回数の上限に達した場合はエラーを返す。
     /// 5xxまたはタイムアウトでエラーを返した場合は、BOXがユーザーを作成した可能性がある。
@@ -1554,7 +1550,7 @@ impl BoxClient {
     /// リクエストを送信せずに[`BoxClientError::InvalidArgument`]を返す。
     /// ユーザー名、役職、電話番号、住所またはストレージの容量をBOXが拒否する場合は、
     /// リクエストを送信せずに[`BoxClientError::InvalidRequestBody`]を返す。
-    /// BOXのドキュメントによると、BOXは次のエラーを返し、BOXクライアントは[`BoxClientError::Api`](crate::BoxClientError::Api)を返す。
+    /// BOXのドキュメントによると、BOXは次のエラーを返し、BOXクライアントは[`BoxClientError::Api`]を返す。
     ///
     /// - 400（`invalid_parameter`）: パラメーターの形式が正しくない場合
     /// - 400（`user_must_not_have_retained_content`）: リテンションポリシーまたはリーガルホールドのため、
@@ -1608,7 +1604,7 @@ impl BoxClient {
     ///
     /// # Errors
     ///
-    /// BOXがエラーレスポンスを返した場合は、[`BoxClientError::Api`](crate::BoxClientError::Api)を返す。
+    /// BOXがエラーレスポンスを返した場合は、[`BoxClientError::Api`]を返す。
     /// BOXのドキュメントによると、ユーザーがコンテンツを所有し、エンタープライズにリテンションポリシー（廃止したものを含む）
     /// または解除していないリーガルホールドがある場合、BOXはエラーコードが`forbidden`の403を返す。
     /// この場合は、`options.force`に`true`を指定しても削除できないため、ユーザーのコンテンツを移管してから削除する。

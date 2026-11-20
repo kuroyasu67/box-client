@@ -1,6 +1,7 @@
 //! ページ送りに関する共通の実装
 //!
-//! フォルダ内の項目のリスト、ゴミ箱内の項目のリスト、ファイルのバージョンのリストおよびフォルダのコラボレーションのリストで共有する。
+//! BOXの一覧を取得するAPIは、マーカー方式またはオフセット方式でページを送る。
+//! このモジュールは、両方式のリクエストの作成、オフセットの検証、およびすべてのページの取得を共有する。
 
 use std::collections::HashSet;
 
@@ -20,6 +21,23 @@ macro_rules! max_items_limit {
 
 /// 1回のリクエストで取得できる項目数の上限
 pub const MAX_ITEMS_LIMIT: u32 = max_items_limit!();
+
+/// オフセット方式のページ送りで、BOXが受け付けるオフセットの最大値を表す整数リテラルに展開する。
+///
+/// `concat!`は定数を受け付けないため、[`MAX_OFFSET`]とエラーのメッセージで、このマクロを共有する。
+/// これにより、最大値を変更したときに、メッセージの値も追随させる。
+macro_rules! max_offset {
+    () => {
+        10_000
+    };
+}
+
+/// オフセット方式のページ送りで、BOXが受け付けるオフセットの最大値
+///
+/// BOXは、オフセット方式でページを送るどのAPIでも、オフセットがこの値を超えるリクエストを400で拒否する。
+/// そのため、BOXクライアントは、オフセット方式ですべてのページを取得するメソッドで、先頭からこの件数までのエントリーを返す。
+/// 公開している`MAX_*_OFFSET`および`MAX_LISTED_*`などの定数は、すべてこの値である。
+pub(crate) const MAX_OFFSET: u64 = max_offset!();
 
 /// 項目の並び替えに使用する属性
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -113,7 +131,7 @@ impl MarkerPage for ItemsPage {
 
 /// オフセット方式のページ送りで取得する1ページ
 ///
-/// [`collect_all_offset_pages`]が、ページの種類によらず、エントリーと総数を取り出すために使用する。
+/// [`collect_offset_pages_up_to`]が、ページの種類によらず、エントリーと総数を取り出すために使用する。
 pub(crate) trait OffsetPage {
     /// ページに含まれるエントリーの型
     type Entry;
@@ -138,9 +156,69 @@ pub(crate) fn validate_limit(limit: u32) -> BoxClientResult<u32> {
     }
 }
 
+/// オフセットが、BOXが受け付ける最大値（[`MAX_OFFSET`]）以下であることを検証する。
+///
+/// 1ページ分を取得するメソッドが、BOXが受け付けるオフセットをそのまま受け付ける場合に使用する。
+///
+/// # Errors
+///
+/// `offset`が[`MAX_OFFSET`]を超える場合は、[`BoxClientError::InvalidArgument`]を返す。
+pub(crate) fn validate_offset(offset: u64) -> BoxClientResult<u64> {
+    if MAX_OFFSET < offset {
+        return Err(BoxClientError::InvalidArgument(concat!(
+            "offset must be less than or equal to ",
+            max_offset!()
+        )));
+    }
+    Ok(offset)
+}
+
+/// オフセットが、取得できるエントリー数の上限（[`MAX_OFFSET`]）より小さいことを検証する。
+///
+/// 1ページ分を取得するメソッドも、先頭から[`MAX_OFFSET`]件までしか返さない場合に使用する。
+/// それ以降のエントリーは返さないため、[`MAX_OFFSET`]以上のオフセットを受け付けない。
+///
+/// # Errors
+///
+/// `offset`が[`MAX_OFFSET`]以上の場合は、[`BoxClientError::InvalidArgument`]を返す。
+pub(crate) fn validate_listed_offset(offset: u64) -> BoxClientResult<u64> {
+    if MAX_OFFSET <= offset {
+        return Err(BoxClientError::InvalidArgument(concat!(
+            "offset must be less than ",
+            max_offset!()
+        )));
+    }
+    Ok(offset)
+}
+
+/// 先頭から`max_entries`件までしか返さないように、`offset`から始まるページの、上限を超えるエントリーを取り除く。
+pub(crate) fn truncate_to_max_entries<T>(entries: &mut Vec<T>, offset: u64, max_entries: u64) {
+    entries.truncate(usize::try_from(max_entries.saturating_sub(offset)).unwrap_or(usize::MAX));
+}
+
+/// オフセット方式のページ送りで、1ページ分のエントリーを取得するリクエストを作成する。
+///
+/// `offset`はクエリパラメーター`offset`で常に送信し、`limit`は指定した場合だけ送信する。
+/// `offset`は呼び出し元が検証する。APIによって、[`validate_offset`]と[`validate_listed_offset`]を使い分けるためである。
+///
+/// # Errors
+///
+/// `limit`が範囲外の場合は、[`BoxClientError::InvalidArgument`]を返す。
+pub(crate) fn offset_page_request<'a>(
+    path: impl IntoIterator<Item = &'a str>,
+    offset: u64,
+    limit: Option<u32>,
+) -> BoxClientResult<ApiRequest<'a>> {
+    let mut request = ApiRequest::get(path).query("offset", offset.to_string());
+    if let Some(limit) = limit {
+        request = request.query("limit", validate_limit(limit)?.to_string());
+    }
+    Ok(request)
+}
+
 /// マーカー方式のページ送りで、1ページ分の項目を取得するリクエストを作成する。
 ///
-/// フォルダ内の項目のリスト、ゴミ箱内の項目のリストおよびフォルダのコラボレーションのリストで共有する。
+/// マーカー方式でページを送るすべてのAPIで共有する。
 /// 指定した引数だけを、同じ名前のクエリパラメーター（`limit`、`marker`、`sort`および`direction`）で送信する。
 ///
 /// # Arguments
@@ -179,7 +257,6 @@ pub(crate) fn marker_page_request<'a>(
 
 /// マーカー方式のページ送りで、すべてのページのエントリーを取得する。
 ///
-/// フォルダ内の項目、ゴミ箱内の項目およびフォルダのコラボレーションのリストで共有する。
 /// `fetch_page`には前のページの`next_marker`を渡す。最初のページでは`None`を渡す。
 /// 戻り値は、すべてのエントリーと取得したページ数である。
 ///
@@ -225,60 +302,11 @@ where
     Ok((items, pages))
 }
 
-/// オフセット方式のページ送りで、すべてのページのエントリーを取得する。
-///
-/// ファイルのバージョンのリストおよびグループのコラボレーションのリストで共有する。
-/// `fetch_page`には取得するページの最初のエントリーのオフセットを渡す。最初のページでは`0`を渡す。
-/// 取得したエントリーの数が`total_count`に達した場合、またはBOXが空のページを返した場合に終了する。
-/// 戻り値は、すべてのエントリーと取得したページ数である。
-///
-/// # Arguments
-///
-/// - `max_offset`: BOXが受け付けるオフセットの最大値
-/// - `exceeded`: 次のページのオフセットが`max_offset`を超える場合に返すエラーのメッセージ
-/// - `fetch_page`: 指定したオフセットから1ページ分を取得するクロージャー
-///
-/// # Errors
-///
-/// 次のページのオフセットが`max_offset`を超え、残りのエントリーを取得できない場合は、
-/// 一部のエントリーだけを返さないように[`BoxClientError::UnexpectedResponse`]を返す。
-/// `fetch_page`がエラーを返した場合、この関数は取得済みのエントリーを破棄してそのエラーを返す。
-pub(crate) async fn collect_all_offset_pages<P, F>(
-    max_offset: u64,
-    exceeded: &'static str,
-    mut fetch_page: F,
-) -> BoxClientResult<(Vec<P::Entry>, u32)>
-where
-    P: OffsetPage,
-    F: AsyncFnMut(u64) -> BoxClientResult<P>,
-{
-    let mut entries = Vec::new();
-    let mut offset = 0;
-    let mut pages: u32 = 0;
-    loop {
-        let (page_entries, total_count) = fetch_page(offset).await?.into_parts();
-        pages += 1;
-        let count = page_entries.len() as u64;
-        entries.extend(page_entries);
-        // BOXが返す`offset`ではなく、要求した`offset`から次のページの位置を求める。
-        // BOXが`offset`を無視して同じページを返し続けても、位置を進めて必ずループを終える。
-        offset += count;
-
-        if count == 0 || total_count <= offset {
-            break;
-        }
-        if max_offset < offset {
-            return Err(BoxClientError::UnexpectedResponse(exceeded));
-        }
-    }
-
-    Ok((entries, pages))
-}
-
 /// オフセット方式のページ送りで、先頭から`max_entries`件までのエントリーを取得する。
 ///
-/// エンタープライズのグループのリストで使用する。[`collect_all_offset_pages`]と異なり、エントリーが`max_entries`件より多くても
-/// エラーにせず、先頭から`max_entries`件を返す。BOXがオフセットに上限を設けているAPIで、上限までの結果を返すために使用する。
+/// オフセット方式でページを送るすべてのAPIで共有する。BOXはオフセットに上限（[`MAX_OFFSET`]）を設けているため、
+/// 上限より後ろのエントリーを取得できない。そこで、エントリーが`max_entries`件より多くてもエラーにせず、
+/// 取得済みのエントリーを捨てずに先頭から`max_entries`件を返す。
 /// `fetch_page`には取得するページの最初のエントリーのオフセットを渡す。最初のページでは`0`を渡す。
 /// 取得したエントリーの数が`total_count`もしくは`max_entries`に達した場合、またはBOXが空のページを返した場合に終了する。
 /// 戻り値は、取得したエントリーと取得したページ数である。
@@ -306,7 +334,7 @@ where
         let (mut page_entries, total_count) = fetch_page(offset).await?.into_parts();
         pages += 1;
         // 最後のページの、上限を超えるエントリーを取り除く。
-        page_entries.truncate(usize::try_from(max_entries - offset).unwrap_or(usize::MAX));
+        truncate_to_max_entries(&mut page_entries, offset, max_entries);
         let count = page_entries.len() as u64;
         entries.extend(page_entries);
         // BOXが返す`offset`ではなく、要求した`offset`から次のページの位置を求める。

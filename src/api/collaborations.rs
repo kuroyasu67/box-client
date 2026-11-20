@@ -11,8 +11,8 @@ use crate::{
     FolderId, GroupId, TermsOfServiceId, UserId,
     api::groups::GroupMini,
     api::pagination::{
-        MAX_ITEMS_LIMIT, MarkerPage, OffsetPage, collect_all_offset_pages, collect_all_pages,
-        marker_page_request, validate_limit,
+        MAX_ITEMS_LIMIT, MAX_OFFSET, MarkerPage, OffsetPage, collect_all_pages,
+        collect_offset_pages_up_to, marker_page_request, offset_page_request, validate_offset,
     },
     request::ApiRequest,
     retry::{AttemptError, Idempotency, read_json},
@@ -787,36 +787,12 @@ impl ListFolderCollaborationsOptions {
     }
 }
 
-/// オフセット方式でコラボレーションをリストするAPIで指定できるオフセットの最大値を表す整数リテラルに展開する。
-///
-/// `concat!`は定数を受け付けないため、[`MAX_COLLABORATIONS_OFFSET`]とエラーのメッセージで、このマクロを共有する。
-/// これにより、最大値を変更したときに、メッセージの値も追随させる。
-macro_rules! max_collaborations_offset {
-    () => {
-        10_000
-    };
-}
-
 /// オフセット方式でコラボレーションをリストするAPIで指定できるオフセットの最大値
 ///
 /// グループのコラボレーションのリストおよび保留中のコラボレーションの招待のリストで共有する。
 /// BOXは、どちらのAPIでも、オフセットがこの値を超えるリクエストを400で拒否する。
-pub const MAX_COLLABORATIONS_OFFSET: u64 = max_collaborations_offset!();
-
-/// オフセットがBOXの受け付ける最大値以下であることを検証する。
-///
-/// # Errors
-///
-/// `offset`が[`MAX_COLLABORATIONS_OFFSET`]を超える場合は、[`BoxClientError::InvalidArgument`]を返す。
-fn validate_collaborations_offset(offset: u64) -> BoxClientResult<u64> {
-    if MAX_COLLABORATIONS_OFFSET < offset {
-        return Err(BoxClientError::InvalidArgument(concat!(
-            "offset must be less than or equal to ",
-            max_collaborations_offset!()
-        )));
-    }
-    Ok(offset)
-}
+/// そのため、すべてのページを取得するメソッドは、先頭からこの件数までのコラボレーションを返す。
+pub const MAX_COLLABORATIONS_OFFSET: u64 = MAX_OFFSET;
 
 /// グループのコラボレーションをリストするときのオプション
 ///
@@ -950,7 +926,7 @@ impl BoxClient {
     /// # Errors
     ///
     /// コラボレーションが存在しない場合、またはコラボレーションにアクセスする権限がない場合は、
-    /// [`BoxClientError::Api`](crate::BoxClientError::Api)を返す。
+    /// [`BoxClientError::Api`]を返す。
     /// 公式ドキュメントは、このAPIが返すエラーのステータスを個別に記載していない。
     ///
     /// 再試行できないエラーが発生した場合、または再試行回数の上限に達した場合はエラーを返す。
@@ -983,7 +959,7 @@ impl BoxClient {
     /// [`Collaborator::UserLogin`]のメールアドレスが空文字列もしくは空白だけの場合、
     /// またはファイルのコラボレーションで`options.can_view_path`を指定した場合は、
     /// リクエストを送信せずに[`BoxClientError::InvalidArgument`]を返す。
-    /// BOXがエラーレスポンスを返した場合は、[`BoxClientError::Api`](crate::BoxClientError::Api)を返す。
+    /// BOXがエラーレスポンスを返した場合は、[`BoxClientError::Api`]を返す。
     /// 例えば、情報バリアによってコラボレーションの作成を禁止している場合は、BOXはエラーコードが
     /// `forbidden_by_policy`の403を返す。
     ///
@@ -1043,7 +1019,7 @@ impl BoxClient {
     /// `update.role`が[`CollaborationRole::Unknown`]の場合、または`update.status`が[`CollaborationStatus::Unknown`]の場合は、
     /// リクエストを送信せずに[`BoxClientError::InvalidArgument`]を返す。
     /// コラボレーションを更新する権限がない場合、または有効期限を設定できない場合は、BOXが403を返すため、
-    /// [`BoxClientError::Api`](crate::BoxClientError::Api)を返す。
+    /// [`BoxClientError::Api`]を返す。
     ///
     /// 再試行できないエラーが発生した場合、または再試行回数の上限に達した場合はエラーを返す。
     /// 所有者の変更が5xxまたはタイムアウトでエラーを返した場合は、BOXが所有者を変更した可能性がある。
@@ -1090,7 +1066,7 @@ impl BoxClient {
     ///
     /// # Errors
     ///
-    /// BOXがエラーレスポンスを返した場合は、[`BoxClientError::Api`](crate::BoxClientError::Api)を返す。
+    /// BOXがエラーレスポンスを返した場合は、[`BoxClientError::Api`]を返す。
     /// 公式ドキュメントは、このAPIが返すエラーのステータスを個別に記載していない。
     ///
     /// 再試行できないエラーが発生した場合、または再試行回数の上限に達した場合はエラーを返す。
@@ -1132,9 +1108,9 @@ impl BoxClient {
     ///
     /// # Errors
     ///
-    /// `options.limit`が範囲外の場合は、リクエストを送信せずに[`BoxClientError::InvalidArgument`](crate::BoxClientError::InvalidArgument)を返す。
+    /// `options.limit`が範囲外の場合は、リクエストを送信せずに[`BoxClientError::InvalidArgument`]を返す。
     /// ファイルが存在しない場合、またはファイルにアクセスする権限がない場合は、
-    /// [`BoxClientError::Api`](crate::BoxClientError::Api)を返す。
+    /// [`BoxClientError::Api`]を返す。
     /// 公式ドキュメントは、このAPIが返すエラーのステータスを個別に記載していない。
     ///
     /// 再試行できないエラーが発生した場合、または再試行回数の上限に達した場合はエラーを返す。
@@ -1167,9 +1143,9 @@ impl BoxClient {
     ///
     /// # Errors
     ///
-    /// `options.limit`が範囲外の場合は、リクエストを送信せずに[`BoxClientError::InvalidArgument`](crate::BoxClientError::InvalidArgument)を返す。
+    /// `options.limit`が範囲外の場合は、リクエストを送信せずに[`BoxClientError::InvalidArgument`]を返す。
     /// BOXが以前に返したマーカーを再び返した場合、このメソッドは無限ループを避けるため
-    /// [`BoxClientError::UnexpectedResponse`](crate::BoxClientError::UnexpectedResponse)を返す。
+    /// [`BoxClientError::UnexpectedResponse`]を返す。
     /// いずれかのページの取得に失敗した場合は、取得済みのコラボレーションを破棄してエラーを返す。
     pub async fn list_all_file_collaborations(
         &self,
@@ -1214,9 +1190,9 @@ impl BoxClient {
     ///
     /// # Errors
     ///
-    /// `options.limit`が範囲外の場合は、リクエストを送信せずに[`BoxClientError::InvalidArgument`](crate::BoxClientError::InvalidArgument)を返す。
+    /// `options.limit`が範囲外の場合は、リクエストを送信せずに[`BoxClientError::InvalidArgument`]を返す。
     /// フォルダが存在しない場合、またはフォルダにアクセスする権限がない場合は、
-    /// [`BoxClientError::Api`](crate::BoxClientError::Api)を返す。
+    /// [`BoxClientError::Api`]を返す。
     /// 公式ドキュメントは、このAPIが返すエラーのステータスを個別に記載していない。
     ///
     /// 再試行できないエラーが発生した場合、または再試行回数の上限に達した場合はエラーを返す。
@@ -1249,9 +1225,9 @@ impl BoxClient {
     ///
     /// # Errors
     ///
-    /// `options.limit`が範囲外の場合は、リクエストを送信せずに[`BoxClientError::InvalidArgument`](crate::BoxClientError::InvalidArgument)を返す。
+    /// `options.limit`が範囲外の場合は、リクエストを送信せずに[`BoxClientError::InvalidArgument`]を返す。
     /// BOXが以前に返したマーカーを再び返した場合、このメソッドは無限ループを避けるため
-    /// [`BoxClientError::UnexpectedResponse`](crate::BoxClientError::UnexpectedResponse)を返す。
+    /// [`BoxClientError::UnexpectedResponse`]を返す。
     /// いずれかのページの取得に失敗した場合は、取得済みのコラボレーションを破棄してエラーを返す。
     pub async fn list_all_folder_collaborations(
         &self,
@@ -1296,9 +1272,9 @@ impl BoxClient {
     /// # Errors
     ///
     /// `offset`が[`MAX_COLLABORATIONS_OFFSET`]を超える場合、または`options.limit`が範囲外の場合は、
-    /// リクエストを送信せずに[`BoxClientError::InvalidArgument`](crate::BoxClientError::InvalidArgument)を返す。
+    /// リクエストを送信せずに[`BoxClientError::InvalidArgument`]を返す。
     /// グループが存在しない場合、またはグループを調べる権限がない場合は、
-    /// [`BoxClientError::Api`](crate::BoxClientError::Api)を返す。
+    /// [`BoxClientError::Api`]を返す。
     /// 公式ドキュメントは、このAPIが返すエラーのステータスを個別に記載していない。
     ///
     /// 再試行できないエラーが発生した場合、または再試行回数の上限に達した場合はエラーを返す。
@@ -1308,13 +1284,11 @@ impl BoxClient {
         offset: u64,
         options: &ListGroupCollaborationsOptions,
     ) -> BoxClientResult<CollaborationsOffsetPage> {
-        let mut request = ApiRequest::get(["groups", group_id.as_ref(), "collaborations"]).query(
-            "offset",
-            validate_collaborations_offset(offset)?.to_string(),
-        );
-        if let Some(limit) = options.limit {
-            request = request.query("limit", validate_limit(limit)?.to_string());
-        }
+        let request = offset_page_request(
+            ["groups", group_id.as_ref(), "collaborations"],
+            validate_offset(offset)?,
+            options.limit,
+        )?;
 
         self.send_json(request).await
     }
@@ -1323,7 +1297,11 @@ impl BoxClient {
     ///
     /// `options.limit`が`None`の場合は、リクエスト数を減らすために1ページあたり
     /// [`MAX_ITEMS_LIMIT`]件を取得する。
-    /// 取得したコラボレーションの数が`total_count`に達した場合、またはBOXが空のページを返した場合に終了する。
+    /// 取得したコラボレーションの数が`total_count`もしくは[`MAX_COLLABORATIONS_OFFSET`]に達した場合、
+    /// またはBOXが空のページを返した場合に終了する。
+    ///
+    /// BOXはオフセットが[`MAX_COLLABORATIONS_OFFSET`]を超えるリクエストを拒否し、それより後ろのコラボレーションを取得できない。
+    /// そのため、コラボレーションがそれより多くても、エラーにはせず、先頭から[`MAX_COLLABORATIONS_OFFSET`]件を返す。
     ///
     /// # Arguments
     ///
@@ -1332,9 +1310,7 @@ impl BoxClient {
     ///
     /// # Errors
     ///
-    /// `options.limit`が範囲外の場合は、リクエストを送信せずに[`BoxClientError::InvalidArgument`](crate::BoxClientError::InvalidArgument)を返す。
-    /// 次のページのオフセットが[`MAX_COLLABORATIONS_OFFSET`]を超え、残りのコラボレーションを取得できない場合は、
-    /// 一部のコラボレーションだけを返さないように[`BoxClientError::UnexpectedResponse`](crate::BoxClientError::UnexpectedResponse)を返す。
+    /// `options.limit`が範囲外の場合は、リクエストを送信せずに[`BoxClientError::InvalidArgument`]を返す。
     /// いずれかのページの取得に失敗した場合は、取得済みのコラボレーションを破棄してエラーを返す。
     pub async fn list_all_group_collaborations(
         &self,
@@ -1344,15 +1320,12 @@ impl BoxClient {
         let options = ListGroupCollaborationsOptions {
             limit: Some(options.limit.unwrap_or(MAX_ITEMS_LIMIT)),
         };
-        let (collaborations, pages) = collect_all_offset_pages(
-            MAX_COLLABORATIONS_OFFSET,
-            "group collaborations cannot be listed beyond the maximum offset",
-            async |offset| {
+        let (collaborations, pages) =
+            collect_offset_pages_up_to(MAX_COLLABORATIONS_OFFSET, async |offset| {
                 self.list_group_collaborations(group_id, offset, &options)
                     .await
-            },
-        )
-        .await?;
+            })
+            .await?;
 
         tracing::debug!(
             group_id = group_id.as_ref(),
@@ -1382,8 +1355,8 @@ impl BoxClient {
     /// # Errors
     ///
     /// `offset`が[`MAX_COLLABORATIONS_OFFSET`]を超える場合、または`options.limit`が範囲外の場合は、
-    /// リクエストを送信せずに[`BoxClientError::InvalidArgument`](crate::BoxClientError::InvalidArgument)を返す。
-    /// BOXがエラーレスポンスを返した場合は、[`BoxClientError::Api`](crate::BoxClientError::Api)を返す。
+    /// リクエストを送信せずに[`BoxClientError::InvalidArgument`]を返す。
+    /// BOXがエラーレスポンスを返した場合は、[`BoxClientError::Api`]を返す。
     /// 公式ドキュメントは、このAPIが返すエラーのステータスを個別に記載していない。
     ///
     /// 再試行できないエラーが発生した場合、または再試行回数の上限に達した場合はエラーを返す。
@@ -1393,15 +1366,9 @@ impl BoxClient {
         options: &ListPendingCollaborationsOptions,
     ) -> BoxClientResult<CollaborationsOffsetPage> {
         // BOXは`status`を必須とし、`pending`だけを受け付ける。
-        let mut request = ApiRequest::get(["collaborations"])
-            .query("status", "pending")
-            .query(
-                "offset",
-                validate_collaborations_offset(offset)?.to_string(),
-            );
-        if let Some(limit) = options.limit {
-            request = request.query("limit", validate_limit(limit)?.to_string());
-        }
+        let request =
+            offset_page_request(["collaborations"], validate_offset(offset)?, options.limit)?
+                .query("status", "pending");
 
         self.send_json(request).await
     }
@@ -1410,7 +1377,11 @@ impl BoxClient {
     ///
     /// `options.limit`が`None`の場合は、リクエスト数を減らすために1ページあたり
     /// [`MAX_ITEMS_LIMIT`]件を取得する。
-    /// 取得したコラボレーションの数が`total_count`に達した場合、またはBOXが空のページを返した場合に終了する。
+    /// 取得したコラボレーションの数が`total_count`もしくは[`MAX_COLLABORATIONS_OFFSET`]に達した場合、
+    /// またはBOXが空のページを返した場合に終了する。
+    ///
+    /// BOXはオフセットが[`MAX_COLLABORATIONS_OFFSET`]を超えるリクエストを拒否し、それより後ろの招待を取得できない。
+    /// そのため、招待がそれより多くても、エラーにはせず、先頭から[`MAX_COLLABORATIONS_OFFSET`]件を返す。
     ///
     /// # Arguments
     ///
@@ -1418,9 +1389,7 @@ impl BoxClient {
     ///
     /// # Errors
     ///
-    /// `options.limit`が範囲外の場合は、リクエストを送信せずに[`BoxClientError::InvalidArgument`](crate::BoxClientError::InvalidArgument)を返す。
-    /// 次のページのオフセットが[`MAX_COLLABORATIONS_OFFSET`]を超え、残りの招待を取得できない場合は、
-    /// 一部の招待だけを返さないように[`BoxClientError::UnexpectedResponse`](crate::BoxClientError::UnexpectedResponse)を返す。
+    /// `options.limit`が範囲外の場合は、リクエストを送信せずに[`BoxClientError::InvalidArgument`]を返す。
     /// いずれかのページの取得に失敗した場合は、取得済みの招待を破棄してエラーを返す。
     pub async fn list_all_pending_collaborations(
         &self,
@@ -1429,12 +1398,11 @@ impl BoxClient {
         let options = ListPendingCollaborationsOptions {
             limit: Some(options.limit.unwrap_or(MAX_ITEMS_LIMIT)),
         };
-        let (collaborations, pages) = collect_all_offset_pages(
-            MAX_COLLABORATIONS_OFFSET,
-            "pending collaborations cannot be listed beyond the maximum offset",
-            async |offset| self.list_pending_collaborations(offset, &options).await,
-        )
-        .await?;
+        let (collaborations, pages) =
+            collect_offset_pages_up_to(MAX_COLLABORATIONS_OFFSET, async |offset| {
+                self.list_pending_collaborations(offset, &options).await
+            })
+            .await?;
 
         tracing::debug!(
             pages,
@@ -1443,6 +1411,55 @@ impl BoxClient {
         );
 
         Ok(collaborations)
+    }
+}
+
+#[cfg(test)]
+mod test_collaboration_enums {
+    use rstest::rstest;
+    use serde_json::json;
+
+    use super::*;
+
+    /// リクエストに送信する文字列が、レスポンスからデシリアライズする文字列と一致することを確認
+    ///
+    /// 文字列を`#[serde(rename)]`と`as_str`の2か所で定義しているため、片方だけを変更した場合に検出する。
+    #[rstest]
+    #[case::editor(CollaborationRole::Editor)]
+    #[case::viewer(CollaborationRole::Viewer)]
+    #[case::previewer(CollaborationRole::Previewer)]
+    #[case::uploader(CollaborationRole::Uploader)]
+    #[case::previewer_uploader(CollaborationRole::PreviewerUploader)]
+    #[case::viewer_uploader(CollaborationRole::ViewerUploader)]
+    #[case::co_owner(CollaborationRole::CoOwner)]
+    #[case::owner(CollaborationRole::Owner)]
+    fn test_role_as_str_round_trips(#[case] role: CollaborationRole) -> anyhow::Result<()> {
+        let value = role
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("no string for {role:?}"))?;
+
+        let deserialized: CollaborationRole = serde_json::from_value(json!(value))?;
+
+        assert_eq!(deserialized, role);
+
+        Ok(())
+    }
+
+    /// リクエストに送信する文字列が、レスポンスからデシリアライズする文字列と一致することを確認
+    #[rstest]
+    #[case::accepted(CollaborationStatus::Accepted)]
+    #[case::pending(CollaborationStatus::Pending)]
+    #[case::rejected(CollaborationStatus::Rejected)]
+    fn test_status_as_str_round_trips(#[case] status: CollaborationStatus) -> anyhow::Result<()> {
+        let value = status
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("no string for {status:?}"))?;
+
+        let deserialized: CollaborationStatus = serde_json::from_value(json!(value))?;
+
+        assert_eq!(deserialized, status);
+
+        Ok(())
     }
 }
 
@@ -2685,8 +2702,8 @@ mod test_list_group_collaborations {
 
     use super::*;
     use crate::test_support::{
-        count_requests_to_path, create_client, mount_token, not_found_response, request_count,
-        short_retry,
+        count_requests_to_path, create_client, mount_token, not_found_response,
+        offset_page_response, request_count, short_retry,
     };
 
     /// グループのコラボレーションのAPIのパス
@@ -2705,23 +2722,7 @@ mod test_list_group_collaborations {
 
     /// `offset`から`limit`件のコラボレーションを、全体が`total`件として返すレスポンスを作成する。
     fn page_response(request: &Request, total: u64) -> ResponseTemplate {
-        let param = |name: &str| {
-            request
-                .url
-                .query_pairs()
-                .find(|(key, _)| key == name)
-                .and_then(|(_, value)| value.parse::<u64>().ok())
-        };
-        let offset = param("offset").unwrap_or(0);
-        let limit = param("limit").unwrap_or(1000);
-        let end = total.min(offset + limit);
-        let entries: Vec<_> = (offset..end).map(collaboration_json).collect();
-        ResponseTemplate::new(200).set_body_json(json!({
-            "total_count": total,
-            "limit": limit,
-            "offset": offset,
-            "entries": entries,
-        }))
+        offset_page_response(request, total, collaboration_json)
     }
 
     /// `offset`と`limit`をクエリパラメーターで送信し、コラボレーションの1ページをデシリアライズすることを確認
@@ -2889,29 +2890,27 @@ mod test_list_group_collaborations {
         Ok(())
     }
 
-    /// 次のページのオフセットが最大値を超える場合は、一部のコラボレーションだけを返さずにエラーを返すことを確認
+    /// コラボレーションが上限より多い場合は、エラーにせず、先頭から上限の件数までを返すことを確認
     #[tokio::test]
-    async fn test_list_all_group_collaborations_exceeds_max_offset() -> anyhow::Result<()> {
+    async fn test_list_all_group_collaborations_stops_at_max() -> anyhow::Result<()> {
         let server = MockServer::start().await;
         mount_token(&server).await;
         Mock::given(method("GET"))
             .and(path(COLLABORATIONS_PATH))
             .respond_with(|request: &Request| page_response(request, 20_000))
+            .expect(10)
             .mount(&server)
             .await;
         let client = create_client(&server, short_retry(0)).await?;
 
-        let result = client
+        let collaborations = client
             .list_all_group_collaborations(
                 &GroupId::new("789"),
                 &ListGroupCollaborationsOptions::default(),
             )
-            .await;
+            .await?;
 
-        assert!(
-            matches!(result, Err(BoxClientError::UnexpectedResponse(_))),
-            "result: {result:?}"
-        );
+        assert_eq!(collaborations.len() as u64, MAX_COLLABORATIONS_OFFSET);
 
         Ok(())
     }
@@ -2928,8 +2927,8 @@ mod test_list_pending_collaborations {
 
     use super::*;
     use crate::test_support::{
-        count_requests_to_path, create_client, mount_token, request_count, request_queries,
-        short_retry,
+        count_requests_to_path, create_client, mount_token, offset_page_response, request_count,
+        request_queries, short_retry,
     };
 
     /// コラボレーションのAPIのパス
@@ -2949,23 +2948,7 @@ mod test_list_pending_collaborations {
 
     /// `offset`から`limit`件の招待を、全体が`total`件として返すレスポンスを作成する。
     fn page_response(request: &Request, total: u64) -> ResponseTemplate {
-        let param = |name: &str| {
-            request
-                .url
-                .query_pairs()
-                .find(|(key, _)| key == name)
-                .and_then(|(_, value)| value.parse::<u64>().ok())
-        };
-        let offset = param("offset").unwrap_or(0);
-        let limit = param("limit").unwrap_or(1000);
-        let end = total.min(offset + limit);
-        let entries: Vec<_> = (offset..end).map(pending_json).collect();
-        ResponseTemplate::new(200).set_body_json(json!({
-            "total_count": total,
-            "limit": limit,
-            "offset": offset,
-            "entries": entries,
-        }))
+        offset_page_response(request, total, pending_json)
     }
 
     /// `status=pending`、`offset`および`limit`をクエリパラメーターで送信し、招待の1ページをデシリアライズすることを確認
@@ -2973,12 +2956,12 @@ mod test_list_pending_collaborations {
     #[case::default(
         0,
         ListPendingCollaborationsOptions::default(),
-        "status=pending&offset=0"
+        "offset=0&status=pending"
     )]
     #[case::with_limit(
         2,
         ListPendingCollaborationsOptions::default().with_limit(2),
-        "status=pending&offset=2&limit=2"
+        "offset=2&limit=2&status=pending"
     )]
     #[tokio::test]
     async fn test_list_pending_collaborations(
@@ -3079,26 +3062,24 @@ mod test_list_pending_collaborations {
         Ok(())
     }
 
-    /// 次のページのオフセットが最大値を超える場合は、一部の招待だけを返さずにエラーを返すことを確認
+    /// 招待が上限より多い場合は、エラーにせず、先頭から上限の件数までを返すことを確認
     #[tokio::test]
-    async fn test_list_all_pending_collaborations_exceeds_max_offset() -> anyhow::Result<()> {
+    async fn test_list_all_pending_collaborations_stops_at_max() -> anyhow::Result<()> {
         let server = MockServer::start().await;
         mount_token(&server).await;
         Mock::given(method("GET"))
             .and(path(COLLABORATIONS_PATH))
             .respond_with(|request: &Request| page_response(request, 20_000))
+            .expect(10)
             .mount(&server)
             .await;
         let client = create_client(&server, short_retry(0)).await?;
 
-        let result = client
+        let collaborations = client
             .list_all_pending_collaborations(&ListPendingCollaborationsOptions::default())
-            .await;
+            .await?;
 
-        assert!(
-            matches!(result, Err(BoxClientError::UnexpectedResponse(_))),
-            "result: {result:?}"
-        );
+        assert_eq!(collaborations.len() as u64, MAX_COLLABORATIONS_OFFSET);
 
         Ok(())
     }

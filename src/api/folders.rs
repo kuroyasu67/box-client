@@ -619,17 +619,32 @@ impl<'a> UpdateFolderBody<'a> {
     }
 
     /// 移動先以外の属性を1つ以上含むかどうかを返す。
+    ///
+    /// 属性を追加したときにここでの判定が漏れないように、構造体を分解し、すべてのフィールドを列挙する。
     fn has_attributes(&self) -> bool {
-        self.name.is_some()
-            || self.description.is_some()
-            || self.shared_link.is_some()
-            || self.folder_upload_email.is_some()
-            || self.sync_state.is_some()
-            || self.tags.is_some()
-            || self.collections.is_some()
-            || self.can_non_owners_invite.is_some()
-            || self.can_non_owners_view_collaborators.is_some()
-            || self.is_collaboration_restricted_to_enterprise.is_some()
+        let Self {
+            name,
+            description,
+            parent: _,
+            shared_link,
+            folder_upload_email,
+            sync_state,
+            tags,
+            collections,
+            can_non_owners_invite,
+            can_non_owners_view_collaborators,
+            is_collaboration_restricted_to_enterprise,
+        } = self;
+        name.is_some()
+            || description.is_some()
+            || shared_link.is_some()
+            || folder_upload_email.is_some()
+            || sync_state.is_some()
+            || tags.is_some()
+            || collections.is_some()
+            || can_non_owners_invite.is_some()
+            || can_non_owners_view_collaborators.is_some()
+            || is_collaboration_restricted_to_enterprise.is_some()
     }
 }
 

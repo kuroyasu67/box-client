@@ -6,9 +6,11 @@ use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
 use crate::{
-    BoxClient, BoxClientError, BoxClientResult, DeleteItemOptions, FileId, FileVersionId,
-    Idempotency, UserMini,
-    api::pagination::{MAX_ITEMS_LIMIT, OffsetPage, collect_all_offset_pages, validate_limit},
+    BoxClient, BoxClientResult, DeleteItemOptions, FileId, FileVersionId, Idempotency, UserMini,
+    api::pagination::{
+        MAX_ITEMS_LIMIT, MAX_OFFSET, OffsetPage, collect_offset_pages_up_to, offset_page_request,
+        validate_offset,
+    },
     request::ApiRequest,
 };
 
@@ -73,20 +75,11 @@ pub struct FileVersion {
     pub uploader_display_name: Option<String>,
 }
 
-/// ファイルのバージョンのリストで指定できるオフセットの最大値を表す整数リテラルに展開する。
-///
-/// `concat!`は定数を受け付けないため、[`MAX_FILE_VERSIONS_OFFSET`]とエラーのメッセージで、このマクロを共有する。
-/// これにより、最大値を変更したときに、メッセージの値も追随させる。
-macro_rules! max_file_versions_offset {
-    () => {
-        10_000
-    };
-}
-
 /// ファイルのバージョンのリストで指定できるオフセットの最大値
 ///
 /// BOXは、オフセットがこの値を超えるリクエストを400で拒否する。
-pub const MAX_FILE_VERSIONS_OFFSET: u64 = max_file_versions_offset!();
+/// そのため、[`BoxClient::list_all_file_versions`]は、先頭からこの件数までのバージョンを返す。
+pub const MAX_FILE_VERSIONS_OFFSET: u64 = MAX_OFFSET;
 
 /// ファイルのバージョンのリストのオプション
 ///
@@ -186,7 +179,7 @@ impl BoxClient {
     /// # Errors
     ///
     /// ファイルまたはバージョンが存在しない場合、またはファイルにアクセスする権限がない場合は、
-    /// [`BoxClientError::Api`]を返す。
+    /// [`BoxClientError::Api`](crate::BoxClientError::Api)を返す。
     /// 再試行できないエラーが発生した場合、または再試行回数の上限に達した場合はエラーを返す。
     pub async fn file_version(
         &self,
@@ -221,9 +214,9 @@ impl BoxClient {
     /// # Errors
     ///
     /// `offset`が[`MAX_FILE_VERSIONS_OFFSET`]を超える場合、または`options.limit`が範囲外の場合は、
-    /// リクエストを送信せずに[`BoxClientError::InvalidArgument`]を返す。
+    /// リクエストを送信せずに[`BoxClientError::InvalidArgument`](crate::BoxClientError::InvalidArgument)を返す。
     /// ファイルが存在しない場合、またはファイルにアクセスする権限がない場合は、
-    /// [`BoxClientError::Api`]を返す。
+    /// [`BoxClientError::Api`](crate::BoxClientError::Api)を返す。
     /// 再試行できないエラーが発生した場合、または再試行回数の上限に達した場合はエラーを返す。
     pub async fn list_file_versions(
         &self,
@@ -231,18 +224,11 @@ impl BoxClient {
         offset: u64,
         options: &ListFileVersionsOptions,
     ) -> BoxClientResult<FileVersionsPage> {
-        if MAX_FILE_VERSIONS_OFFSET < offset {
-            return Err(BoxClientError::InvalidArgument(concat!(
-                "offset must be less than or equal to ",
-                max_file_versions_offset!()
-            )));
-        }
-
-        let mut request = ApiRequest::get(["files", file_id.as_ref(), "versions"])
-            .query("offset", offset.to_string());
-        if let Some(limit) = options.limit {
-            request = request.query("limit", validate_limit(limit)?.to_string());
-        }
+        let request = offset_page_request(
+            ["files", file_id.as_ref(), "versions"],
+            validate_offset(offset)?,
+            options.limit,
+        )?;
 
         self.send_json(request).await
     }
@@ -251,7 +237,11 @@ impl BoxClient {
     ///
     /// `options.limit`が`None`の場合は、リクエスト数を減らすために1ページあたり
     /// [`MAX_ITEMS_LIMIT`]件を取得する。
-    /// 取得したバージョンの数が`total_count`に達した場合、またはBOXが空のページを返した場合に終了する。
+    /// 取得したバージョンの数が`total_count`もしくは[`MAX_FILE_VERSIONS_OFFSET`]に達した場合、
+    /// またはBOXが空のページを返した場合に終了する。
+    ///
+    /// BOXはオフセットが[`MAX_FILE_VERSIONS_OFFSET`]を超えるリクエストを拒否し、それより後ろのバージョンを取得できない。
+    /// そのため、バージョンがそれより多くても、エラーにはせず、先頭から[`MAX_FILE_VERSIONS_OFFSET`]件を返す。
     ///
     /// # Arguments
     ///
@@ -260,9 +250,7 @@ impl BoxClient {
     ///
     /// # Errors
     ///
-    /// `options.limit`が範囲外の場合は、リクエストを送信せずに[`BoxClientError::InvalidArgument`]を返す。
-    /// 次のページのオフセットが[`MAX_FILE_VERSIONS_OFFSET`]を超え、残りのバージョンを取得できない場合は、
-    /// 一部のバージョンだけを返さないように[`BoxClientError::UnexpectedResponse`]を返す。
+    /// `options.limit`が範囲外の場合は、リクエストを送信せずに[`BoxClientError::InvalidArgument`](crate::BoxClientError::InvalidArgument)を返す。
     /// いずれかのページの取得に失敗した場合は、取得済みのバージョンを破棄してエラーを返す。
     pub async fn list_all_file_versions(
         &self,
@@ -272,12 +260,11 @@ impl BoxClient {
         let options = ListFileVersionsOptions {
             limit: Some(options.limit.unwrap_or(MAX_ITEMS_LIMIT)),
         };
-        let (versions, pages) = collect_all_offset_pages(
-            MAX_FILE_VERSIONS_OFFSET,
-            "file versions cannot be listed beyond the maximum offset",
-            async |offset| self.list_file_versions(file_id, offset, &options).await,
-        )
-        .await?;
+        let (versions, pages) =
+            collect_offset_pages_up_to(MAX_FILE_VERSIONS_OFFSET, async |offset| {
+                self.list_file_versions(file_id, offset, &options).await
+            })
+            .await?;
 
         tracing::debug!(
             file_id = file_id.as_ref(),
@@ -311,7 +298,7 @@ impl BoxClient {
     /// # Errors
     ///
     /// ファイルまたはバージョンが存在しない場合、またはファイルを操作する権限がない場合は、
-    /// [`BoxClientError::Api`]を返す。
+    /// [`BoxClientError::Api`](crate::BoxClientError::Api)を返す。
     /// 再試行できないエラーが発生した場合、または再試行回数の上限に達した場合はエラーを返す。
     /// 5xxまたはタイムアウトでエラーを返した場合は、BOXがバージョンを昇格した可能性がある。
     /// したがって、[`BoxClient::file_information`]でファイルの現在のバージョンを確認する。
@@ -360,7 +347,7 @@ impl BoxClient {
     /// # Errors
     ///
     /// ファイルまたはバージョンが存在しない場合、またはファイルを操作する権限がない場合は、
-    /// [`BoxClientError::Api`]を返す。
+    /// [`BoxClientError::Api`](crate::BoxClientError::Api)を返す。
     /// 再試行できないエラーが発生した場合、または再試行回数の上限に達した場合はエラーを返す。
     pub async fn restore_file_version(
         &self,
@@ -408,8 +395,8 @@ impl BoxClient {
     /// # Errors
     ///
     /// `options.etag`に使用できない文字が含まれる場合は、リクエストを送信せずに
-    /// [`BoxClientError::InvalidHeaderValue`]を返す。
-    /// BOXがエラーレスポンスを返した場合は、[`BoxClientError::Api`]を返す。主なステータスは次のとおり。
+    /// [`BoxClientError::InvalidHeaderValue`](crate::BoxClientError::InvalidHeaderValue)を返す。
+    /// BOXがエラーレスポンスを返した場合は、[`BoxClientError::Api`](crate::BoxClientError::Api)を返す。主なステータスは次のとおり。
     ///
     /// - 404: ファイルまたはバージョンが存在しない、またはファイルにアクセスする権限がない。
     /// - 412: `options.etag`がファイルの現在の`ETag`と一致しない。
@@ -454,6 +441,7 @@ mod test_file_version {
     };
 
     use super::*;
+    use crate::BoxClientError;
     use crate::{
         UserId, UserMini,
         test_support::{create_client, mount_token, not_found_response, short_retry},
@@ -556,8 +544,10 @@ mod test_list_file_versions {
     };
 
     use super::*;
+    use crate::BoxClientError;
     use crate::test_support::{
-        count_requests_to_path, create_client, mount_token, request_count, short_retry,
+        count_requests_to_path, create_client, mount_token, offset_page_response, request_count,
+        short_retry,
     };
 
     /// ファイルのバージョンのAPIのパス
@@ -570,24 +560,7 @@ mod test_list_file_versions {
 
     /// `offset`から`limit`件のバージョンを、全体が`total`件として返すレスポンスを作成する。
     fn page_response(request: &Request, total: u64) -> ResponseTemplate {
-        let param = |name: &str| {
-            request
-                .url
-                .query_pairs()
-                .find(|(key, _)| key == name)
-                .and_then(|(_, value)| value.parse::<u64>().ok())
-        };
-        let offset = param("offset").unwrap_or(0);
-        let limit = param("limit").unwrap_or(1000);
-        let end = total.min(offset + limit);
-        let entries: Vec<_> = (offset..end).map(version_json).collect();
-        ResponseTemplate::new(200).set_body_json(json!({
-            "total_count": total,
-            "limit": limit,
-            "offset": offset,
-            "order": [{"by": "created_at", "direction": "DESC"}],
-            "entries": entries,
-        }))
+        offset_page_response(request, total, version_json)
     }
 
     /// `offset`と`limit`をクエリパラメーターで送信し、バージョンの1ページをデシリアライズすることを確認
@@ -722,25 +695,38 @@ mod test_list_file_versions {
         Ok(())
     }
 
-    /// 次のページのオフセットが最大値を超える場合は、一部のバージョンだけを返さずにエラーを返すことを確認
+    /// バージョンが上限より多い場合は、エラーにせず、先頭から上限の件数までを返すことを確認
+    ///
+    /// 上限が`limit`の倍数でない場合は、最後のページの、上限を超えるバージョンを取り除くことも確認する。
+    #[rstest]
+    #[case::limit_divides_max(1000, 10)]
+    #[case::limit_does_not_divide_max(300, 34)]
     #[tokio::test]
-    async fn test_list_all_file_versions_exceeds_max_offset() -> anyhow::Result<()> {
+    async fn test_list_all_file_versions_stops_at_max(
+        #[case] limit: u32,
+        #[case] expected_requests: u64,
+    ) -> anyhow::Result<()> {
         let server = MockServer::start().await;
         mount_token(&server).await;
         Mock::given(method("GET"))
             .and(path(VERSIONS_PATH))
             .respond_with(|request: &Request| page_response(request, 20_000))
+            .expect(expected_requests)
             .mount(&server)
             .await;
         let client = create_client(&server, short_retry(0)).await?;
 
-        let result = client
-            .list_all_file_versions(&FileId::new("12345"), &ListFileVersionsOptions::default())
-            .await;
+        let versions = client
+            .list_all_file_versions(
+                &FileId::new("12345"),
+                &ListFileVersionsOptions::default().with_limit(limit),
+            )
+            .await?;
 
-        assert!(
-            matches!(result, Err(BoxClientError::UnexpectedResponse(_))),
-            "result: {result:?}"
+        assert_eq!(versions.len() as u64, MAX_FILE_VERSIONS_OFFSET);
+        assert_eq!(
+            versions.last().map(|v| v.id.as_ref()),
+            Some((MAX_FILE_VERSIONS_OFFSET - 1).to_string().as_str())
         );
 
         Ok(())
@@ -827,6 +813,7 @@ mod test_restore_file_version {
     };
 
     use super::*;
+    use crate::BoxClientError;
     use crate::test_support::{create_client, mount_token, short_retry};
 
     /// ファイルのバージョンのAPIのパス

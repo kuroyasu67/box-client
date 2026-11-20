@@ -98,8 +98,17 @@ impl TempFile {
     /// 保存先にファイルが存在する場合は、そのファイルを置き換える。
     /// ただし、Windowsでは、保存先のファイルが読み取り専用の場合、または他のプロセスが削除を許可せずに開いている場合に、
     /// 置き換えに失敗する。
-    pub(crate) async fn persist(mut self, path: &Path) -> std::io::Result<()> {
-        tokio::fs::rename(&self.path, path).await?;
+    ///
+    /// # Errors
+    ///
+    /// 一時ファイルを保存先に移動できない場合は、[`BoxClientError::WriteFile`]を返す。
+    pub(crate) async fn persist(mut self, path: &Path) -> BoxClientResult<()> {
+        tokio::fs::rename(&self.path, path)
+            .await
+            .map_err(|source| BoxClientError::WriteFile {
+                path: path.to_owned(),
+                source,
+            })?;
         self.persisted = true;
         Ok(())
     }
@@ -238,13 +247,7 @@ impl BoxClient {
             )
             .await?;
 
-        temp_file
-            .persist(path)
-            .await
-            .map_err(|source| BoxClientError::WriteFile {
-                path: path.to_owned(),
-                source,
-            })?;
+        temp_file.persist(path).await?;
         tracing::debug!(file_id = file_id.as_ref(), size, "downloaded file");
 
         Ok(size)

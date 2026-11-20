@@ -3,7 +3,7 @@ categories  = ["api-bindings", "web-programming::http-client"]
 description = "BOXのREST APIを、JWT認証のサービスアカウントとして呼び出すクライアント"
 edition     = "2024"
 # 開発ツールの設定ファイルは、クレートの利用者に不要なため、パッケージに含めない
-exclude      = ["deny.toml", "prek.toml", "taplo.toml"]
+exclude      = [".markdownlint-cli2.jsonc", "deny.toml", "prek.toml", "taplo.toml"]
 keywords     = ["box", "api", "client", "jwt", "cloud-storage"]
 license      = "MIT OR Apache-2.0"
 name         = "box-client"

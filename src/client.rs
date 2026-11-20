@@ -919,8 +919,9 @@ pub(crate) fn has_secure_scheme(url: &Url) -> bool {
 /// # Errors
 ///
 /// URLを解釈できない場合は、[`BoxClientError::InvalidBaseUrl`]を返す。
+/// [`BoxClientError`]はメッセージに原因を含めない方針のため、解釈できなかったURLだけを返す。
 fn default_url(url: &'static str) -> BoxClientResult<Url> {
-    Url::parse(url).map_err(|e| BoxClientError::InvalidBaseUrl(format!("{url}: {e}")))
+    Url::parse(url).map_err(|_| BoxClientError::InvalidBaseUrl(url.to_owned()))
 }
 
 /// エラーに含めるために、認証情報を含みうる部分を取り除いたURLを返す。

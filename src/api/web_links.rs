@@ -964,8 +964,8 @@ mod test_update_web_link {
     use crate::{
         UserId,
         test_support::{
-            assert_not_retried, create_client, if_match_headers, mount_token, request_count,
-            short_retry,
+            assert_not_retried, create_client, if_match_headers, is_invalid_argument,
+            is_invalid_request_body, mount_token, request_count, short_retry,
         },
     };
 
@@ -1071,15 +1071,22 @@ mod test_update_web_link {
 
     /// BOXが拒否する値を指定した場合は、リクエストを送信せずにエラーを返すことを確認
     #[rstest]
-    #[case::empty_name(Update::Rename(""))]
-    #[case::invalid_name(Update::Rename("a/b"))]
-    #[case::too_long_description(Update::Description("あ".repeat(MAX_DESCRIPTION_CHARS + 1)))]
-    #[case::empty_user_id(Update::Move(MoveDestination::User(UserId::new(""))))]
-    #[case::invalid_url(Update::Url("ftp://example.com"))]
-    #[case::unparsable_url(Update::Url("https://exa mple.com"))]
+    #[case::empty_name(Update::Rename(""), is_invalid_request_body)]
+    #[case::invalid_name(Update::Rename("a/b"), is_invalid_request_body)]
+    #[case::too_long_description(
+        Update::Description("あ".repeat(MAX_DESCRIPTION_CHARS + 1)),
+        is_invalid_request_body
+    )]
+    #[case::empty_user_id(
+        Update::Move(MoveDestination::User(UserId::new(""))),
+        is_invalid_argument
+    )]
+    #[case::invalid_url(Update::Url("ftp://example.com"), is_invalid_request_body)]
+    #[case::unparsable_url(Update::Url("https://exa mple.com"), is_invalid_request_body)]
     #[tokio::test]
     async fn test_update_web_link_rejects_without_request(
         #[case] update: Update,
+        #[case] is_expected_error: fn(&BoxClientError) -> bool,
     ) -> anyhow::Result<()> {
         let server = MockServer::start().await;
         mount_token(&server).await;
@@ -1089,10 +1096,7 @@ mod test_update_web_link {
         let result = update.call(&client, &UpdateItemOptions::default()).await;
 
         assert!(
-            matches!(
-                result,
-                Err(BoxClientError::InvalidRequestBody(_) | BoxClientError::InvalidArgument(_))
-            ),
+            result.as_ref().is_err_and(is_expected_error),
             "result: {result:?}"
         );
         assert_eq!(request_count(&server).await, requests_before);

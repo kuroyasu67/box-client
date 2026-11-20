@@ -25,11 +25,21 @@ use crate::{
     request::ApiRequest,
 };
 
+/// 1つのZIPダウンロードに指定できる項目の最大数を表す整数リテラルに展開する。
+///
+/// `concat!`は定数を受け付けないため、[`MAX_ZIP_DOWNLOAD_ITEMS`]とエラーのメッセージで、このマクロを共有する。
+/// これにより、最大数を変更したときに、メッセージの値も追随させる。
+macro_rules! max_zip_download_items {
+    () => {
+        10_000
+    };
+}
+
 /// 1つのZIPダウンロードに指定できる項目の最大数
 ///
 /// BOXは、1つのZIPファイルに含めるファイルを10,000個以下に制限する。
 /// フォルダを指定した場合は、フォルダ内のファイルも数えるため、項目数がこの値以下でも、BOXが400を返す場合がある。
-pub const MAX_ZIP_DOWNLOAD_ITEMS: usize = 10_000;
+pub const MAX_ZIP_DOWNLOAD_ITEMS: usize = max_zip_download_items!();
 
 /// ZIPファイルに含めるファイルまたはフォルダ
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -269,9 +279,10 @@ impl<'a> CreateZipDownloadBody<'a> {
             ));
         }
         if MAX_ZIP_DOWNLOAD_ITEMS < items.len() {
-            return Err(BoxClientError::InvalidArgument(
-                "items for a zip download must not exceed 10000",
-            ));
+            return Err(BoxClientError::InvalidArgument(concat!(
+                "items for a zip download must not exceed ",
+                max_zip_download_items!()
+            )));
         }
         let items = items
             .iter()
@@ -358,13 +369,7 @@ impl BoxClient {
             })
             .await?;
 
-        temp_file
-            .persist(path)
-            .await
-            .map_err(|source| BoxClientError::WriteFile {
-                path: path.to_owned(),
-                source,
-            })?;
+        temp_file.persist(path).await?;
         tracing::debug!(size, "downloaded zip file");
 
         Ok(size)
