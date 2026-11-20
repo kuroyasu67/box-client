@@ -44,6 +44,27 @@
   - メソッド: `BoxClient::delete_group`
   - BOX API: `DELETE /groups/{group_id}`
 
+### グループメンバーシップ
+
+- グループメンバーシップの情報の取得
+  - メソッド: `BoxClient::group_membership_information`
+  - BOX API: `GET /group_memberships/{group_membership_id}`
+- グループのメンバーのリスト
+  - メソッド: `BoxClient::list_group_memberships`, `BoxClient::list_all_group_memberships`
+  - BOX API: `GET /groups/{group_id}/memberships`
+- ユーザーが所属するグループのリスト
+  - メソッド: `BoxClient::list_user_memberships`, `BoxClient::list_all_user_memberships`
+  - BOX API: `GET /users/{user_id}/memberships`
+- ユーザーのグループへの追加
+  - メソッド: `BoxClient::create_group_membership`
+  - BOX API: `POST /group_memberships`
+- グループメンバーシップの更新
+  - メソッド: `BoxClient::update_group_membership`
+  - BOX API: `PUT /group_memberships/{group_membership_id}`
+- ユーザーのグループからの削除
+  - メソッド: `BoxClient::delete_group_membership`
+  - BOX API: `DELETE /group_memberships/{group_membership_id}`
+
 ### フォルダ
 
 - フォルダ情報の取得
@@ -461,6 +482,10 @@ BOXがアクセストークンを拒否して401を返した場合、`BoxClient`
   - HTTPメソッド: DELETE
   - 冪等性: 冪等でない
   - 理由: BOXが削除した後に再送すると、削除済みのグループに対する削除となり、エラーを受け取りうる。その結果、削除の結果を誤って判断するおそれがある。
+- グループメンバーシップの削除（`BoxClient::delete_group_membership`）
+  - HTTPメソッド: DELETE
+  - 冪等性: 冪等でない
+  - 理由: BOXが削除した後に再送すると、削除済みのメンバーシップに対する削除となり、エラーを受け取りうる。その結果、削除の結果を誤って判断するおそれがある。
 
 フォルダの削除で503を受け取った場合は、`BoxClient::folder_information`でフォルダの状態を確認する。
 フォルダの移動で5xxを受け取った場合、またはタイムアウトした場合は、`BoxClient::folder_information`でフォルダの親フォルダを確認する。
@@ -473,6 +498,7 @@ Webリンクの削除で5xxを受け取った場合、またはタイムアウ�
 ユーザーのエンタープライズからの除外で5xxを受け取った場合、またはタイムアウトした場合は、`BoxClient::user_information`でユーザーを確認する。
 ユーザーの削除で5xxを受け取った場合、またはタイムアウトした場合は、`BoxClient::user_information`でユーザーが存在するか確認する。
 グループの削除で5xxを受け取った場合、またはタイムアウトした場合は、`BoxClient::group_information`でグループが存在するか確認する。
+グループメンバーシップの削除で5xxを受け取った場合、またはタイムアウトした場合は、`BoxClient::group_membership_information`でメンバーシップが存在するか確認する。
 
 ### 待機時間の決定
 

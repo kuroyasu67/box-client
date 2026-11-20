@@ -89,6 +89,7 @@ box_item_struct!(FileId, "ファイル");
 box_item_struct!(WebLinkId, "Webリンク");
 box_item_struct!(CollaborationId, "コラボレーション");
 box_item_struct!(GroupId, "グループ");
+box_item_struct!(GroupMembershipId, "グループメンバーシップ");
 box_item_struct!(AppItemId, "アプリ項目");
 box_item_struct!(TermsOfServiceId, "利用規約");
 

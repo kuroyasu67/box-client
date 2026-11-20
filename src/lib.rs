@@ -44,6 +44,11 @@ pub use api::folders::{
     CopyFolderOptions, DeleteFolderOptions, Folder, FolderUpdate, FolderUploadEmailAccess,
     ListItemsOptions, SyncState,
 };
+pub use api::group_memberships::{
+    ConfigurablePermissions, CreateGroupMembershipOptions, GroupMembership, GroupMembershipRole,
+    GroupMembershipUpdate, GroupMembershipsPage, ListGroupMembershipsOptions,
+    MAX_LISTED_GROUP_MEMBERSHIPS,
+};
 pub use api::groups::{
     CreateGroupOptions, Group, GroupAccessLevel, GroupMini, GroupPermissions, GroupType,
     GroupUpdate, GroupsPage, ListEnterpriseGroupsOptions, MAX_GROUP_DESCRIPTION_CHARS,
@@ -53,9 +58,9 @@ pub use api::pagination::{ItemSort, ItemsPage, MAX_ITEMS_LIMIT, SortDirection};
 pub use api::trash::{ListTrashedItemsOptions, RestoreItemOptions};
 pub use api::types::{
     AppItemId, BoxItem, CollaborationId, DeleteItemOptions, FileId, FileItem, FileVersionId,
-    FolderId, FolderItem, GroupId, ItemStatus, MAX_DESCRIPTION_CHARS, MAX_NAME_CHARS,
-    MoveDestination, PathCollection, TermsOfServiceId, UpdateItemOptions, UserId, WebLinkId,
-    WebLinkItem,
+    FolderId, FolderItem, GroupId, GroupMembershipId, ItemStatus, MAX_DESCRIPTION_CHARS,
+    MAX_NAME_CHARS, MoveDestination, PathCollection, TermsOfServiceId, UpdateItemOptions, UserId,
+    WebLinkId, WebLinkItem,
 };
 pub use api::updates::{
     MAX_TAGS, Nullable, OneTimePasscode, OtpAllowlistEntry, SharedLinkAccess, SharedLinkSettings,
