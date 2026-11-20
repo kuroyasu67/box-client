@@ -31,10 +31,11 @@ mod test_support;
 
 pub use api::collaborations::{
     AcceptanceRequirementsStatus, AppItem, Collaboration, CollaborationGrantee, CollaborationRole,
-    CollaborationStatus, CollaborationUser, CollaborationsPage, GroupCollaborationsPage, GroupMini,
-    GroupType, ListFileCollaborationsOptions, ListFolderCollaborationsOptions,
-    ListGroupCollaborationsOptions, MAX_GROUP_COLLABORATIONS_OFFSET, StrongPasswordRequirement,
-    TermsOfService, TermsOfServiceRequirement, TwoFactorAuthenticationRequirement,
+    CollaborationStatus, CollaborationUser, CollaborationsOffsetPage, CollaborationsPage,
+    GroupMini, GroupType, ListFileCollaborationsOptions, ListFolderCollaborationsOptions,
+    ListGroupCollaborationsOptions, ListPendingCollaborationsOptions, MAX_COLLABORATIONS_OFFSET,
+    StrongPasswordRequirement, TermsOfService, TermsOfServiceRequirement,
+    TwoFactorAuthenticationRequirement,
 };
 pub use api::downloads::DownloadFileOptions;
 pub use api::files::{CopyFileOptions, File, FileDownloadPermission, FileLock, FileUpdate};

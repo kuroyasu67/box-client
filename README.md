@@ -146,6 +146,9 @@
 - グループのコラボレーションのリスト
   - メソッド: `BoxClient::list_group_collaborations`, `BoxClient::list_all_group_collaborations`
   - BOX API: `GET /groups/{group_id}/collaborations`
+- 保留中のコラボレーションの招待のリスト
+  - メソッド: `BoxClient::list_pending_collaborations`, `BoxClient::list_all_pending_collaborations`
+  - BOX API: `GET /collaborations`
 
 ### ゴミ箱
 
