@@ -1432,6 +1432,47 @@ impl BoxClient {
 
         Ok(outcome)
     }
+
+    /// コラボレーションを削除する。
+    ///
+    /// コラボレーターは、コラボレーションの対象の項目にアクセスできなくなる。
+    ///
+    /// BOXクライアントは、冪等なリクエストであれば、5xxを受け取った場合、またはタイムアウトした場合に、同じリクエストを再送して再試行する。
+    /// しかし、これらの場合は、BOXがコラボレーションの削除を完了している可能性がある。
+    /// BOXが削除した後にリクエストを再送すると、削除済みのコラボレーションに対する削除となるため、BOXはエラーを返しうる。
+    /// その結果、削除に成功したにもかかわらず、削除に失敗したと誤って判断するおそれがある。
+    /// したがって、HTTPメソッドがDELETEであっても冪等でないリクエストとして送信し、
+    /// BOXがリクエストを処理していないことが明らかな429、エラーコードが`operation_blocked_temporary`の409
+    /// および接続エラーの後にのみ再試行する。
+    ///
+    /// # Arguments
+    ///
+    /// - `collaboration_id`: 削除するコラボレーションのID
+    ///
+    /// # Errors
+    ///
+    /// BOXがエラーレスポンスを返した場合は、[`BoxClientError::Api`](crate::BoxClientError::Api)を返す。
+    /// 公式ドキュメントは、このAPIが返すエラーのステータスを個別に記載していない。
+    ///
+    /// 再試行できないエラーが発生した場合、または再試行回数の上限に達した場合はエラーを返す。
+    /// 5xxまたはタイムアウトでエラーを返した場合は、BOXがコラボレーションを削除した可能性があるため、
+    /// [`BoxClient::collaboration_information`]でコラボレーションが存在するか確認する。
+    pub async fn delete_collaboration(
+        &self,
+        collaboration_id: &CollaborationId,
+    ) -> BoxClientResult<()> {
+        let request = ApiRequest::delete(["collaborations", collaboration_id.as_ref()])
+            .idempotency(Idempotency::NonIdempotent);
+
+        self.send_empty(request).await?;
+
+        tracing::debug!(
+            collaboration_id = collaboration_id.as_ref(),
+            "deleted collaboration"
+        );
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -2958,6 +2999,99 @@ mod test_update_collaboration {
                         &CollaborationId::new("1234"),
                         &CollaborationUpdate::default().with_role(CollaborationRole::Viewer),
                     )
+                    .await
+            },
+        )
+        .await?;
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod test_delete_collaboration {
+    use rstest::rstest;
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{method, path},
+    };
+
+    use super::*;
+    use crate::test_support::{
+        assert_not_retried, assert_retried_after, count_requests, create_client, mount_token,
+        operation_blocked_response, short_retry,
+    };
+
+    /// コラボレーションのAPIのパス
+    const COLLABORATION_PATH: &str = "/2.0/collaborations/1234";
+
+    /// `DELETE /collaborations/{collaboration_id}`を呼び出し、204を受け取ると成功することを確認
+    #[tokio::test]
+    async fn test_delete_collaboration() -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        Mock::given(method("DELETE"))
+            .and(path(COLLABORATION_PATH))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = create_client(&server, short_retry(0)).await?;
+
+        client
+            .delete_collaboration(&CollaborationId::new("1234"))
+            .await?;
+
+        assert_eq!(
+            count_requests(&server, "DELETE", COLLABORATION_PATH).await,
+            1
+        );
+
+        Ok(())
+    }
+
+    /// BOXのエラーレスポンスを、再試行せずにそのまま返すことを確認
+    ///
+    /// 5xxの後に再送すると、削除済みのコラボレーションに対してエラーを受け取るおそれがあるため、
+    /// 再試行の上限に余裕があっても再送しない。
+    #[rstest]
+    #[case::forbidden(403)]
+    #[case::not_found(404)]
+    #[case::internal_server_error(500)]
+    #[case::service_unavailable(503)]
+    #[tokio::test]
+    async fn test_delete_collaboration_error_is_not_retried(
+        #[case] status: u16,
+    ) -> anyhow::Result<()> {
+        assert_not_retried(
+            "DELETE",
+            COLLABORATION_PATH,
+            status,
+            async |client: &BoxClient| {
+                client
+                    .delete_collaboration(&CollaborationId::new("1234"))
+                    .await
+            },
+        )
+        .await
+    }
+
+    /// 429または他の操作によるロックで409を受け取った場合は、冪等でないリクエストとして送信しても再試行することを確認
+    #[rstest]
+    #[case::too_many_requests(ResponseTemplate::new(429))]
+    #[case::operation_blocked_temporary(operation_blocked_response())]
+    #[tokio::test]
+    async fn test_delete_collaboration_retries_request_not_processed(
+        #[case] first_response: ResponseTemplate,
+    ) -> anyhow::Result<()> {
+        assert_retried_after(
+            "DELETE",
+            COLLABORATION_PATH,
+            first_response,
+            ResponseTemplate::new(204),
+            async |client: &BoxClient| {
+                client
+                    .delete_collaboration(&CollaborationId::new("1234"))
                     .await
             },
         )

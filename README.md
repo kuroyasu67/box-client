@@ -155,6 +155,9 @@
 - コラボレーションの更新（役割の変更、所有者の変更、保留中の招待の承認または拒否を含む）
   - メソッド: `BoxClient::update_collaboration`
   - BOX API: `PUT /collaborations/{collaboration_id}`
+- コラボレーションの削除
+  - メソッド: `BoxClient::delete_collaboration`
+  - BOX API: `DELETE /collaborations/{collaboration_id}`
 
 ### ゴミ箱
 
@@ -405,6 +408,14 @@ BOXがアクセストークンを拒否して401を返した場合、`BoxClient`
   - HTTPメソッド: DELETE
   - 冪等性: 冪等でない
   - 理由: BOXが削除した後に再送すると、削除済みのWebリンクに対する削除となり、エラーを受け取りうる。その結果、削除の結果を誤って判断するおそれがある。
+- コラボレーションの更新で、役割を所有者にする場合（`BoxClient::update_collaboration`）
+  - HTTPメソッド: PUT
+  - 冪等性: 冪等でない
+  - 理由: 所有者を変更すると、BOXは更新したコラボレーションを削除して新しいコラボレーションを作成する。BOXが所有者を変更した後に再送すると、削除済みのコラボレーションに対する更新となり、404を受け取りうる。その結果、所有者の変更の結果を誤って判断するおそれがある。所有者の変更以外の更新は、HTTPメソッドのとおり冪等とする。
+- コラボレーションの削除（`BoxClient::delete_collaboration`）
+  - HTTPメソッド: DELETE
+  - 冪等性: 冪等でない
+  - 理由: BOXが削除した後に再送すると、削除済みのコラボレーションに対する削除となり、エラーを受け取りうる。その結果、削除の結果を誤って判断するおそれがある。
 
 フォルダの削除で503を受け取った場合は、`BoxClient::folder_information`でフォルダの状態を確認する。
 フォルダの移動で5xxを受け取った場合、またはタイムアウトした場合は、`BoxClient::folder_information`でフォルダの親フォルダを確認する。
@@ -412,6 +423,8 @@ BOXがアクセストークンを拒否して401を返した場合、`BoxClient`
 フォルダの説明の設定で5xxを受け取った場合、またはタイムアウトした場合は、`BoxClient::folder_information`でフォルダの説明を確認する。
 ファイルの削除で5xxを受け取った場合、またはタイムアウトした場合は、`BoxClient::file_information`でファイルの状態を確認する。
 Webリンクの削除で5xxを受け取った場合、またはタイムアウトした場合は、`BoxClient::web_link_information`でWebリンクの状態を確認する。
+コラボレーションの所有者の変更で5xxを受け取った場合、またはタイムアウトした場合は、`BoxClient::list_file_collaborations`または`BoxClient::list_folder_collaborations`で項目のコラボレーションを確認する。
+コラボレーションの削除で5xxを受け取った場合、またはタイムアウトした場合は、`BoxClient::collaboration_information`でコラボレーションが存在するか確認する。
 
 ### 待機時間の決定
 
