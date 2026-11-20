@@ -111,6 +111,17 @@ impl MarkerPage for ItemsPage {
     }
 }
 
+/// オフセット方式のページ送りで取得する1ページ
+///
+/// [`collect_all_offset_pages`]が、ページの種類によらず、エントリーと総数を取り出すために使用する。
+pub(crate) trait OffsetPage {
+    /// ページに含まれるエントリーの型
+    type Entry;
+
+    /// ページを、エントリーと`total_count`に分解する。
+    fn into_parts(self) -> (Vec<Self::Entry>, u64);
+}
+
 /// 1ページで取得する項目数の上限が、BOXが受け付ける範囲内であることを検証する。
 ///
 /// # Errors
@@ -212,6 +223,56 @@ where
     }
 
     Ok((items, pages))
+}
+
+/// オフセット方式のページ送りで、すべてのページのエントリーを取得する。
+///
+/// ファイルのバージョンのリストおよびグループのコラボレーションのリストで共有する。
+/// `fetch_page`には取得するページの最初のエントリーのオフセットを渡す。最初のページでは`0`を渡す。
+/// 取得したエントリーの数が`total_count`に達した場合、またはBOXが空のページを返した場合に終了する。
+/// 戻り値は、すべてのエントリーと取得したページ数である。
+///
+/// # Arguments
+///
+/// - `max_offset`: BOXが受け付けるオフセットの最大値
+/// - `exceeded`: 次のページのオフセットが`max_offset`を超える場合に返すエラーのメッセージ
+/// - `fetch_page`: 指定したオフセットから1ページ分を取得するクロージャー
+///
+/// # Errors
+///
+/// 次のページのオフセットが`max_offset`を超え、残りのエントリーを取得できない場合は、
+/// 一部のエントリーだけを返さないように[`BoxClientError::UnexpectedResponse`]を返す。
+/// `fetch_page`がエラーを返した場合、この関数は取得済みのエントリーを破棄してそのエラーを返す。
+pub(crate) async fn collect_all_offset_pages<P, F>(
+    max_offset: u64,
+    exceeded: &'static str,
+    mut fetch_page: F,
+) -> BoxClientResult<(Vec<P::Entry>, u32)>
+where
+    P: OffsetPage,
+    F: AsyncFnMut(u64) -> BoxClientResult<P>,
+{
+    let mut entries = Vec::new();
+    let mut offset = 0;
+    let mut pages: u32 = 0;
+    loop {
+        let (page_entries, total_count) = fetch_page(offset).await?.into_parts();
+        pages += 1;
+        let count = page_entries.len() as u64;
+        entries.extend(page_entries);
+        // BOXが返す`offset`ではなく、要求した`offset`から次のページの位置を求める。
+        // BOXが`offset`を無視して同じページを返し続けても、位置を進めて必ずループを終える。
+        offset += count;
+
+        if count == 0 || total_count <= offset {
+            break;
+        }
+        if max_offset < offset {
+            return Err(BoxClientError::UnexpectedResponse(exceeded));
+        }
+    }
+
+    Ok((entries, pages))
 }
 
 #[cfg(test)]

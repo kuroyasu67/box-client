@@ -8,7 +8,7 @@ use time::OffsetDateTime;
 use crate::{
     BoxClient, BoxClientError, BoxClientResult, DeleteItemOptions, FileId, FileVersionId,
     Idempotency, UserMini,
-    api::pagination::{MAX_ITEMS_LIMIT, validate_limit},
+    api::pagination::{MAX_ITEMS_LIMIT, OffsetPage, collect_all_offset_pages, validate_limit},
     request::ApiRequest,
 };
 
@@ -142,6 +142,14 @@ pub struct FileVersionsPage {
     pub offset: u64,
 }
 
+impl OffsetPage for FileVersionsPage {
+    type Entry = FileVersion;
+
+    fn into_parts(self) -> (Vec<FileVersion>, u64) {
+        (self.entries, self.total_count)
+    }
+}
+
 /// ファイルのバージョンの昇格リクエストのボディ
 #[derive(Debug, Serialize)]
 struct PromoteFileVersionBody<'a> {
@@ -264,27 +272,12 @@ impl BoxClient {
         let options = ListFileVersionsOptions {
             limit: Some(options.limit.unwrap_or(MAX_ITEMS_LIMIT)),
         };
-        let mut versions = Vec::new();
-        let mut offset = 0;
-        let mut pages: u32 = 0;
-        loop {
-            let page = self.list_file_versions(file_id, offset, &options).await?;
-            pages += 1;
-            let count = page.entries.len() as u64;
-            versions.extend(page.entries);
-            // BOXが返す`offset`ではなく、要求した`offset`から次のページの位置を求める。
-            // BOXが`offset`を無視して同じページを返し続けても、位置を進めて必ずループを終える。
-            offset += count;
-
-            if count == 0 || page.total_count <= offset {
-                break;
-            }
-            if MAX_FILE_VERSIONS_OFFSET < offset {
-                return Err(BoxClientError::UnexpectedResponse(
-                    "file versions cannot be listed beyond the maximum offset",
-                ));
-            }
-        }
+        let (versions, pages) = collect_all_offset_pages(
+            MAX_FILE_VERSIONS_OFFSET,
+            "file versions cannot be listed beyond the maximum offset",
+            async |offset| self.list_file_versions(file_id, offset, &options).await,
+        )
+        .await?;
 
         tracing::debug!(
             file_id = file_id.as_ref(),
