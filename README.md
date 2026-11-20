@@ -583,3 +583,9 @@ cargo install cargo-deny
 cargo install prek
 prek install
 ```
+
+## 履歴
+
+### 0.1.0
+
+- 2026-11-19
