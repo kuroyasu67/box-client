@@ -29,6 +29,11 @@ mod retry;
 #[cfg(test)]
 mod test_support;
 
+pub use api::collaborations::{
+    AcceptanceRequirementsStatus, AppItem, Collaboration, CollaborationGrantee, CollaborationRole,
+    CollaborationStatus, CollaborationUser, GroupMini, GroupType, StrongPasswordRequirement,
+    TermsOfService, TermsOfServiceRequirement, TwoFactorAuthenticationRequirement,
+};
 pub use api::downloads::DownloadFileOptions;
 pub use api::files::{CopyFileOptions, File, FileDownloadPermission, FileLock, FileUpdate};
 pub use api::folders::{
@@ -38,9 +43,10 @@ pub use api::folders::{
 pub use api::pagination::{ItemSort, ItemsPage, MAX_ITEMS_LIMIT, SortDirection};
 pub use api::trash::{ListTrashedItemsOptions, RestoreItemOptions};
 pub use api::types::{
-    BoxItem, DeleteItemOptions, FileId, FileItem, FileVersionId, FolderId, FolderItem, ItemStatus,
-    MAX_DESCRIPTION_CHARS, MAX_NAME_CHARS, MoveDestination, PathCollection, UpdateItemOptions,
-    UserId, WebLinkId, WebLinkItem,
+    AppItemId, BoxItem, CollaborationId, DeleteItemOptions, FileId, FileItem, FileVersionId,
+    FolderId, FolderItem, GroupId, ItemStatus, MAX_DESCRIPTION_CHARS, MAX_NAME_CHARS,
+    MoveDestination, PathCollection, TermsOfServiceId, UpdateItemOptions, UserId, WebLinkId,
+    WebLinkItem,
 };
 pub use api::updates::{
     MAX_TAGS, Nullable, OneTimePasscode, OtpAllowlistEntry, SharedLinkAccess, SharedLinkSettings,

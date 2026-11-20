@@ -132,6 +132,12 @@
   - メソッド: `BoxClient::delete_web_link`
   - BOX API: `DELETE /web_links/{web_link_id}`
 
+### コラボレーション
+
+- コラボレーション情報の取得
+  - メソッド: `BoxClient::collaboration_information`
+  - BOX API: `GET /collaborations/{collaboration_id}`
+
 ### ゴミ箱
 
 - ゴミ箱内の項目のリスト

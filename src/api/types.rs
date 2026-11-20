@@ -87,6 +87,10 @@ box_item_struct!(FileVersionId, "ファイルバージョン");
 box_item_struct!(FolderId, "フォルダ");
 box_item_struct!(FileId, "ファイル");
 box_item_struct!(WebLinkId, "Webリンク");
+box_item_struct!(CollaborationId, "コラボレーション");
+box_item_struct!(GroupId, "グループ");
+box_item_struct!(AppItemId, "アプリ項目");
+box_item_struct!(TermsOfServiceId, "利用規約");
 
 /// ルートフォルダのID
 ///
@@ -128,7 +132,7 @@ pub(crate) fn ensure_not_root(folder_id: &FolderId, message: &'static str) -> Bo
     Ok(())
 }
 
-/// フォルダ内の項目
+/// フォルダ内の項目、またはコラボレーションの対象の項目
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[non_exhaustive]
