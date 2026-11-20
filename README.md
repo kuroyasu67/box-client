@@ -140,6 +140,9 @@
 - フォルダのコラボレーションのリスト
   - メソッド: `BoxClient::list_folder_collaborations`, `BoxClient::list_all_folder_collaborations`
   - BOX API: `GET /folders/{folder_id}/collaborations`
+- ファイルのコラボレーションのリスト
+  - メソッド: `BoxClient::list_file_collaborations`, `BoxClient::list_all_file_collaborations`
+  - BOX API: `GET /files/{file_id}/collaborations`
 
 ### ゴミ箱
 

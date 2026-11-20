@@ -6,7 +6,7 @@ use serde::Deserialize;
 use time::OffsetDateTime;
 
 use crate::{
-    AppItemId, BoxClient, BoxClientResult, BoxItem, CollaborationId, FolderId, GroupId,
+    AppItemId, BoxClient, BoxClientResult, BoxItem, CollaborationId, FileId, FolderId, GroupId,
     TermsOfServiceId, UserId,
     api::pagination::{MAX_ITEMS_LIMIT, MarkerPage, collect_all_pages, marker_page_request},
     request::ApiRequest,
@@ -328,7 +328,40 @@ impl ListFolderCollaborationsOptions {
     }
 }
 
-/// フォルダのコラボレーションの1ページ
+/// ファイルのコラボレーションをリストするときのオプション
+///
+/// 将来フィールドを追加しても利用者のコードが壊れないように、`#[non_exhaustive]`を付けている。
+/// そのため、クレートの外では構造体リテラルで作成できない。[`Default`]で作成し、`with_*`メソッドで値を設定する。
+///
+/// # Examples
+///
+/// ```
+/// use box_client::ListFileCollaborationsOptions;
+///
+/// let options = ListFileCollaborationsOptions::default().with_limit(100);
+/// assert_eq!(options.limit, Some(100));
+/// ```
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ListFileCollaborationsOptions {
+    /// 1ページで取得するコラボレーション数の上限
+    ///
+    /// 1以上[`MAX_ITEMS_LIMIT`]以下を指定する。`None`の場合はBOXの既定値を使用する。
+    pub limit: Option<u32>,
+}
+
+impl ListFileCollaborationsOptions {
+    /// 1ページで取得するコラボレーション数の上限を設定する。
+    ///
+    /// 1以上[`MAX_ITEMS_LIMIT`]以下を指定する。範囲外の値は、APIを呼び出したときにエラーになる。
+    #[must_use]
+    pub fn with_limit(mut self, limit: u32) -> Self {
+        self.limit = Some(limit);
+        self
+    }
+}
+
+/// フォルダまたはファイルのコラボレーションの1ページ
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[non_exhaustive]
 pub struct CollaborationsPage {
@@ -454,6 +487,88 @@ impl BoxClient {
             pages,
             collaborations = collaborations.len(),
             "listed all collaborations of folder"
+        );
+
+        Ok(collaborations)
+    }
+
+    /// ファイルのコラボレーションを1ページ分リストする。
+    ///
+    /// BOXは、承認済みのコラボレーションに加えて、招待を送信して承認を待っている
+    /// コラボレーション（状態が[`CollaborationStatus::Pending`]）も返す。
+    /// ファイルにコラボレーションがない場合は、空のページを返す。
+    ///
+    /// 1回の呼び出しで返すコラボレーションは最大で`limit`件であるため、後続のコラボレーションが残っている
+    /// 場合がある。後続のコラボレーションがある場合は、戻り値の[`CollaborationsPage::next_marker`]が`Some`になる。
+    /// そのマーカーを`marker`に指定して再度呼び出すと、次のページを取得できる。
+    /// すべてのコラボレーションが必要な場合は、[`BoxClient::list_all_file_collaborations`]を使用する。
+    ///
+    /// # Arguments
+    ///
+    /// - `file_id`: コラボレーションをリストするファイルのID
+    /// - `marker`: 前のページの[`CollaborationsPage::next_marker`]。最初のページを取得する場合は`None`
+    /// - `options`: コラボレーション数の上限などのオプション
+    ///
+    /// # Errors
+    ///
+    /// `options.limit`が範囲外の場合は、リクエストを送信せずに[`BoxClientError::InvalidArgument`](crate::BoxClientError::InvalidArgument)を返す。
+    /// ファイルが存在しない場合、またはファイルにアクセスする権限がない場合は、
+    /// [`BoxClientError::Api`](crate::BoxClientError::Api)を返す。
+    /// 公式ドキュメントは、このAPIが返すエラーのステータスを個別に記載していない。
+    ///
+    /// 再試行できないエラーが発生した場合、または再試行回数の上限に達した場合はエラーを返す。
+    pub async fn list_file_collaborations(
+        &self,
+        file_id: &FileId,
+        marker: Option<&str>,
+        options: &ListFileCollaborationsOptions,
+    ) -> BoxClientResult<CollaborationsPage> {
+        let request = marker_page_request(
+            ["files", file_id.as_ref(), "collaborations"],
+            marker,
+            options.limit,
+            None,
+            None,
+        )?;
+
+        self.send_json(request).await
+    }
+
+    /// ファイルのすべてのコラボレーションを、ページを送りながらリストする。
+    ///
+    /// `options.limit`が`None`の場合は、リクエスト数を減らすために1ページあたり
+    /// [`MAX_ITEMS_LIMIT`]件を取得する。
+    ///
+    /// # Arguments
+    ///
+    /// - `file_id`: コラボレーションをリストするファイルのID
+    /// - `options`: コラボレーション数の上限などのオプション
+    ///
+    /// # Errors
+    ///
+    /// `options.limit`が範囲外の場合は、リクエストを送信せずに[`BoxClientError::InvalidArgument`](crate::BoxClientError::InvalidArgument)を返す。
+    /// BOXが以前に返したマーカーを再び返した場合、このメソッドは無限ループを避けるため
+    /// [`BoxClientError::UnexpectedResponse`](crate::BoxClientError::UnexpectedResponse)を返す。
+    /// いずれかのページの取得に失敗した場合は、取得済みのコラボレーションを破棄してエラーを返す。
+    pub async fn list_all_file_collaborations(
+        &self,
+        file_id: &FileId,
+        options: &ListFileCollaborationsOptions,
+    ) -> BoxClientResult<Vec<Collaboration>> {
+        let options = ListFileCollaborationsOptions {
+            limit: Some(options.limit.unwrap_or(MAX_ITEMS_LIMIT)),
+        };
+        let (collaborations, pages) = collect_all_pages(async |marker| {
+            self.list_file_collaborations(file_id, marker, &options)
+                .await
+        })
+        .await?;
+
+        tracing::debug!(
+            file_id = file_id.as_ref(),
+            pages,
+            collaborations = collaborations.len(),
+            "listed all collaborations of file"
         );
 
         Ok(collaborations)
@@ -905,6 +1020,235 @@ mod test_list_all_folder_collaborations {
             matches!(result, Err(BoxClientError::UnexpectedResponse(_))),
             "result: {result:?}"
         );
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod test_list_file_collaborations {
+    use rstest::rstest;
+    use serde_json::json;
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{method, path},
+    };
+
+    use super::*;
+    use crate::{
+        BoxClientError,
+        test_support::{
+            create_client, mount_token, not_found_response, request_queries, short_retry,
+        },
+    };
+
+    /// ファイルのコラボレーションのAPIのパス
+    const COLLABORATIONS_PATH: &str = "/2.0/files/456/collaborations";
+
+    /// マーカーとオプションをクエリパラメーターに変換し、ページを返すことを確認
+    #[rstest]
+    #[case::default(None, ListFileCollaborationsOptions::default(), "usemarker=true")]
+    #[case::all(
+        Some("m1"),
+        ListFileCollaborationsOptions::default().with_limit(1000),
+        "usemarker=true&limit=1000&marker=m1"
+    )]
+    #[tokio::test]
+    async fn test_list_file_collaborations(
+        #[case] marker: Option<&str>,
+        #[case] options: ListFileCollaborationsOptions,
+        #[case] expected_query: &str,
+    ) -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        Mock::given(method("GET"))
+            .and(path(COLLABORATIONS_PATH))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "entries": [
+                    {
+                        "type": "collaboration",
+                        "id": "1",
+                        "item": {"type": "file", "id": "456", "etag": "0", "name": "Contract.pdf"},
+                        "role": "viewer",
+                        "status": "accepted",
+                    },
+                    {"type": "collaboration", "id": "2", "item": null, "status": "pending"},
+                ],
+                "limit": 100,
+                "next_marker": "m2",
+                "prev_marker": null,
+            })))
+            .mount(&server)
+            .await;
+        let client = create_client(&server, short_retry(0)).await?;
+
+        let page = client
+            .list_file_collaborations(&FileId::new("456"), marker, &options)
+            .await?;
+
+        let ids: Vec<_> = page.entries.iter().map(|c| c.id.as_ref()).collect();
+        assert_eq!(ids, vec!["1", "2"]);
+        assert!(
+            matches!(
+                &page.entries[0].item,
+                Some(BoxItem::File(file)) if file.id == FileId::new("456")
+            ),
+            "item: {:?}",
+            page.entries[0].item
+        );
+        assert_eq!(page.entries[1].status, Some(CollaborationStatus::Pending));
+        assert_eq!(page.next_marker.as_deref(), Some("m2"));
+        assert_eq!(
+            request_queries(&server, COLLABORATIONS_PATH).await,
+            vec![expected_query]
+        );
+
+        Ok(())
+    }
+
+    /// コラボレーション数の上限が範囲外の場合は、リクエストを送信せずにエラーを返すことを確認
+    #[rstest]
+    #[case::zero(0)]
+    #[case::over_max(MAX_ITEMS_LIMIT + 1)]
+    #[tokio::test]
+    async fn test_list_file_collaborations_invalid_limit(#[case] limit: u32) -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        let client = create_client(&server, short_retry(0)).await?;
+
+        let result = client
+            .list_file_collaborations(
+                &FileId::new("456"),
+                None,
+                &ListFileCollaborationsOptions::default().with_limit(limit),
+            )
+            .await;
+
+        assert!(
+            matches!(result, Err(BoxClientError::InvalidArgument(_))),
+            "result: {result:?}"
+        );
+        assert_eq!(
+            request_queries(&server, COLLABORATIONS_PATH).await,
+            Vec::<String>::new()
+        );
+
+        Ok(())
+    }
+
+    /// ファイルが存在しない場合は、BOXのエラーレスポンスを返すことを確認
+    #[tokio::test]
+    async fn test_list_file_collaborations_not_found() -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        Mock::given(method("GET"))
+            .and(path(COLLABORATIONS_PATH))
+            .respond_with(not_found_response())
+            .mount(&server)
+            .await;
+        let client = create_client(&server, short_retry(0)).await?;
+
+        let result = client
+            .list_file_collaborations(
+                &FileId::new("456"),
+                None,
+                &ListFileCollaborationsOptions::default(),
+            )
+            .await;
+
+        assert!(
+            matches!(&result, Err(BoxClientError::Api(e)) if e.status == 404),
+            "result: {result:?}"
+        );
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod test_list_all_file_collaborations {
+    use serde_json::{Value, json};
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{method, path, query_param, query_param_is_missing},
+    };
+
+    use super::*;
+    use crate::test_support::{create_client, mount_token, short_retry};
+
+    /// ファイルのコラボレーションのAPIのパス
+    const COLLABORATIONS_PATH: &str = "/2.0/files/456/collaborations";
+
+    /// 指定したIDのコラボレーションだけを含むページのレスポンスを返す。
+    fn page_response(id: &str, next_marker: &Value) -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_json(json!({
+            "entries": [{"type": "collaboration", "id": id}],
+            "limit": 1000,
+            "next_marker": next_marker,
+        }))
+    }
+
+    /// `next_marker`がnullになるまでページを送り、すべてのコラボレーションを返すことを確認
+    ///
+    /// マーカーの終端と重複の扱いは、フォルダのコラボレーションのテストと`collect_all_pages`のテストで確認する。
+    #[tokio::test]
+    async fn test_list_all_file_collaborations() -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        // コラボレーション数の上限を省略した場合は、上限の1000件ずつ取得する。
+        Mock::given(method("GET"))
+            .and(path(COLLABORATIONS_PATH))
+            .and(query_param("limit", "1000"))
+            .and(query_param_is_missing("marker"))
+            .respond_with(page_response("1", &json!("m1")))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(COLLABORATIONS_PATH))
+            .and(query_param("limit", "1000"))
+            .and(query_param("marker", "m1"))
+            .respond_with(page_response("2", &Value::Null))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = create_client(&server, short_retry(0)).await?;
+
+        let collaborations = client
+            .list_all_file_collaborations(
+                &FileId::new("456"),
+                &ListFileCollaborationsOptions::default(),
+            )
+            .await?;
+
+        let ids: Vec<_> = collaborations.iter().map(|c| c.id.as_ref()).collect();
+        assert_eq!(ids, vec!["1", "2"]);
+
+        Ok(())
+    }
+
+    /// コラボレーション数の上限を指定した場合は、その上限で各ページを取得することを確認
+    #[tokio::test]
+    async fn test_list_all_file_collaborations_with_limit() -> anyhow::Result<()> {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        Mock::given(method("GET"))
+            .and(path(COLLABORATIONS_PATH))
+            .and(query_param("limit", "10"))
+            .respond_with(page_response("1", &Value::Null))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = create_client(&server, short_retry(0)).await?;
+
+        let collaborations = client
+            .list_all_file_collaborations(
+                &FileId::new("456"),
+                &ListFileCollaborationsOptions::default().with_limit(10),
+            )
+            .await?;
+
+        assert_eq!(collaborations.len(), 1);
 
         Ok(())
     }
