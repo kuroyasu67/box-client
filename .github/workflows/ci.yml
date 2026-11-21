@@ -12,7 +12,6 @@ on:
     paths-ignore:
       - "**/*.md"
       - .markdownlint-cli2.jsonc
-      - renovate.json
       - LICENSE-APACHE
       - LICENSE-MIT
   pull_request:
@@ -20,7 +19,6 @@ on:
     paths-ignore:
       - "**/*.md"
       - .markdownlint-cli2.jsonc
-      - renovate.json
       - LICENSE-APACHE
       - LICENSE-MIT
   workflow_dispatch:
@@ -56,7 +54,6 @@ jobs:
           # clippyとテストは、それぞれのジョブで実行するため、フックでは省略する。
           SKIP: cargo-clippy,cargo-nextest
         with:
-          # renovate: datasource=github-releases depName=j178/prek
           prek-version: 0.5.11
           # prek-actionは、--show-diff-on-failureを自ら付けるため、重ねて指定しない。
           extra-args: --all-files
@@ -124,5 +121,5 @@ jobs:
       - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
         with:
           tool: cargo-deny
-      # Renovateが`Cargo.lock`を更新しない間に公開された勧告も、CIで検出する。
+      # `Cargo.lock`を更新しない間に公開された勧告も、CIで検出する。
       - run: cargo deny --locked check

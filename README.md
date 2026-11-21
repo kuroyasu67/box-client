@@ -665,7 +665,7 @@ BOX_CONFIG_FILE=path/to/config.json RUST_LOG=info cargo run --quiet --example=me
 ## 開発環境
 
 開発に使うRustの版は`rust-toolchain.toml`で固定しており、`rustup`が、指定した版のツールチェーンを自動で導入する。
-Rustの版、テスト、CI、依存関係の自動更新およびクレートの版の指定の方針は、[開発ツール](docs/development-tools.md)に記述する。
+Rustの版、テスト、CIおよびクレートの版の指定の方針は、[開発ツール](docs/development-tools.md)に記述する。
 
 ### テスト
 

@@ -9,7 +9,6 @@ exclude = [
   "deny.toml",
   "docs",
   "prek.toml",
-  "renovate.json",
   "rust-toolchain.toml",
   "taplo.toml",
 ]
