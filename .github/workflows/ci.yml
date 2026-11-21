@@ -3,24 +3,31 @@
 # 方針は、docs/development-tools.mdの「CI」に記述する。
 name: CI
 
-# プログラムの振る舞いに影響しないファイルのみを変更した場合は、実行しない。
-# ただし、無視しないファイルを1つでも含む変更では、すべてのジョブを実行する。
-# pushとpull_requestのpaths-ignoreは、同じ内容にする。
+# CIの検査の結果に影響するファイルを変更した場合のみ、実行する。
+# 列挙したファイルを1つでも含む変更では、すべてのジョブを実行する。
+# ファイルを追加して検査の対象が増えたら、ここに加える。
+# pushとpull_requestのpathsは、同じ内容にする。
 on:
   push:
     branches: [main]
-    paths-ignore:
-      - "**/*.md"
-      - .markdownlint-cli2.jsonc
-      - LICENSE-APACHE
-      - LICENSE-MIT
+    paths: &ci-paths
+      - "src/**"
+      - "examples/**"
+      - "tests/**"
+      - "benches/**"
+      - build.rs
+      - "resources/tests/**"
+      - Cargo.toml
+      - Cargo.lock
+      - rust-toolchain.toml
+      - deny.toml
+      - prek.toml
+      - taplo.toml
+      - .github/workflows/ci.yml
   pull_request:
     branches: [main]
-    paths-ignore:
-      - "**/*.md"
-      - .markdownlint-cli2.jsonc
-      - LICENSE-APACHE
-      - LICENSE-MIT
+    paths: *ci-paths
+  # 対象のファイルを変更していなくても、手動で実行できるようにする。
   workflow_dispatch:
 
 # 同じブランチまたはPull Requestで新しい実行が始まったら、古い実行を取り消す。

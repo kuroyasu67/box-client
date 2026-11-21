@@ -49,12 +49,19 @@ CIは、GitHub Actionsの`.github/workflows/ci.yml`で実行する。
 Gitのフックは、手元で省略できる。
 したがって、CIで同じ検査を実行し、CIを最終の関門とする。
 
-ドキュメントのみの変更でCIを実行すると、結果の変わらない検査に時間を使い、ランナーの実行時間を消費する。
-したがって、プログラムの振る舞いに影響しない次のファイルのみを変更した場合は、CIを実行しない。
-無視しないファイルを1つでも含む変更では、すべてのジョブを実行する。
+検査の結果に影響しない変更でCIを実行すると、結果の変わらない検査に時間を使い、ランナーの実行時間を消費する。
+したがって、CIは、検査の結果に影響する次のファイルを変更した場合のみ実行する。
+次のファイルを1つでも含む変更では、すべてのジョブを実行する。
+READMEや`docs/`などのドキュメント、ライセンスおよびmarkdownlintの設定のみの変更では、CIを実行しない。
 
-- Markdownのファイルである`**/*.md`
-- `.markdownlint-cli2.jsonc`、`LICENSE-APACHE`および`LICENSE-MIT`
+- Rustのコードとテストの資材である`src/`、`examples/`、`tests/`、`benches/`、`build.rs`および`resources/tests/`
+- `Cargo.toml`、`Cargo.lock`および`rust-toolchain.toml`
+- 検査の設定である`deny.toml`、`prek.toml`および`taplo.toml`
+- CIの定義である`.github/workflows/ci.yml`
+
+対象のファイルは、ワークフローの`paths`に列挙する。
+ファイルを追加して検査の対象が増えた場合は、`paths`にも加える。
+対象のファイルを変更していない場合でも、GitHubの画面からCIを手動で実行できる。
 
 | ジョブ | 内容 |
 | --- | --- |
