@@ -51,6 +51,16 @@ name           = "cargo clippy"
 pass_filenames = false
 types          = ["rust"]
 
+# 時間のかかるテストは、プッシュ時に実行する
+[[repos.hooks]]
+entry          = "cargo nextest run --all-features"
+id             = "cargo-nextest"
+language       = "system"
+name           = "cargo nextest"
+pass_filenames = false
+stages         = ["pre-push"]
+types          = ["rust"]
+
 [[repos.hooks]]
 always_run     = true
 entry          = "cargo deny check"

@@ -1,0 +1,128 @@
+# Gitのフックと同じ検査、最小のRustの版でのビルドの検査および依存クレートの検査を実行する。
+# フックは手元で省略できるため、CIを最終の関門とする。
+# 方針は、docs/development-tools.mdの「CI」に記述する。
+name: CI
+
+# プログラムの振る舞いに影響しないファイルのみを変更した場合は、実行しない。
+# ただし、無視しないファイルを1つでも含む変更では、すべてのジョブを実行する。
+# pushとpull_requestのpaths-ignoreは、同じ内容にする。
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "**/*.md"
+      - .markdownlint-cli2.jsonc
+      - renovate.json
+      - LICENSE-APACHE
+      - LICENSE-MIT
+  pull_request:
+    branches: [main]
+    paths-ignore:
+      - "**/*.md"
+      - .markdownlint-cli2.jsonc
+      - renovate.json
+      - LICENSE-APACHE
+      - LICENSE-MIT
+  workflow_dispatch:
+
+# 同じブランチまたはPull Requestで新しい実行が始まったら、古い実行を取り消す。
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  hooks:
+    name: Commit hooks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # cargo fmtのフックが、rust-toolchain.tomlのツールチェーンを使う。
+      - run: rustup toolchain install
+      # フックが実行するcargo-denyとtaploを導入する。
+      - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
+        with:
+          tool: cargo-deny,taplo
+      - uses: j178/prek-action@1382ad72dea72f9d53832f2bcb65b3e87a947204 # v3.0.1
+        env:
+          # clippyとテストは、それぞれのジョブで実行するため、フックでは省略する。
+          SKIP: cargo-clippy,cargo-nextest
+        with:
+          # renovate: datasource=github-releases depName=j178/prek
+          prek-version: 0.5.11
+          # prek-actionは、--show-diff-on-failureを自ら付けるため、重ねて指定しない。
+          extra-args: --all-files
+
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - run: cargo clippy --all-targets --all-features --locked -- -D warnings
+
+  tests:
+    name: Tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
+        with:
+          tool: cargo-nextest
+      - run: cargo nextest run --all-features --locked
+      # cargo-nextestはドキュメントテストを実行しないため、別に実行する。
+      - run: cargo test --doc --all-features --locked
+
+  msrv:
+    name: MSRV
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Cargo.tomlのrust-versionを読み取り、その版のツールチェーンを導入する。
+      - name: Install the minimum supported Rust version
+        run: |
+          msrv=$(sed -nE 's/^rust-version *= *"([0-9.]+)"$/\1/p' Cargo.toml)
+          test -n "${msrv}"
+          rustup toolchain install "${msrv}" --profile minimal
+          echo "MSRV=${msrv}" >> "${GITHUB_ENV}"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: msrv
+      # ライブラリーの利用者は、rust-versionの版でビルドする。テストとサンプルの依存は利用者に影響しないため、ライブラリーのみを検査する。
+      - run: cargo "+${MSRV}" check --lib --all-features --locked
+
+  deny:
+    name: cargo deny
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # cargo-denyは、cargo metadataで依存クレートを解決するため、ツールチェーンを使う。
+      - run: rustup toolchain install
+      - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
+        with:
+          tool: cargo-deny
+      # Renovateが`Cargo.lock`を更新しない間に公開された勧告も、CIで検出する。
+      - run: cargo deny --locked check

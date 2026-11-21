@@ -3,11 +3,22 @@ categories  = ["api-bindings", "web-programming::http-client"]
 description = "BOXのREST APIを、JWT認証のサービスアカウントとして呼び出すクライアント"
 edition     = "2024"
 # 開発ツールの設定ファイルは、クレートの利用者に不要なため、パッケージに含めない
-exclude      = [".markdownlint-cli2.jsonc", "deny.toml", "prek.toml", "taplo.toml"]
-keywords     = ["box", "api", "client", "jwt", "cloud-storage"]
-license      = "MIT OR Apache-2.0"
-name         = "box-client"
-repository   = "https://github.com/kuroyasu67/box-client"
+exclude = [
+  ".github",
+  ".markdownlint-cli2.jsonc",
+  "deny.toml",
+  "docs",
+  "prek.toml",
+  "renovate.json",
+  "rust-toolchain.toml",
+  "taplo.toml",
+]
+keywords = ["box", "api", "client", "jwt", "cloud-storage"]
+license = "MIT OR Apache-2.0"
+name = "box-client"
+repository = "https://github.com/kuroyasu67/box-client"
+# 利用者がビルドできる最小のRustの版。開発とCIで使う版は、rust-toolchain.tomlで固定する。
+# CIのMSRVのジョブが、この版でライブラリーをビルドできることを確認する。
 rust-version = "1.91"
 version      = "0.3.0"
 

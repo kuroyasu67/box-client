@@ -664,14 +664,30 @@ BOX_CONFIG_FILE=path/to/config.json RUST_LOG=info cargo run --quiet --example=me
 
 ## 開発環境
 
+開発に使うRustの版は`rust-toolchain.toml`で固定しており、`rustup`が、指定した版のツールチェーンを自動で導入する。
+Rustの版、テスト、CI、依存関係の自動更新およびクレートの版の指定の方針は、[開発ツール](docs/development-tools.md)に記述する。
+
+### テスト
+
+テストランナーには`cargo-nextest`を使用するため、未導入の場合はインストールする。
+`cargo-nextest`はドキュメントテストを実行しないため、ドキュメントテストは`cargo test --doc`で実行する。
+
+```shell
+cargo install cargo-nextest --locked
+cargo nextest run --all-features
+cargo test --doc --all-features
+```
+
 ### prek
 
 Gitフックを導入する。
-Gitフックは`cargo deny check`および`taplo fmt`を実行するため、`cargo-deny`および`taplo-cli`もインストールする。
+Gitフックは`cargo deny check`、`taplo fmt`および`cargo nextest run`を実行するため、`cargo-deny`、`taplo-cli`および`cargo-nextest`もインストールする。
+コミット時は書式、Clippyおよび依存クレートを検査し、プッシュ時はテストを実行する。
 
 ```shell
 cargo install cargo-deny
 cargo install taplo-cli --locked
+cargo install cargo-nextest --locked
 cargo install prek
 prek install
 ```
