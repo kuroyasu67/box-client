@@ -1,6 +1,6 @@
 # 開発ツール
 
-本文書は、Rustの版、テスト、CIおよびクレートの版の指定の方針を記述する。
+本文書は、Rustの版、テスト、CI、依存関係の自動更新およびクレートの版の指定の方針を記述する。
 Gitのフックの導入は、READMEの「開発環境」に記述する。
 
 ## Rustの版
@@ -14,7 +14,7 @@ Gitのフックの導入は、READMEの「開発環境」に記述する。
 | `Cargo.toml`の`rust-version` | 本クレートの利用者がビルドできる、最小のRustの版（MSRV）を示す |
 
 - `rustup`は、`rust-toolchain.toml`に指定した版のツールチェーンを、初めて`cargo`を実行したときに自動で導入する。
-- 開発者は、最新の安定版に追随するため、`rust-toolchain.toml`を手動で更新する。
+- 最新の安定版への追随は、[依存関係の自動更新](#依存関係の自動更新)で、`rust-toolchain.toml`を更新して行う。
 - 本クレートは、利用者が依存して使うライブラリーである。
   `rust-version`を開発に使う版まで上げると、古いRustを使う利用者がビルドできなくなるため、`rust-version`は、必要になったときのみ手動で上げる。
 - resolver 3は、`rust-version`の版でビルドできる依存クレートの版を、`Cargo.lock`に選ぶ。
@@ -74,7 +74,29 @@ READMEや`docs/`などのドキュメント、ライセンスおよびmarkdownli
 - 第三者のActionsは、タグを差し替えられても内容が変わらないよう、コミットのハッシュで指定する。
 - ジョブごとに、`timeout-minutes`で実行時間の上限を設ける。
 - `cargo`のコマンドには`--locked`を指定し、`Cargo.lock`と`Cargo.toml`が食い違う場合は失敗させる。
-- `deny`ジョブは、`Cargo.lock`を更新しない間に公開された勧告も検出する。
+- `deny`ジョブは、Dependabotが`Cargo.lock`を更新しない間に公開された勧告も検出する。
+
+## 依存関係の自動更新
+
+依存関係は、手動で追随すると更新が滞り、脆弱性の修正を取り込み遅れる。
+したがって、GitHubの[Dependabot](https://docs.github.com/ja/code-security/dependabot)で、更新のPull Requestを自動で作成し、CIで検査してからマージする。
+設定は、`.github/dependabot.yml`に記述する。
+
+| 対象 | 更新の方法 |
+| --- | --- |
+| クレート | Dependabotは、`Cargo.toml`の版の範囲内の更新では`Cargo.lock`のみを更新し、範囲を超える更新では`Cargo.toml`と`Cargo.lock`を更新する。マイナーとパッチの更新は、1つのPull Requestにまとめる |
+| Rustの版 | Dependabotは、`rust-toolchain.toml`を更新する。`Cargo.toml`の`rust-version`は更新しない |
+| GitHub Actions | Dependabotは、コミットのハッシュと、コメントの版を更新する。マイナーとパッチの更新は、1つのPull Requestにまとめる |
+
+その他の方針は、次のとおりである。
+
+- Dependabotは、`Asia/Tokyo`の時刻で毎週月曜日の早朝に、更新を作成する。
+- Dependabotは、公開から3日を経過していない版を取り込まない。
+  公開の直後に取り下げられた版や、乗っ取られて公開された版を、取り込まないためである。
+- Dependabotは、直接の依存のみを更新し、間接的な依存は更新しない。
+  したがって、開発者は、間接的な依存を含む`Cargo.lock`の全体を、`cargo update`で手動で更新する。
+- Dependabotは、ワークフローの`prek-version`のような、Actionsの入力に書いたツールの版を更新しない。
+  したがって、開発者は、これらの版を手動で更新する。
 
 ## クレートの版の指定
 
