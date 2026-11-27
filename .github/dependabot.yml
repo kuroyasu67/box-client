@@ -1,35 +1,63 @@
 # Dependabotは、依存関係の更新のPull Requestを自動で作成する。
 # 方針は、docs/development-tools.mdの「依存関係の自動更新」に記述する。
+# 共通の設定も、YAMLのアンカーとエイリアスを使わず、エコシステムごとに記述する。
 version: 2
 
 updates:
-  # Dependabotは、Cargo.tomlの版の範囲内の更新ではCargo.lockのみを更新し、範囲を超える更新ではCargo.tomlも更新する。
+  # versioning-strategyは、既定のautoとする。
+  # ライブラリーでは、Cargo.tomlの版の範囲内の更新ではCargo.lockのみを更新し、範囲を超える更新ではCargo.tomlも更新する。
   - package-ecosystem: cargo
     directory: /
-    schedule: &weekly
+    schedule:
       interval: weekly
       day: monday
-      time: "06:00"
+      time: "00:00"
       timezone: Asia/Tokyo
     # 公開の直後に取り下げられた版や、乗っ取られて公開された版を取り込まないよう、公開から3日を待つ。
-    cooldown: &cooldown
+    cooldown:
       default-days: 3
+    # 依存クレートの脆弱性は、間接的な依存で報告されることが多いため、間接的な依存もCargo.lockで更新する。
+    allow:
+      - dependency-type: all
     # Pull Requestの数を抑えるため、破壊的でない更新を1つのPull Requestにまとめる。
     groups:
       crates:
+        patterns: ["*"]
         update-types: [minor, patch]
 
-  # Dependabotは、rust-toolchain.tomlのRustの版を更新する。Cargo.tomlのrust-versionは更新しない。
+  # Dependabotは、rust-toolchain.tomlのRustの版を更新する。Cargo.tomlのrust-version（MSRV）は更新しない。
   - package-ecosystem: rust-toolchain
     directory: /
-    schedule: *weekly
-    cooldown: *cooldown
+    schedule:
+      interval: weekly
+      day: monday
+      time: "00:00"
+      timezone: Asia/Tokyo
+    cooldown:
+      default-days: 3
 
   # Dependabotは、コミットのハッシュで指定したActionsのハッシュと、版のコメントを更新する。
   - package-ecosystem: github-actions
     directory: /
-    schedule: *weekly
-    cooldown: *cooldown
+    schedule:
+      interval: weekly
+      day: monday
+      time: "00:00"
+      timezone: Asia/Tokyo
+    cooldown:
+      default-days: 3
     groups:
       github-actions:
+        patterns: ["*"]
         update-types: [minor, patch]
+
+  # Dependabotは、.pre-commit-config.yamlのフックの版を更新する。
+  - package-ecosystem: pre-commit
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "00:00"
+      timezone: Asia/Tokyo
+    cooldown:
+      default-days: 3

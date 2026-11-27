@@ -681,14 +681,17 @@ cargo test --doc --all-features
 ### prek
 
 Gitフックを導入する。
-Gitフックは`cargo deny check`、`taplo fmt`および`cargo nextest run`を実行するため、`cargo-deny`、`taplo-cli`および`cargo-nextest`もインストールする。
-コミット時は書式、Clippyおよび依存クレートを検査し、プッシュ時はテストを実行する。
+Gitフックの定義は`.pre-commit-config.yaml`に記述する。
+Gitフックは`cargo deny check`、`taplo fmt --check`および`cargo nextest run`を実行するため、`cargo-deny`、`taplo-cli`および`cargo-nextest`もインストールする。
+コミット時は書式、シークレットおよび依存クレートを検査し、プッシュ時はClippyとテストを実行する。
+導入する版は、CIで使う版と揃える（[開発ツール](docs/development-tools.md#開発者が導入するツール)を参照）。
 
 ```shell
-cargo install cargo-deny
-cargo install taplo-cli --locked
-cargo install cargo-nextest --locked
-cargo install prek
+cargo install cargo-deny --locked --version 0.22.0
+cargo install taplo-cli --locked --version 0.10.0
+cargo install cargo-nextest --locked --version 0.9.152
+cargo install cargo-machete --locked --version 0.10.1
+cargo install prek --locked --version 0.5.11
 prek install
 ```
 
