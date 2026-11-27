@@ -52,7 +52,7 @@ uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 anyhow   = "1"
-rstest   = "0.28"
+rstest   = "0.29"
 tempfile = "3"
 # テストで、日時のリテラルのマクロを使うため、macrosを追加する。
 time = { version = "0.3", features = ["macros"] }
