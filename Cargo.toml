@@ -2,19 +2,11 @@
 categories  = ["api-bindings", "web-programming::http-client"]
 description = "BOXのREST APIを、JWT認証のサービスアカウントとして呼び出すクライアント"
 edition     = "2024"
-# 開発ツールの設定ファイルは、クレートの利用者に不要なため、パッケージに含めない
-exclude = [
-  ".github",
-  ".markdownlint-cli2.jsonc",
-  "deny.toml",
-  "docs",
-  "prek.toml",
-  "rust-toolchain.toml",
-  "taplo.toml",
-]
-keywords = ["box", "api", "client", "jwt", "cloud-storage"]
-license = "MIT OR Apache-2.0"
-name = "box-client"
+keywords    = ["box", "api", "client", "jwt", "cloud-storage"]
+license     = "MIT OR Apache-2.0"
+name        = "box-client"
+# crates.ioには公開せず、利用者はGitのリポジトリから取り込むため、誤って公開しないようにする。
+publish    = false
 repository = "https://github.com/kuroyasu67/box-client"
 # 利用者がビルドできる最小のRustの版。開発とCIで使う版は、rust-toolchain.tomlで固定する。
 # CIのMSRVのジョブが、この版でライブラリーをビルドできることを確認する。
@@ -23,19 +15,17 @@ version      = "0.3.0"
 
 [dependencies]
 base64 = "0.23"
-bytes = "1.12"
+bytes  = "1.12"
+# ストリームの結合子（FuturesUnorderedとStreamExt）のみを使うため、既定のフィーチャーを無効にし、それらが必要とするallocのみを有効にする。
 futures-util = { version = "0.3", default-features = false, features = [
   "alloc",
 ] }
-garde = { version = "0.23", features = [
-  "derive",
-  "email",
-  "regex",
-  "serde",
-  "url",
-] }
+# 検証の規則をderiveで記述し、正規表現（pattern）とURL（url）の検証を使うため、それぞれを有効にする。
+garde    = { version = "0.23", features = ["derive", "regex", "url"] }
 httpdate = "1"
+# JWTの署名に使う暗号の実装として、aws-lc-rsを有効にする。
 jsonwebtoken = { version = "12", features = ["aws_lc_rs"] }
+# 暗号化したPKCS#8の秘密鍵（PEM）を復号するため、encryption、pemおよび、それらが必要とするgetrandomとstdを有効にする。
 pkcs8 = { version = "0.11", features = [
   "encryption",
   "getrandom",
@@ -43,32 +33,46 @@ pkcs8 = { version = "0.11", features = [
   "std",
 ] }
 rand = "0.10"
+# アクセストークンの取得でフォームを（form）、APIの呼び出しでJSONを（json）送り、TLSにrustlsを使う（rustls）ため、それぞれを有効にする。
 reqwest = { version = "0.13", features = ["form", "json", "rustls"] }
+# BOXの設定ファイルの秘密情報を、serdeで読み込むため、serdeを有効にする。
 secrecy = { version = "0.10", features = ["serde"] }
-serde = { version = "1", features = ["derive"] }
+# APIのリクエストとレスポンスのシリアライズとデシリアライズを、deriveで実装するため、deriveを有効にする。
+serde      = { version = "1", features = ["derive"] }
 serde_json = "1"
-sha1 = "0.11"
-thiserror = "2"
+sha1       = "0.11"
+thiserror  = "2"
+# 日時の書式化と解析（formattingとparsing）、およびserdeでのRFC 3339の日時の扱い（serde）を使う。
 time = { version = "0.3", features = ["formatting", "parsing", "serde"] }
 # ライブラリが使用する機能だけを有効にする。`#[tokio::main]`や`tokio::join!`はテストとサンプルだけが使用する。
 tokio   = { version = "1", features = ["rt", "sync", "time", "fs", "io-util"] }
 tracing = "0.1"
-uuid    = { version = "1", features = ["v4"] }
+# UUIDをランダムに生成するため、v4を有効にする。
+uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
-anyhow             = "1"
-rstest             = "0.28"
-tempfile           = "3"
-time               = { version = "0.3", features = ["macros"] }
-tokio              = { version = "1", features = ["rt-multi-thread", "macros", "net"] }
+anyhow   = "1"
+rstest   = "0.28"
+tempfile = "3"
+# テストで、日時のリテラルのマクロを使うため、macrosを追加する。
+time = { version = "0.3", features = ["macros"] }
+# テストとサンプルで、#[tokio::main]と#[tokio::test]を使うため、rt-multi-threadとmacrosを追加する。
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+# サンプルで、ログの水準を環境変数で指定し（env-filter）、ログを出力する（fmt）ため、それぞれを有効にする。
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 wiremock           = "0.6"
 
 [lints.rust]
+unsafe_code = "forbid"
 # 公開項目のドキュメントの漏れを検出する
 missing_docs = "warn"
 
 [lints.clippy]
+all      = { level = "warn", priority = -1 }
 pedantic = { level = "warn", priority = -1 }
 # 日本語のドキュメントでは、英字と日本語が連続する語を識別子と誤認するため無効にする
-doc_markdown = "allow"
+dbg_macro     = "warn"
+doc_markdown  = "allow"
+todo          = "warn"
+unimplemented = "warn"
+unwrap_used   = "warn"
