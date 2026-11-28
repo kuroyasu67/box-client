@@ -13,9 +13,10 @@ updates:
       day: monday
       time: "00:00"
       timezone: Asia/Tokyo
-    # 公開の直後に取り下げられた版や、乗っ取られて公開された版を取り込まないよう、公開から3日を待つ。
+    # 公開の直後に取り下げられた版や、乗っ取られて公開された版を取り込まないよう、公開から7日を待つ。
+    # zizmorは、7日より短いcooldownを指摘する。
     cooldown:
-      default-days: 3
+      default-days: 7
     # 依存クレートの脆弱性は、間接的な依存で報告されることが多いため、間接的な依存もCargo.lockで更新する。
     allow:
       - dependency-type: all
@@ -34,7 +35,7 @@ updates:
       time: "00:00"
       timezone: Asia/Tokyo
     cooldown:
-      default-days: 3
+      default-days: 7
 
   # Dependabotは、コミットのハッシュで指定したActionsのハッシュと、版のコメントを更新する。
   - package-ecosystem: github-actions
@@ -45,7 +46,7 @@ updates:
       time: "00:00"
       timezone: Asia/Tokyo
     cooldown:
-      default-days: 3
+      default-days: 7
     groups:
       github-actions:
         patterns: ["*"]
@@ -60,4 +61,4 @@ updates:
       time: "00:00"
       timezone: Asia/Tokyo
     cooldown:
-      default-days: 3
+      default-days: 7
